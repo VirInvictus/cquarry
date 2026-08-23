@@ -17,3 +17,6 @@ The canonical read-only SQLite database layer and search grammar engine for Cali
 - `src/cquarry/helpers.py`: Common domain-specific logic (star ratings, JPEG/PNG header sniffing, author normalization).
 - `src/cquarry/config.py`: Default path configuration .
 - `tests/`: Extensive unit tests imported from the original CalibreQuarry repository.
+
+## Cross-Repo Implementation Rule
+If any major update or new feature is added to `cquarry`, you MUST immediately assess and implement it throughout `~/.gitrepos/CalibreQuarry`, `~/.gitrepos/Bindery`, and `~/.gitrepos/Hermitage` if the update logically fits their respective domains. Keep the entire Calibre ecosystem synchronized with `cquarry`'s latest capabilities.
