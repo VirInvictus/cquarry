@@ -15,5 +15,5 @@ The canonical read-only SQLite database layer and search grammar engine for Cali
 - `src/cquarry/db.py`: `CalibreDB` connection management, snapshot fallback for locked databases, schema mapping.
 - `src/cquarry/search.py`: Lexer, AST Parser, and Evaluator for Calibre's search grammar.
 - `src/cquarry/helpers.py`: Common domain-specific logic (star ratings, JPEG/PNG header sniffing, author normalization).
-- `src/cquarry/config.py`: Default path configuration and version pinning.
+- `src/cquarry/config.py`: Default path configuration .
 - `tests/`: Extensive unit tests imported from the original CalibreQuarry repository.

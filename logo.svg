@@ -1,0 +1,68 @@
+<svg width="100%" viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
+<style>
+  :root {
+    --bg-opacity: 0.08;
+    --stroke: #8490a0;
+    --text-primary: #5a6270;
+    --text-secondary: #8490a0;
+    --rect-fill: #5a6270;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-opacity: 0.15;
+      --stroke: #a0acbc;
+      --text-primary: #d0d7e0;
+      --text-secondary: #a0acbc;
+      --rect-fill: #d0d7e0;
+    }
+  }
+  .stroke-color { stroke: var(--stroke); }
+  .fill-color { fill: var(--stroke); fill-opacity: var(--bg-opacity); }
+  .text-p { fill: var(--text-primary); }
+  .text-s { fill: var(--text-secondary); }
+  .rect-f { fill: var(--rect-fill); }
+</style>
+
+<rect x="40" y="40" width="600" height="240" fill="none" class="stroke-color" stroke-width="0.5"/>
+
+<rect x="40" y="40" width="600" height="32" class="fill-color"/>
+<line x1="40" y1="72" x2="640" y2="72" class="stroke-color" stroke-width="0.5"/>
+
+<circle cx="60" cy="56" r="5" fill="none" class="stroke-color" stroke-width="0.5"/>
+<circle cx="78" cy="56" r="5" fill="none" class="stroke-color" stroke-width="0.5"/>
+<circle cx="96" cy="56" r="5" fill="none" class="stroke-color" stroke-width="0.5"/>
+
+<text x="340" y="59" text-anchor="middle" font-family="'SF Mono','Cascadia Code','JetBrains Mono','Fira Code',Consolas,'Liberation Mono',Menlo,monospace" font-size="11" class="text-s" font-weight="400">~/Calibre $ cquarry</text>
+
+<g opacity="0.06">
+  <rect x="80" y="100" width="18" height="24" class="rect-f" rx="1"/>
+  <rect x="102" y="96" width="18" height="28" class="rect-f" rx="1"/>
+  <rect x="124" y="102" width="18" height="22" class="rect-f" rx="1"/>
+  <rect x="146" y="94" width="18" height="30" class="rect-f" rx="1"/>
+  <rect x="168" y="98" width="18" height="26" class="rect-f" rx="1"/>
+  <rect x="190" y="104" width="18" height="20" class="rect-f" rx="1"/>
+  <rect x="212" y="92" width="18" height="32" class="rect-f" rx="1"/>
+  <rect x="234" y="100" width="18" height="24" class="rect-f" rx="1"/>
+
+  <rect x="444" y="98" width="18" height="26" class="rect-f" rx="1"/>
+  <rect x="466" y="92" width="18" height="32" class="rect-f" rx="1"/>
+  <rect x="488" y="102" width="18" height="22" class="rect-f" rx="1"/>
+  <rect x="510" y="96" width="18" height="28" class="rect-f" rx="1"/>
+  <rect x="532" y="104" width="18" height="20" class="rect-f" rx="1"/>
+  <rect x="554" y="94" width="18" height="30" class="rect-f" rx="1"/>
+  <rect x="576" y="100" width="18" height="24" class="rect-f" rx="1"/>
+  <rect x="598" y="96" width="18" height="28" class="rect-f" rx="1"/>
+</g>
+
+<text x="340" y="155" text-anchor="middle" font-family="'SF Mono','Cascadia Code','JetBrains Mono','Fira Code',Consolas,'Liberation Mono',Menlo,monospace" font-size="48" class="text-p" font-weight="500" letter-spacing="-2">CalibreQuarry</text>
+
+<line x1="140" y1="190" x2="540" y2="190" class="stroke-color" stroke-width="0.5"/>
+
+<text x="340" y="212" text-anchor="middle" font-family="'SF Mono','Cascadia Code','JetBrains Mono','Fira Code',Consolas,'Liberation Mono',Menlo,monospace" font-size="11" class="text-s" font-weight="400" letter-spacing="3">CATALOG · AUDIT · SERIES · EXPORT</text>
+
+<rect x="40" y="252" width="600" height="28" class="fill-color"/>
+<line x1="40" y1="252" x2="640" y2="252" class="stroke-color" stroke-width="0.5"/>
+
+<text x="56" y="270" font-family="'SF Mono','Cascadia Code','JetBrains Mono','Fira Code',Consolas,'Liberation Mono',Menlo,monospace" font-size="10" class="text-s" font-weight="400">--catalog  --all-wings  --stats  --audit  --recent  --series  --export  --wings</text>
+
+</svg>

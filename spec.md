@@ -1,4 +1,4 @@
-# cquarry — Library Specification
+# cquarry: Library Specification
 
 **Version:** 1.0.0  
 **Language:** Python 3.14+  
@@ -14,7 +14,7 @@ Provide a unified, read-only Calibre database and search evaluation engine for t
 
 ### 2.1 The Database Layer (`db.py`)
 - **Connection Management:** Uses `sqlite3` with `mode=ro` URIs.
-- **Lock Escapes:** If `SELECT 1 FROM books` raises an OperationalError due to a lock, `_make_snapshot()` creates a tempfile copy of `metadata.db` (including `-wal` and `-shm`) and routes queries to the snapshot.
+- **Lock Escapes:** If `SELECT 1 FROM books` raises an OperationalError due to a lock, `_open()` creates a tempfile copy of `metadata.db` (including `-wal` and `-shm`) and routes queries to the snapshot.
 - **Data Caching:** The result of `get_all_books()` is heavily cached in-memory.
 
 ### 2.2 The Search Engine (`search.py`)
