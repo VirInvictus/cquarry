@@ -87,3 +87,18 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
 - [ ] **Identifier Batch Updater**: Build a safe write pipeline to append EAV records into the `identifiers` table.
   - **Downstream Upgrades**:
     - *CalibreQuarry*: Allow `fetch_library_codes.py` to inject ISBNs/LCCs directly into the DB safely without requiring Calibre to be closed, if we implement safe SQLite locking.
+
+## Phase 4: Full Search Parity & Stability (Identified via Research)
+*Context: Closing the feature gaps between `cquarry`'s search engine and Calibre's native search query parser.*
+
+- [ ] **Fix Author Comma Splitting**: Remove `GROUP_CONCAT` in `get_all_books()` for authors, tags, and formats, and instead fetch their discrete items directly from the normalized link tables to prevent names like "Strunk, Jr." from splitting incorrectly.
+- [ ] **Add Missing Built-in Locations**: Implement `size` (DT_FLOAT), `pages` (DT_INT), `title_sort`, and `series_sort` to the search engine aliases.
+- [ ] **Saved Search Resolution (`search:`)**: Implement interpolation of `saved_searches` from the `preferences` table.
+- [ ] **Multi-Valued Count Operator (`#`)**: Add support for `#>X` and `#=X` syntax across all multi-valued locations (tags, authors, formats, identifiers).
+- [ ] **Fix Custom Column Mappings**: Fix the `DT_RATING` mapping bug for custom rating columns and dynamically register `#{label}_index` for custom series columns.
+- [ ] **Language Canonicalization**: Implement a `lang_map` to canonicalize language queries (e.g. `languages:English` -> `eng`).
+- [ ] **Advanced Date Separators**: Support slash (`/`) date separators (`YYYY/MM/DD`) alongside hyphens.
+- [ ] **Expand Boolean Keywords**: Add support for `checked`, `unchecked`, `blank`, `empty`, and `_`-prefixed variants for tristate boolean logic parity.
+- [ ] **Strict Error Handling**: Raise `ParseException` for unknown Virtual Libraries (`vl:Unknown`) instead of failing silently.
+- [ ] **Expand the `all` Field**: Dynamically scan custom text columns when resolving bare search terms.
+- [ ] **Component Matching (`=..`)**: Expand `_match_text` to support Calibre's `.` (subtree) and `..` (component) exact match modifiers across all text fields.
