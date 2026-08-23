@@ -1,3 +1,8 @@
+## v1.0.1 (2026-08-23)
+
+### Performance
+- **Lazy-Loaded Comments & Custom Columns:** `db.py` no longer eagerly loads the `comments` HTML payloads or large custom column tables into memory when building the search view. These are now fetched from SQLite strictly on-demand per book ID during search expression evaluation. This massively reduces memory footprint and snapshot copy time for libraries with extensive HTML comments.
+
 ## v1.0.0 (2026-08-23)
 
 ### Extract & Launch
