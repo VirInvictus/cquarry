@@ -28,3 +28,26 @@ print(f"Found {len(matching_ids)} highly rated Sci-Fi books.")
 ```sh
 pip install git+https://github.com/VirInvictus/cquarry.git
 ```
+
+## Public API
+
+`CalibreDB(db_path: str)`
+*   `get_all_books() -> list[dict[str, Any]]`: Returns a list of all books in the library, pre-hydrated with `authors`, `tags`, `series`, `rating`, `publisher`, and `languages`.
+*   `get_custom_columns() -> dict[str, dict[str, Any]]`: Returns a dictionary of all user-defined custom columns in the library.
+*   `load_custom_column(col_name: str) -> dict[int, Any]`: Returns a dictionary mapping `book_id` to the value of the specified custom column.
+*   `get_identifiers(book_id: int) -> dict[str, str]`: Returns all identifiers (e.g. `isbn`, `amazon`) for a specific book.
+*   `get_virtual_libraries() -> dict[str, str]`: Returns a dictionary mapping Virtual Library names to their Calibre search expression.
+*   `search(query: str) -> set[int]`: Parses a Calibre search expression and returns a set of matching `book_id`s.
+*   `resolve_vl(vl_name: str) -> set[int]`: Returns a set of `book_id`s that belong to the specified Virtual Library.
+
+## Search Grammar Support
+
+`cquarry` implements a recursive-descent parser that is built to match Calibre's native search engine. It fully supports:
+*   **Logical operators**: `and`, `or`, `not`.
+*   **Relational operators**: `=`, `:`, `>`, `>=`, `<`, `<=`.
+*   **Exact and Substring Matches**: `=Term` (exact), `Term` (substring), `~Term` (regex).
+*   **Hierarchical Fields**: Tag searches (e.g., `tags:Fiction.SciFi`) correctly respect hierarchy.
+*   **Date Math**: `pubdate:>30daysago`.
+*   **Custom Columns**: Evaluated using the `#column_name:` prefix.
+*   **Virtual Library Cross-References**: `vl:"Library Name"` to nest queries.
+
