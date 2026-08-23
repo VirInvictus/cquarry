@@ -6,29 +6,84 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
 *Context: Improving our query capabilities using existing read-only mechanics (ref: database_report.md Sections 1-4).*
 
 - [ ] **Single-Entity Fetching**: Add `get_book(book_id: int) -> dict` to fetch single records without full-library scanning.
+  - **Downstream Upgrades**: 
+    - *CalibreQuarry*: Use this in `reconcile_file_metadata.py --id X` to avoid loading the whole DB.
+    - *Bindery*: Use when auditing a single isolated file.
+    - *Hermitage*: Use when a user clicks a book to fetch deep metadata just-in-time rather than storing everything in RAM.
+
 - [ ] **Combined Search & Fetch**: Add `search_books(query) -> list[dict]` to immediately yield hydrated metadata from search sets.
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Simplify `cquarry_cli --search` pipeline (skip the lookup cross-reference).
+    - *Hermitage*: Use this to power the GTK UI search bar directly.
+
 - [ ] **Format Path Resolution**: Implement `get_format_path(book_id, fmt)`. Resolve `(library_root / books.path / data.name + format)` dynamically (ref: Report Sec 2).
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Replace manual path joins in `catalog.py` and `export.py`.
+    - *Bindery*: Replace manual string concat when analyzing target files.
+    - *Hermitage*: Use when launching a book in an external reader.
+
 - [ ] **Saved Search Resolution**: Parse the JSON `preferences` table to support `search:"<name>"` interpolation in `SearchEngine` queries (ref: Report Sec 4).
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Allow users to run `cquarry_cli --search 'search:"My Search"'`.
+    - *Hermitage*: Automatically populate the sidebar with Saved Searches alongside Virtual Libraries.
+
 - [ ] **Virtual Library UI Metadata**: Expose hidden/ordering JSON lists from `preferences` (`virt_libs_hidden`, `virt_libs_order`) so consumers can match Calibre's exact tab layout.
-- [ ] **Hierarchical Taxonomy Parsing**: Provide a helper to convert dot-delimited flat `tags` (e.g., `Fiction.Science Fiction`) into native Python nested dictionaries for TreeView consumers.
-- [ ] **Safe Custom Column Reads**: Transition `load_custom_columns` to check `sqlite_master` for the explicit existence of `books_custom_column_N_link` instead of relying on the semantic `is_multiple` flag (ref: Report Sec 3).
-- [ ] **Star Rating Conversion**: Expose a standard `normalize_rating(int)` method converting internal 1-10 scales to 0.0-5.0 float stars (ref: Report Sec 1).
+  - **Downstream Upgrades**:
+    - *Hermitage*: Update the GTK sidebar to hide and order tabs exactly as the user's Calibre GUI does.
+
+- [ ] **Hierarchical Taxonomy Parsing**: Provide a helper to convert dot-delimited flat `tags` (e.g., `Fiction.Science Fiction`) into native Python nested dictionaries.
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Enhance `analytics tags` command to print actual tree structures.
+    - *Hermitage*: Render a collapsible TreeView for tags in the GTK sidebar.
+
+- [ ] **Safe Custom Column Reads**: Transition `load_custom_columns` to check `sqlite_master` for the explicit existence of `books_custom_column_N_link`.
+  - **Downstream Upgrades**: No major changes required in consumers, this is an internal stability fix to prevent SQLite OperationalErrors.
+
+- [ ] **Star Rating Conversion**: Expose a standard `normalize_rating(int)` method converting internal 1-10 scales to 0.0-5.0 float stars.
+  - **Downstream Upgrades**:
+    - *Hermitage*: Replace local `rating / 2.0` logic with the upstream API.
+    - *CalibreQuarry*: Standardize output rendering of ratings.
 
 ## Phase 2: Metadata Portability & Export
 *Context: Enabling users and agents to safely extract more than just book catalog metadata.*
 
 - [ ] **Extract Annotations**: Query the `annotations` table to extract e-reader highlights, bookmarks, and user notes as JSON payload.
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Add a `--export-annotations` command to dump highlights.
+    - *Hermitage*: Add an "Annotations" tab to the book details view to display highlights.
+
 - [ ] **Extract Reading Progress**: Map the `last_read_positions` table to track reading velocity/progress fractions per device.
-- [ ] **Plugin Data Bridges**: Expose the `books_plugin_data` table to enable `cquarry` to read third-party Goodreads sync, WordCount, or ISBN metadata without requiring the plugin itself.
-- [ ] **Comments Parsing Utilities**: Add utilities to safely strip or sanitize the raw HTML payloads found in the `comments` table before handing them to CLI/UI consumers.
+  - **Downstream Upgrades**:
+    - *Hermitage*: Show a progress bar indicating how far the user is in a book based on the last device sync.
+
+- [ ] **Plugin Data Bridges**: Expose the `books_plugin_data` table to enable `cquarry` to read third-party Goodreads sync, WordCount, or ISBN metadata.
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Allow `catalog.py` to optionally print Goodreads IDs or fetched word counts.
+
+- [ ] **Comments Parsing Utilities**: Add utilities to safely strip or sanitize the raw HTML payloads found in the `comments` table.
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Prevent raw HTML tags from leaking into terminal outputs during spot checks.
+    - *Hermitage*: Sanitize text before feeding it to GTK Label rendering to prevent markup injection.
+
 - [ ] **Extract Conversion Profiles**: Query the `conversion_options` table to back up specific book conversion pipeline recipes.
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Add an audit script to find books with manual conversion overrides.
 
 ## Phase 3: Write Capabilities (Long-Term)
-*Context: Establishing safe write paths for agents and scripts without destroying database integrity via missing triggers or unhandled UDFs (ref: database_report.md Section 5).*
+*Context: Establishing safe write paths for agents and scripts without destroying database integrity.*
 
-- [ ] **UDF Registration Framework**: Implement a standard `register_udfs(conn)` method injecting `title_sort()`, `uuid4()`, and `author_to_author_sort()` into the SQLite connection to prevent trigger execution failures.
-- [ ] **Collation Injection**: Register `PYNOCASE` collation globally on write connections.
-- [ ] **Title Update API**: Build `update_title(book_id, new_title)` that handles `last_modified` timestamp updates and allows `books_update_trg` to naturally rewrite the `sort` field.
-- [ ] **Safe Tag Application**: Build `add_tag(book_id, tag_string)` handling the four-step tag creation and link process while preserving comma delimiters.
-- [ ] **Safe Tag Removal**: Build `remove_tag(book_id, tag_string)` that aggressively checks for `fkc_delete_on_tags` aborts and prunes orphaned taxonomy categories cleanly.
-- [ ] **Identifier Batch Updater**: Build a safe write pipeline to append EAV records into the `identifiers` table without violating `UNIQUE(book, type)`.
+- [ ] **UDF Registration Framework**: Implement a standard `register_udfs(conn)` method injecting `title_sort()`, `uuid4()`, etc.
+  - **Downstream Upgrades**: Internal prep for write-capable tools. 
+
+- [ ] **Title Update API**: Build `update_title(book_id, new_title)` that handles `last_modified` timestamp updates.
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Allow `reconcile_file_metadata.py` to optionally fix titles directly in the DB instead of just the files.
+
+- [ ] **Safe Tag Application / Removal**: Build `add_tag(book_id, tag_string)` and `remove_tag(book_id, tag_string)`.
+  - **Downstream Upgrades**:
+    - *Hermitage*: Add a context menu option to "Mark as Read" (applying a specific tag).
+    - *Bindery*: Automatically tag books as "Audited" or "Flagged" when issues are found.
+
+- [ ] **Identifier Batch Updater**: Build a safe write pipeline to append EAV records into the `identifiers` table.
+  - **Downstream Upgrades**:
+    - *CalibreQuarry*: Allow `fetch_library_codes.py` to inject ISBNs/LCCs directly into the DB safely without requiring Calibre to be closed, if we implement safe SQLite locking.
