@@ -102,3 +102,21 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
 - [ ] **Strict Error Handling**: Raise `ParseException` for unknown Virtual Libraries (`vl:Unknown`) instead of failing silently.
 - [ ] **Expand the `all` Field**: Dynamically scan custom text columns when resolving bare search terms.
 - [ ] **Component Matching (`=..`)**: Expand `_match_text` to support Calibre's `.` (subtree) and `..` (component) exact match modifiers across all text fields.
+
+## Phase 5: Sweep & Data Integrity Hardening (2026-08-23)
+*Context: Found critical evaluation bugs and data corruption risks during a codebase sweep.*
+
+### Bugs to Fix
+- [ ] **JPEG Dimension Sniffer Hang:** Add a sanity check (`length < 2`) in `helpers.py:get_jpeg_size()` to prevent infinite loops on corrupt images.
+- [ ] **AST Corruption on Quoted Colons:** Fix `_base_token` to properly append quoted string values (e.g. `identifiers:isbn:"..."`) instead of misinterpreting them.
+- [ ] **Custom Rating Column Datatype:** Change custom rating mappings from `DT_FLOAT` to `DT_RATING` to restore 0-rating `false` semantics.
+- [ ] **Missing Series Index Registration:** Dynamically register `#{label}_index` for custom series columns to enable position filtering.
+- [ ] **Author/Tag Comma Splitting:** Stop using `GROUP_CONCAT` for authors/tags. Build string lists directly to prevent names with literal commas from splitting in half.
+- [ ] **Virtual Library Hardening:** Make `vl_expression()` case-insensitive and raise `ParseException` on unknown VL names instead of silently failing.
+- [ ] **Exact Date Prefix Failure:** Strip match kinds (e.g. `=true`) before evaluating boolean matches in `_match_date()`.
+- [ ] **Version Sync:** Update `__init__.py`, `config.py`, `README.md`, and `spec.md` to 1.0.1.
+
+### Refactoring & Growth
+- [ ] **Eliminate N+1 Comment Queries:** Eagerly cache or batch-fetch comments during `_build_search_view()` to prevent thousands of single-row queries.
+- [ ] **Drop `re.Scanner`:** Replace undocumented `re.Scanner` with standard `re.finditer` for pure stdlib compliance.
+- [ ] **Saved Searches Interpolation:** Support Calibre's `search:"Name"` by parsing the `preferences` table.
