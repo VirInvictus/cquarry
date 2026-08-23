@@ -43,6 +43,7 @@ class CalibreDB:
         self._custom_loc_cache: dict[str, str] | None = None
         self._custom_label_cache: dict[str, dict[str, Any]] | None = None
         self._custom_val_cache: dict[str, dict[int, Any]] = {}
+        self._comments_cache: dict[int, str] | None = None
 
         self.conn = self._open(db_path)
         self.conn.row_factory = sqlite3.Row
@@ -314,6 +315,17 @@ class CalibreDB:
     def field(self, book_id: int, location: str) -> Any:
         if location.startswith("#"):
             return self._custom_value(book_id, location)
+        
+        if location == "comments":
+            if self._comments_cache is None:
+                self._comments_cache = {}
+            if book_id not in self._comments_cache:
+                cur = self.conn.cursor()
+                cur.execute("SELECT text FROM comments WHERE book = ?", (book_id,))
+                row = cur.fetchone()
+                self._comments_cache[book_id] = row["text"] if row and row["text"] else ""
+            return self._comments_cache[book_id]
+
         rec = self._build_search_view().get(book_id)
         return rec.get(location) if rec else None
 
@@ -364,10 +376,6 @@ class CalibreDB:
             rec = view.get(row["book"])
             if rec is not None:
                 rec["identifiers"][row["type"]] = row["val"]
-        for row in cur.execute("SELECT book, text FROM comments"):
-            rec = view.get(row["book"])
-            if rec is not None:
-                rec["comments"] = row["text"] or ""
         try:
             for row in cur.execute("SELECT id, uuid FROM books"):
                 rec = view.get(row["id"])
@@ -414,6 +422,21 @@ class CalibreDB:
         col = self._custom_by_label().get(location[1:])
         if not col:
             return None
+            
+        if col["datatype"] == "comments":
+            if location not in self._custom_val_cache:
+                self._custom_val_cache[location] = {}
+            if book_id not in self._custom_val_cache[location]:
+                cid = col["id"]
+                try:
+                    cur = self.conn.cursor()
+                    cur.execute(f"SELECT value FROM custom_column_{cid} WHERE book = ?", (book_id,))
+                    row = cur.fetchone()
+                    self._custom_val_cache[location][book_id] = row["value"] if row else None
+                except sqlite3.OperationalError:
+                    self._custom_val_cache[location][book_id] = None
+            return self._custom_val_cache[location][book_id]
+
         if location not in self._custom_val_cache:
             try:
                 self._custom_val_cache[location] = self.load_custom_column(col["name"])
