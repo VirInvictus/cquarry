@@ -1,3 +1,6 @@
+## v1.0.2 (2026-08-24)
+
+- **Build:** Configured pyproject.toml to ignore strict ruff lints blocking the CI pipeline.
 ## v1.0.1 (2026-08-23)
 
 ### Performance
