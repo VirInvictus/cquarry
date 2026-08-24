@@ -21,7 +21,6 @@ from cquarry.db import CalibreDB
 
 # Open a library (creates a snapshot if Calibre has the lock)
 with CalibreDB("~/Calibre Library/metadata.db") as db:
-
     # Fetch all books with pre-joined metadata
     books = db.get_all_books()
 
@@ -200,6 +199,7 @@ Persistent configuration for database path discovery.
 
 ```python
 import cquarry
+
 print(cquarry.__version__)  # "1.0.0"
 ```
 

@@ -315,7 +315,7 @@ class CalibreDB:
     def field(self, book_id: int, location: str) -> Any:
         if location.startswith("#"):
             return self._custom_value(book_id, location)
-        
+
         if location == "comments":
             if self._comments_cache is None:
                 self._comments_cache = {}
@@ -323,7 +323,9 @@ class CalibreDB:
                 cur = self.conn.cursor()
                 cur.execute("SELECT text FROM comments WHERE book = ?", (book_id,))
                 row = cur.fetchone()
-                self._comments_cache[book_id] = row["text"] if row and row["text"] else ""
+                self._comments_cache[book_id] = (
+                    row["text"] if row and row["text"] else ""
+                )
             return self._comments_cache[book_id]
 
         rec = self._build_search_view().get(book_id)
@@ -422,7 +424,7 @@ class CalibreDB:
         col = self._custom_by_label().get(location[1:])
         if not col:
             return None
-            
+
         if col["datatype"] == "comments":
             if location not in self._custom_val_cache:
                 self._custom_val_cache[location] = {}
@@ -430,9 +432,14 @@ class CalibreDB:
                 cid = col["id"]
                 try:
                     cur = self.conn.cursor()
-                    cur.execute(f"SELECT value FROM custom_column_{cid} WHERE book = ?", (book_id,))
+                    cur.execute(
+                        f"SELECT value FROM custom_column_{cid} WHERE book = ?",
+                        (book_id,),
+                    )
                     row = cur.fetchone()
-                    self._custom_val_cache[location][book_id] = row["value"] if row else None
+                    self._custom_val_cache[location][book_id] = (
+                        row["value"] if row else None
+                    )
                 except sqlite3.OperationalError:
                     self._custom_val_cache[location][book_id] = None
             return self._custom_val_cache[location][book_id]
