@@ -1,9 +1,9 @@
-import unittest
+import os
+import shutil
 import sqlite3
 import tempfile
-import shutil
-import os
-from pathlib import Path
+import unittest
+
 from cquarry.db import CalibreDB
 
 

@@ -12,3 +12,6 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/VirInvictus/cquarry"
+
+[tool.ruff.lint]
+ignore = ["S110", "BLE001", "RUF012", "DTZ011", "PIE810", "FURB162"]
