@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.0.3  
+**Version:** 1.1.0  
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -18,8 +18,8 @@ Provide a single, canonical, read-only Calibre database and search evaluation en
 These are invariants. Violating any of them is a spec breach.
 
 - **No external dependencies.** The package runs on the Python 3.14+ standard library alone: `sqlite3`, `re`, `json`, `unicodedata`, `struct`, `datetime`, `os`, `sys`, `shutil`, `tempfile`, `urllib.parse`. No PyPI packages, no optional extras.
-- **Read-only by design.** cquarry will never write to `metadata.db`. It opens the database with `?mode=ro` and issues only `SELECT` statements. The lock-escape path copies the database to a temp file rather than attempting a write lock. If a write API is ever added (see roadmap Phase 3), it will be a separate, explicitly opt-in module with its own safety contract; it will never be reachable through the read-only `CalibreDB` class.
-- **Search parity.** `SearchEngine` must behave like Calibre's native search bar. This includes implicit AND evaluation, hierarchical tag anchoring, identifier keypair routing, date math with precision levels, custom column type dispatch, and virtual library cross-reference recursion detection. Documented deviations (see §5) are acceptable only when they are dependency-bound (ICU, the `regex` module) and do not change the result set for queries a user would plausibly write.
+- **Read-only by design.** The read path (`CalibreDB`) never writes to `metadata.db`: it opens the database with `?mode=ro` and issues only `SELECT` statements. The lock-escape path copies the database to a temp file rather than attempting a write lock. Write access exists only in the separate, explicitly opt-in `cquarry.write` module (§3.6), which is never reachable through the read-only `CalibreDB` class and must be imported on purpose.
+- **Search parity.** `SearchEngine` must behave like Calibre's native search bar. This includes implicit AND evaluation, hierarchical tag anchoring, identifier keypair routing, date math with precision levels, custom column type dispatch, saved-search interpolation, multi-valued count operators, language canonicalization, and virtual library cross-reference recursion detection. Documented deviations (see §5) are acceptable only when they are dependency-bound (ICU, the `regex` module) or GUI-state-bound, and do not change the result set for queries a user would plausibly write.
 - **No silent data loss.** The lock-escape snapshot copies `-wal` and `-shm` alongside the main database file. A snapshot that omits these can silently read stale data. The temp files are cleaned up on `close()` and on context manager exit.
 
 ## 3. Architecture
@@ -40,7 +40,7 @@ These are invariants. Violating any of them is a spec breach.
 
 A three-stage pipeline.
 
-**Stage 1: Lexer.** A `re.Scanner` tokenizes the input into opcodes (`(`/`)`), words, and quoted words. Backslash escapes (`\\`, `\"`, `\(`, `\)`) are handled by a replacement/unreplacement cycle using low control characters as sentinels.
+**Stage 1: Lexer.** A `re.finditer` scanner over a single documented pattern tokenizes the input into opcodes (`(`/`)`), words (including `@...:` template tokens), and quoted words. Backslash escapes (`\\`, `\"`, `\(`, `\)`) are handled by a replacement/unreplacement cycle using low control characters as sentinels. Unmatched characters raise `ParseException`. (v1.1: replaced the undocumented `re.Scanner`.)
 
 **Stage 2: Parser.** A recursive-descent parser (`_Parser`) builds an AST of `["and", lhs, rhs]`, `["or", lhs, rhs]`, `["not", child]`, and `["token", location, query]` nodes. Operator precedence: `not` binds tightest, then `and` (including implicit AND between adjacent terms), then `or`. Parentheses override precedence. A bare term (no `location:` prefix) is assigned location `"all"`. Raises `ParseException` on malformed input.
 
@@ -53,30 +53,40 @@ For `token` nodes, the evaluator dispatches to a type-specific matcher based on 
 
 **Match kinds.** The query string prefix determines the match semantics:
 - No prefix: substring match (case- and accent-folded via NFKD decomposition).
-- `=`: exact match (folded).
+- `=`: exact match (folded). Leading-dot modifiers apply to every text field: `.foo` matches the subtree rooted at `foo`, `..foo` matches a single dot-delimited component exactly.
 - `~`: regex match (stdlib `re`, case-insensitive).
 - `^`: accent-folded substring (same as default; exists for Calibre grammar compatibility).
 - `\`: escape (the next character is literal).
 
-**Hierarchical tags.** The `tags` location uses anchored prefix matching: query `Foo` matches tag `Foo` and any tag starting with `Foo.` (e.g. `Foo.Bar`, `Foo.Bar.Baz`), but not `Foobar`. This is a cquarry invariant, not a Calibre port; Calibre uses raw substring matching by default. The exact-match prefix (`=`) supports Calibre's leading-`.` and `..` modifiers for subtree and component matching.
+**Hierarchical tags.** The `tags` location uses anchored prefix matching: query `Foo` matches tag `Foo` and any tag starting with `Foo.` (e.g. `Foo.Bar`, `Foo.Bar.Baz`), but not `Foobar`. This is a cquarry invariant, not a Calibre port; Calibre uses raw substring matching by default.
 
-**Numeric fields.** `rating`, `id`, `series_index`, and numeric custom columns support relational operators (`=`, `>`, `<`, `>=`, `<=`, `!=`) and the keywords `true`/`false` for presence/absence. Size suffixes (`k`, `m`, `g`) are supported. Rating `false` matches `None` or `0`; rating `true` matches any positive value.
+**Multi-valued count operator.** Any multi-valued location (`authors`, `formats`, `languages`, `tags`, `identifiers`) accepts `#<relop><n>` comparing the value count: `tags:#>3`, `identifiers:#=0`. Malformed counts raise `ParseException`.
 
-**Date fields.** `pubdate`, `timestamp`, `last_modified`, and date custom columns support the same relational operators, plus the keywords `today`, `yesterday`, `thismonth`, and `N daysago`. Dates can be specified at year (`2024`), month (`2024-06`), or day (`2024-06-15`) precision; the comparison respects the precision level. Calibre's undefined-date sentinels (`0101-01-01`, `0100-01-01`) are treated as `None`.
+**Language canonicalization.** The `languages` location canonicalizes English names to ISO 639-2 codes before matching (`English` → `eng`); unknown tokens pass through as raw text. Multi-token queries split on commas and canonicalize each token independently.
+
+**Numeric fields.** `rating`, `id`, `series_index`, `size`, `pages`, and numeric custom columns support relational operators (`=`, `>`, `<`, `>=`, `<=`, `!=`) and presence/absence keywords: `true`/`false` plus the tristate vocabulary `checked`, `unchecked`, `blank`, `empty` and `_`-prefixed variants. Size suffixes (`k`, `m`, `g`) are supported on all float/int locations, so `size:>10m` works. Rating `false`/`blank` matches `None` or `0`; rating `true`/`checked` matches any positive value.
+
+**Date fields.** `pubdate`, `timestamp`, `last_modified`, and date custom columns support the same relational operators, plus the keywords `today`, `yesterday`, `thismonth`, and `N daysago`. Dates can be specified at year (`2024`), month (`2024-06`), or day (`2024-06-15`) precision, with either `-` or `/` separators; the comparison respects the precision level. Calibre's undefined-date sentinels (`0101-01-01`, `0100-01-01`) are treated as `None`.
 
 **Identifiers.** The `identifiers` location supports keypair search: `identifiers:isbn:VALUE` matches the `isbn` key with a value match, `identifiers:true` tests for any identifier, and `isbn:VALUE` is shorthand for `identifiers:=isbn:VALUE`. Match kinds apply independently to both the key and value halves.
 
-**Virtual library cross-references.** `vl:"Name"` resolves the named virtual library's search expression and evaluates it recursively, intersecting the result with the current candidate set. Circular references (`vl:A` where A's expression contains `vl:A`) raise `ParseException`.
+**Virtual library cross-references.** `vl:"Name"` resolves the named virtual library's search expression and evaluates it recursively, intersecting the result with the current candidate set. Circular references raise `ParseException`; unknown names also raise `ParseException` (no silent empty sets). Name resolution is case-insensitive at both engine and DB layers.
+
+**Saved-search interpolation.** `search:"Name"` behaves identically to `vl:` but resolves against the provider's saved searches (Calibre's `preferences.saved_searches`). Nested references compose; cycles and unknown names raise `ParseException`.
+
+**The `all` pseudo-location.** Bare terms search `title`, `authors`, `author_sort`, `series`, `publisher`, `tags`, `comments`, **plus** any custom column whose engine datatype is text-like (text, text_multi, hier). Numeric, date, bool, and identifier custom columns are excluded, mirroring Calibre.
 
 ### 3.3 Helpers (`helpers.py`)
 
 Domain-specific utilities shared across the ecosystem. These are public API; downstream consumers import them.
 
 - **Database discovery** (`find_db`): a four-stage resolution chain (explicit arg, saved config, default paths, interactive prompt).
-- **Rating conversion** (`calibre_rating_to_stars`, `format_stars`): Calibre stores ratings on a 0-10 scale; the portfolio displays them on 0.0-5.0 with Unicode star glyphs.
+- **Rating conversion** (`normalize_rating`, alias `calibre_rating_to_stars`, `format_stars`): Calibre stores ratings on a 0-10 scale; the portfolio displays them on 0.0-5.0 with Unicode star glyphs.
 - **Author formatting** (`normalize_author_display`, `author_sort_key`): comma-separated to ampersand-joined display, with a `primary_only` mode.
 - **Series analysis** (`detect_series_gaps`): given a series' known indices, return the missing integers.
 - **Image dimensions** (`get_image_size`, `get_jpeg_size`, `get_png_size`): header-only dimension reads for cover quality auditing. The JPEG reader seeks through segment markers rather than reading a fixed buffer, so large EXIF/ICC blocks do not hide the SOF.
+- **Comments sanitization** (`strip_html`): reduces comments HTML payloads to plain text — drops tags (including `script`/`style` bodies), unescapes entities, collapses whitespace, converts block boundaries to newlines. Consumers must run raw HTML through this before terminal or GTK label rendering.
+- **Taxonomy parsing** (`tags_to_tree`): builds nested dictionaries from dot-delimited hierarchical tags for tree rendering.
 - **Terminal color** (`color`): TTY-aware ANSI wrapping with predefined codes.
 
 ### 3.4 URI encoding (`db_uri_ro`)
@@ -87,6 +97,18 @@ SQLite's `file:` URI mode parses `?` as query-string and `#` as fragment. A libr
 
 A JSON file at `~/.config/cquarry/config.json` persists the database path across sessions. `get_db_path()` and `set_db_path()` are the read/write interface; `load_config()` and `save_config()` are the underlying I/O. The config is user-facing (the TUI and `find_db()` interactive prompt write to it), not an internal cache.
 
+### 3.6 Write access (`write.py`) — opt-in
+
+`WritableCalibreDB` is the only sanctioned mutation path. It is a distinct class precisely so no read-only code path can reach it.
+
+**Safety contract:**
+- Registers Calibre's trigger dependencies before any statement runs: `title_sort()`, `uuid4()`, and the `PYNOCASE` collation. Calibre's `books_insert_trg` / `books_update_trg` abort any write when these are missing.
+- Opens with a 30 s `busy_timeout` so a running Calibre degrades writes to waiting rather than erroring.
+- Mutations run in explicit `BEGIN IMMEDIATE` transactions and bump `books.last_modified` so Calibre regenerates sidecar `.opf` files.
+- Tag removal deletes link-table rows before possibly pruning the orphaned tag — the order `fkc_delete_on_tags` requires.
+
+**API:** `update_title(book_id, title)` (refreshes `sort` via `title_sort`), `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` (return whether stored state changed), `set_identifier(book_id, type, val)` / `set_identifiers(book_id, pairs)` (EAV upserts honoring `UNIQUE(book, type)`; `None`/blank deletes).
+
 ## 4. Field location table
 
 Canonical locations, their datatypes, and recognized aliases. Custom columns are registered dynamically from the `custom_columns` table and use `#label` as their location token.
@@ -94,8 +116,10 @@ Canonical locations, their datatypes, and recognized aliases. Custom columns are
 | Canonical | Datatype | Aliases |
 |-----------|----------|---------|
 | `title` | text | |
+| `title_sort` | text | |
 | `author_sort` | text | |
 | `series` | text | |
+| `series_sort` | text | |
 | `publisher` | text | |
 | `comments` | text | `comment` |
 | `uuid` | text | |
@@ -105,6 +129,8 @@ Canonical locations, their datatypes, and recognized aliases. Custom columns are
 | `tags` | hier | `tag` |
 | `rating` | rating | |
 | `series_index` | float | |
+| `size` | float (bytes) | |
+| `pages` | int | via `#pages` custom column |
 | `id` | int | |
 | `pubdate` | date | |
 | `timestamp` | date | `date` |
@@ -112,17 +138,19 @@ Canonical locations, their datatypes, and recognized aliases. Custom columns are
 | `identifiers` | identifiers | `identifier`, `ids`, `isbn` |
 | `cover` | bool | |
 
-The `all` pseudo-location (used for bare terms) searches: `title`, `authors`, `author_sort`, `series`, `publisher`, `tags`, `comments`.
+The special locations `vl:"Name"` and `search:"Name"` cross-reference virtual libraries and saved searches. The `all` pseudo-location (used for bare terms) searches: `title`, `authors`, `author_sort`, `series`, `publisher`, `tags`, `comments`, plus every custom column whose engine datatype is text-like.
 
 ## 5. Documented deviations from Calibre
 
-These are permanent, dependency-bound limitations, not bugs.
+These are permanent, dependency- or GUI-bound limitations, not bugs.
 
 1. **Regex engine.** `~` uses stdlib `re`, not the third-party `regex` module. `VERSION1` mode and `\X` (extended grapheme cluster) are unavailable. For the query patterns users actually write, this is transparent.
 2. **Accent/contains folding.** Uses `unicodedata.normalize("NFKD")` with combining-character stripping, not ICU collation. Punctuation-insensitivity (e.g. treating `'` and `'` as equivalent) is not reproduced.
-3. **GPM templates.** `@...:` template expressions are not evaluated. These are a power-user feature that requires Calibre's template engine.
-4. **Saved searches.** `search:"name"` interpolation from the `preferences` table is not yet implemented (roadmap Phase 1).
+3. **GPM templates.** `@...:` template expressions tokenize for parse parity but are not evaluated. These are a power-user feature that requires Calibre's template engine.
+4. **GUI-state locations.** `marked`, `ondevice`, and `in_tag_browser` reflect state that only exists inside Calibre's own UI session; they are not implemented.
 5. **Tag matching default.** `tags:Foo` uses anchored prefix matching (matches `Foo` and `Foo.*`), not Calibre's raw substring matching (which would also match `BarFoo`). This is a deliberate project invariant, not a porting gap; it matches how every consumer in the ecosystem has always treated tags.
+6. **`series_sort` format.** Computed as `"Series [index]"`; Calibre builds an equivalent sort string internally but does not expose its exact formatting contract.
+7. **`pages` sourcing.** There is no native pages table in `metadata.db`; the location resolves through an int custom column labelled `pages` when present, else no book ever matches.
 
 ## 6. Downstream consumers
 
@@ -130,10 +158,10 @@ cquarry is the shared foundation. Changes to its behavior affect all of these:
 
 | Consumer | What it uses |
 |----------|-------------|
-| **CalibreQuarry** (CLI/TUI) | `CalibreDB`, `search()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_all_series()`, `get_tag_counts()`, `find_db()`, `format_stars()`, `normalize_author_display()`, `detect_series_gaps()`, `get_image_size()`, `color()` |
-| **Hermitage** (GTK4 gallery) | `CalibreDB`, `search()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `calibre_rating_to_stars()` |
+| **CalibreQuarry** (CLI/TUI) | `CalibreDB`, `search()`, `search_books()`, `get_book()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `get_annotations()`, `get_plugin_data()`, `get_all_series()`, `get_tag_counts()`, `get_format_path()`, `find_db()`, `format_stars()`, `strip_html()`, `tags_to_tree()`, `normalize_author_display()`, `detect_series_gaps()`, `get_image_size()`, `color()`, `write.WritableCalibreDB` |
+| **Hermitage** (GTK4 gallery) | `CalibreDB`, `search()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_saved_searches()`, `get_vl_ui_state()`, `get_annotations()`, `get_last_read_positions()`, `normalize_rating()` |
 | **Carrel-calibre-web** (web reader) | `CalibreDB`, `search()`, `get_virtual_libraries()` |
-| **Bindery** (EPUB repair) | `get_image_size()` (cover audit) |
+| **Bindery** (EPUB repair) | `get_image_size()` (cover audit), `get_format_path()` (EPUB resolution), `write.WritableCalibreDB` (optional flag tagging) |
 
 ## 7. Out of scope (non-goals)
 

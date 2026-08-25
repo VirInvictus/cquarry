@@ -10,7 +10,9 @@ This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry
 
 - **Direct SQLite access.** No `calibredb` binary required, no Calibre Python initialization overhead.
 - **Lock-safe snapshots.** Automatically detects if Calibre holds an exclusive write lock on `metadata.db` and routes queries through a temporary WAL-consistent copy.
-- **Full search grammar parity.** A recursive-descent parser faithfully porting Calibre's native search capabilities: boolean logic, field prefixes, date math, hierarchical tags, custom columns, identifiers, and nested virtual library cross-references.
+- **Full search grammar parity.** A recursive-descent parser faithfully porting Calibre's native search capabilities: boolean logic, field prefixes, date math (hyphen *and* slash separators), hierarchical tags with `.`/`..` component modifiers on every text field, custom columns, identifiers, saved-search interpolation (`search:"Name"`), multi-valued count operators (`tags:#>3`), language canonicalization (`languages:English` → `eng`), and nested virtual library cross-references.
+- **Metadata portability.** Read e-reader annotations, per-device reading progress, third-party plugin data, and conversion profiles; sanitize comments HTML for display.
+- **Opt-in write path.** `cquarry.write.WritableCalibreDB` offers trigger-safe title/tag/identifier mutations in a separate module the read-only API can never touch.
 - **Context manager.** `CalibreDB` supports `with` statements for automatic cleanup of snapshot files.
 - **Zero dependencies.** Pure Python 3.14+ stdlib (`sqlite3`, `re`, `json`, `unicodedata`).
 
@@ -31,9 +33,31 @@ with CalibreDB("~/Calibre Library/metadata.db") as db:
     # Resolve a virtual library to a set of book IDs
     wing = db.resolve_vl("To Read")
 
+    # Interpolate a saved search straight from Calibre's preferences
+    award_winners = db.search('search:"Award Winners"')
+
     # Inspect custom columns
     cols = db.get_custom_columns()
     status = db.load_custom_column("Reading Status")
+
+    # Single-entity helpers (no whole-library scan)
+    book = db.get_book(42)
+    epub = db.get_format_path(42, "EPUB")
+
+    # Metadata portability
+    highlights = db.get_annotations(42)
+    progress = db.get_last_read_positions(42)
+    wordcounts = db.get_plugin_data(name="wordcount")
+```
+
+Writes live behind an explicit opt-in import:
+
+```python
+from cquarry.write import WritableCalibreDB
+
+with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:
+    wdb.add_tag(42, "Audited")
+    wdb.set_identifier(42, "isbn", "9780123456789")
 ```
 
 ## Installation
@@ -65,7 +89,10 @@ with CalibreDB("/path/to/metadata.db") as db:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `get_all_books()` | `list[dict[str, Any]]` | Every book in the library, pre-hydrated with `authors`, `tags`, `series`, `rating`, `publisher`, `languages`, `formats`, `title_sort`, `author_sort`, `timestamp`, `pubdate`, `last_modified`, `has_cover`, `series_index`, and `path`. `authors`, `tags`, `languages`, and `formats` are exposed natively as `list[str]` arrays. Results are cached after the first call. |
+| `get_all_books()` | `list[dict[str, Any]]` | Every book in the library, pre-hydrated with `authors`, `tags`, `series`, `rating`, `publisher`, `languages`, `formats`, `title_sort`, `author_sort`, `timestamp`, `pubdate`, `last_modified`, `has_cover`, `series_index`, `size`, and `path`. `authors`, `tags`, `languages`, and `formats` are exposed natively as `list[str]` arrays. Results are cached after the first call. |
+| `get_book(book_id)` | `dict[str, Any] \| None` | Fetch one hydrated record (same shape as a `get_all_books()` row) without scanning the library. |
+| `search_books(query)` | `list[dict[str, Any]]` | Evaluate a search expression and return the hydrated matching books. |
+| `get_format_path(book_id, fmt, verify=True)` | `str` | Absolute filesystem path for a book's format file, built from the original DB location. Raises `ValueError` for unknown book/format, `FileNotFoundError` when `verify` is set and the file is missing. |
 | `get_identifiers(book_id)` | `dict[str, str]` | All identifiers for a book (e.g. `isbn`, `amazon`, `lcc`), keyed by type. |
 | `get_all_tags()` | `list[str]` | Every distinct tag name, sorted alphabetically. |
 | `get_tag_counts()` | `list[tuple[str, int]]` | `(tag_name, book_count)` pairs, sorted by tag name. |
@@ -73,14 +100,29 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_custom_columns()` | `dict[str, dict[str, Any]]` | Metadata for all user-defined custom columns, keyed by display name. Each value contains `id`, `label`, `name`, `datatype`, and `is_multiple`. |
 | `load_custom_column(col_name)` | `dict[int, Any]` | Values for a specific custom column (by display name), returned as `{book_id: value}`. Normalized columns (text, enumeration, series) are read via their link table; direct columns (int, float, bool, datetime, comments) are read from the value table. Multi-valued columns return comma-separated strings. Raises `ValueError` if the column does not exist. |
 | `get_virtual_libraries()` | `dict[str, str]` | Virtual library names mapped to their Calibre search expressions, read from the `preferences` table. Cached after the first call. |
+| `get_saved_searches()` | `dict[str, str]` | Saved-search names mapped to their expressions (the source for `search:"Name"` interpolation). |
+| `get_vl_ui_state()` | `dict[str, Any]` | Calibre's sidebar layout state: `{"hidden": [names], "order": {...}}` decoded from `virt_libs_hidden` / `virt_libs_order`. |
 | `count_books()` | `int` | Total book count. Uses the cache if available; otherwise issues a `SELECT COUNT(*)`. |
+
+#### Annotations, progress & plugin data
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `get_annotations(book_id=None)` | `list[dict[str, Any]]` | E-reader highlights, bookmarks, and notes from the `annotations` table; `annot_data` is decoded JSON when possible. |
+| `get_last_read_positions(book_id=None)` | `list[dict[str, Any]]` | Per-device reading progress (`device`, `cfi`, `pos_frac` 0.0–1.0, `epoch_time`). |
+| `get_plugin_data(book_id=None, name=None)` | `list[dict[str, Any]]` | Third-party payloads from `books_plugin_data` (Goodreads IDs, word counts, ...). |
+| `get_conversion_profiles(book_id=None)` | `list[dict[str, Any]]` | Books with manual conversion overrides; the pickled recipe blob stays raw bytes (`data_size` gives its length). |
+
+All four return `[]` on databases whose schema predates the tables.
 
 #### Search and virtual library resolution
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `search(query)` | `set[int]` | Parse and evaluate a Calibre search expression, returning matching book IDs. An empty query returns all IDs. |
-| `resolve_vl(vl_name)` | `set[int]` | Resolve a virtual library by name to its set of book IDs. Raises `ValueError` if the name is not found. |
+| `search(query)` | `set[int]` | Parse and evaluate a Calibre search expression, returning matching book IDs. An empty query returns all IDs. Raises `ParseException` for unknown virtual libraries or saved searches. |
+| `search_books(query)` | `list[dict[str, Any]]` | `search()` + hydration: the matching books as full records. |
+| `resolve_vl(vl_name)` | `set[int]` | Resolve a virtual library by name to its set of book IDs. Case-insensitive; raises `ValueError` if the name is not found. |
+| `resolve_saved_search(name)` | `set[int]` | Resolve a saved-search name to its set of book IDs. Case-insensitive; raises `ValueError` if the name is not found. |
 
 #### Lifecycle
 
@@ -102,13 +144,14 @@ results = engine.search("tags:Fiction and rating:>3")
 
 #### `MetadataProvider` protocol
 
-Any object implementing these four methods can serve as a search backend:
+Any object implementing these methods can serve as a search backend:
 
 | Method | Signature | Contract |
 |--------|-----------|----------|
 | `all_ids()` | `-> set[int]` | Return every book ID in the collection. |
 | `field(book_id, location)` | `-> Any` | Return a book's value for a canonical location. See datatype contract below. |
 | `vl_expression(name)` | `-> str \| None` | Return a virtual library's search expression, or `None` if unknown. |
+| `saved_search(name)` | `-> str \| None` | Return a saved search's expression, or `None` if unknown. |
 | `custom_locations()` | `-> dict[str, str]` | Return `{location_token: datatype}` for custom columns (e.g. `{"#read": "bool"}`). |
 
 **`field()` return contract by datatype:**
@@ -155,8 +198,10 @@ Utility functions used across the ecosystem. All are importable from `cquarry.he
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `calibre_rating_to_stars(rating)` | `-> float \| None` | Convert Calibre's internal 0-10 scale to 0.0-5.0 stars. Returns `None` for unrated (0 or `None`). |
+| `normalize_rating(rating)` | `-> float \| None` | Canonical name for the conversion; identical to `calibre_rating_to_stars` (kept as an alias). Converts Calibre's internal 0-10 scale to 0.0-5.0 stars; returns `None` for unrated (0 or `None`). |
 | `format_stars(rating)` | `-> str` | Render a 0.0-5.0 rating as Unicode star glyphs (★★★½☆☆) with a numeric suffix. Half-stars use U+00BD. Returns an empty string for `None`. |
+| `strip_html(html)` | `-> str` | Reduce comments HTML payloads to safe plain text (tags stripped, entities unescaped, whitespace collapsed). Run any raw HTML through this before terminal or GTK rendering. |
+| `tags_to_tree(tags)` | `-> dict[str, Any]` | Build a nested tree from dot-delimited hierarchical tags (`["Fic.Scifi"]` → `{"Fic": {"Scifi": {}}}`). |
 | `normalize_author_display(authors, primary_only=False)` | `-> str` | Format a comma-separated author string for display. With `primary_only`, returns only the first author. Returns `"Unknown Author"` for empty input. |
 | `author_sort_key(author_sort, primary_only=False)` | `-> str` | Generate a lowercase sort key from `author_sort`. With `primary_only`, splits on `&` and uses the first segment. |
 
@@ -200,8 +245,18 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.0.3"
+print(cquarry.__version__)  # "1.1.0"
 ```
+
+### Writes (`cquarry.write`) — opt-in
+
+| Member | Description |
+|--------|-------------|
+| `WritableCalibreDB(db_path)` | Read/write handle. Registers Calibre's trigger dependencies (`title_sort()`, `uuid4()`, `PYNOCASE`) before any statement; context-manager supported. |
+| `register_udfs(conn)` | Register the trigger-required SQL functions/collations on any read-write connection. |
+| `update_title(book_id, new_title)` | Rename with refreshed sort key and `last_modified`. |
+| `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` | Idempotent tag mutation following Calibre's link-table sequence; returns whether state changed. |
+| `set_identifier(book_id, type, val)` / `set_identifiers(book_id, pairs)` | EAV upserts honoring `UNIQUE(book, type)`; `None` deletes. |
 
 ## Search Grammar
 
@@ -231,16 +286,20 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 | Location | Aliases | Datatype | Notes |
 |----------|---------|----------|-------|
 | `title` | | text | |
+| `title_sort` | | text | |
 | `authors` | `author` | text_multi | |
 | `author_sort` | | text | |
 | `series` | | text | |
+| `series_sort` | | text | `"Series [index]"` |
 | `publisher` | | text | |
 | `tags` | `tag` | hierarchical | Anchored prefix: `Foo` matches `Foo` and `Foo.*` |
 | `comments` | `comment` | text | |
 | `rating` | | rating | Numeric; `true`/`false` for presence |
 | `series_index` | | float | |
 | `formats` | `format` | text_multi | |
-| `languages` | `language`, `lang` | text_multi | |
+| `languages` | `language`, `lang` | text_multi | English names canonicalized to ISO codes |
+| `size` | | float (bytes) | Total across formats; `k`/`m`/`g` suffixes |
+| `pages` | | int | Via a `#pages` custom column when present |
 | `pubdate` | | date | |
 | `timestamp` | `date` | date | |
 | `last_modified` | | date | |
@@ -251,7 +310,10 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 | `uuid` | | text | |
 | `#<label>` | | *(per column)* | Custom columns by label |
 | `vl` | | virtual library | Cross-reference: `vl:"Wing Name"` |
-| `all` | *(bare terms)* | | Searches title, authors, author_sort, series, publisher, tags, comments |
+| `search` | | saved search | Cross-reference: `search:"Saved Name"` |
+| `all` | *(bare terms)* | | Searches title, authors, author_sort, series, publisher, tags, comments + custom text columns |
+
+Multi-valued locations additionally accept the count operator: `tags:#>3`, `identifiers:#=0`, `formats:#<5`.
 
 ### Date queries
 
@@ -279,9 +341,11 @@ identifiers:true               # has any identifier at all
 
 - **Regex engine.** `~` uses stdlib `re`, not Calibre's third-party `regex` module (`VERSION1`/`\X` are unavailable; otherwise compatible).
 - **Accent folding.** Uses `unicodedata` NFKD decomposition rather than ICU collation, so punctuation-insensitivity is not reproduced.
-- **GPM templates.** `@...:` template expressions are not evaluated.
-- **Saved searches.** `search:"name"` interpolation is not yet supported (planned in cquarry's roadmap).
+- **GPM templates.** `@...:` template expressions tokenize for parse parity but are not evaluated.
+- **GUI-state locations.** `marked`, `ondevice`, and `in_tag_browser` exist only inside Calibre's own UI session and are not implemented.
 - **Hierarchical tag matching.** `tags:` uses cquarry's anchored match (`Foo` matches `Foo` and `Foo.*`) rather than Calibre's raw substring default. This is a long-standing project invariant.
+- **`series_sort` format.** Computed as `"Series [index]"`.
+- **`pages` sourcing.** No native pages table exists; the location resolves through an int custom column labelled `pages` when present.
 
 ## Development
 
@@ -290,7 +354,9 @@ python -m pytest tests/           # full suite
 python -m pytest tests/ -v        # verbose
 ```
 
-Three test modules: `test_db.py` (CalibreDB against a fixture database), `test_helpers.py` (utility functions), `test_search.py` (parser, matcher, and integration tests).
+Run with `PYTHONPATH=src` to exercise this checkout rather than any installed copy.
+
+Four test modules: `test_db.py` (CalibreDB against fixture databases), `test_helpers.py` (utility functions), `test_search.py` (parser, matcher, and integration tests), `test_write.py` (opt-in write module with trigger-hazard fixtures).
 
 See [spec.md](spec.md) for the full contract and [roadmap.md](roadmap.md) for planned work.
 

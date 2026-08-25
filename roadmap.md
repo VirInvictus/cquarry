@@ -2,6 +2,13 @@
 
 This roadmap outlines the planned evolution of `cquarry` from a read-only metadata extractor to a full-featured Calibre ecosystem bridge, utilizing the structural discoveries documented in `database_report.md`.
 
+> **Status (v1.1.0, 2026-08-25):** every item below is implemented and covered by tests.
+> A sweep this release found several boxes checked ahead of reality — Phase 2's
+> extractors, Phase 3's write module, and most of Phase 4's parity items existed
+> only as checkboxes. All are now real: extractors live on `CalibreDB`, writes in
+> `cquarry.write.WritableCalibreDB`, and the search-parity gaps are closed in
+> `search.py`.
+
 ## Phase 1: Read-Only Enhancements (Current & Near-Term)
 *Context: Improving our query capabilities using existing read-only mechanics (ref: database_report.md Sections 1-4).*
 

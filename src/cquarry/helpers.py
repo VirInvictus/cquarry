@@ -1,6 +1,8 @@
 import os
+import re
 import struct
 import sys
+from typing import Any
 from urllib.parse import quote
 
 from cquarry.config import (
@@ -124,6 +126,46 @@ def calibre_rating_to_stars(rating: int | None) -> float | None:
     return rating / CALIBRE_RATING_SCALE
 
 
+# Canonical name for the rating conversion; consumers should prefer this.
+normalize_rating = calibre_rating_to_stars
+
+
+def strip_html(html: str | None) -> str:
+    """Reduce a Calibre ``comments`` HTML payload to readable plain text.
+
+    Drops tags, unescapes entities, and collapses whitespace so raw markup
+    never leaks into terminals or GTK labels. ``<br>``/block boundaries become
+    newlines; everything else is joined with single spaces.
+    """
+    if not html:
+        return ""
+    from html import unescape
+
+    text = re.sub(r"(?is)<(script|style)\b.*?>.*?</\1>", " ", html)
+    text = re.sub(r"(?i)<\s*(br|/p|/div|/h[1-6]|/li|/tr)\s*/?\s*>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unescape(text)
+    # Calibre comments sometimes embed literal <br> as text or bare &nbsp;
+    lines = [re.sub(r"[ \t\xa0]+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def tags_to_tree(tags: list[str]) -> dict[str, Any]:
+    """Build a nested tree from dot-delimited hierarchical tags.
+
+    ``["Fiction.Science Fiction.Space", "Fiction.Fantasy", "NonFic"]`` becomes
+    ``{"Fiction": {"Science Fiction": {"Space": {}}, "Fantasy": {}},
+      "NonFic": {}}`` — ready for TreeView rendering or pretty printing.
+    """
+    tree: dict[str, Any] = {}
+    for tag in tags or []:
+        node = tree
+        parts = [p for p in str(tag).split(".") if p]
+        for part in parts:
+            node = node.setdefault(part, {})
+    return tree
+
+
 def format_stars(rating: float | None) -> str:
     if rating is None:
         return ""
@@ -141,11 +183,23 @@ def format_stars(rating: float | None) -> str:
     return f" [{s} {rating:.1f}/5]"
 
 
-def normalize_author_display(authors: str | None, primary_only: bool = False) -> str:
-    """Format author string for display."""
+def normalize_author_display(
+    authors: str | list[str] | None, primary_only: bool = False
+) -> str:
+    """Format author string for display.
+
+    Accepts either a comma-joined string or the native ``list[str]`` that
+    :meth:`cquarry.db.CalibreDB.get_all_books` exposes.
+    """
     if not authors:
         return "Unknown Author"
-    parts = [a.strip() for a in authors.split(",")]
+    if isinstance(authors, str):
+        parts = [a.strip() for a in authors.split(",")]
+    else:
+        parts = [str(a).strip() for a in authors]
+    parts = [p for p in parts if p]
+    if not parts:
+        return "Unknown Author"
     if primary_only:
         return parts[0]
     return " & ".join(parts)

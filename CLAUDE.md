@@ -7,16 +7,30 @@ The canonical read-only SQLite database layer and search grammar engine for Cali
 
 ## Hard constraints
 - **No external dependencies.** Must run on pure Python 3.14+ standard library (`sqlite3`, `re`, `json`).
-- **Read-only by design.** This library will NEVER write to `metadata.db`. It is explicitly a query and evaluation engine.
-- **Perfect Parity.** `cquarry.search.SearchEngine` must behave exactly like Calibre's native search bar. This includes edge cases like implicit AND evaluation, dot-delimited hierarchical tag search, identifier routing, and exact match prefixing (`=`).
+- **Read-only by design.** `CalibreDB` NEVER writes to `metadata.db`. The only sanctioned mutation path is the separate opt-in module `cquarry.write.WritableCalibreDB` — never add write methods to `CalibreDB`, and never import `cquarry.write` from read-only code.
+- **Perfect Parity.** `cquarry.search.SearchEngine` must behave exactly like Calibre's native search bar. This includes edge cases like implicit AND evaluation, dot-delimited hierarchical tag search, identifier routing, exact match prefixing (`=`) with `.`/`..` component modifiers on every text field, multi-valued count operators (`tags:#>3`), language canonicalization, and strict errors for unknown virtual libraries / saved searches. Documented deviations live in spec.md §5; do not silently add more.
 - **Performance.** `get_all_books()` executes an optimized 8-JOIN query and caches it. `SearchEngine` queries the cache, rarely the disk.
 
+## Programmer-facing contract notes
+- **List-typed fields.** `get_all_books()` / `get_book()` expose `authors`, `tags`, `languages`, `formats` as native `list[str]` (never comma-joined strings). Downstream code must NOT `.split(",")` them.
+- **Rows include `size`.** Every book row carries `size` = SUM(data.uncompressed_size); may be None on odd schemas.
+- **Strict VL/saved-search errors.** `search("vl:X")` raises `ParseException` when X is unknown; only `resolve_vl()`/`resolve_saved_search()` raise `ValueError` with an available-names message.
+- **Raw comments are HTML.** Anything rendered must pass through `helpers.strip_html()` first.
+
 ## Layout
-- `src/cquarry/db.py`: `CalibreDB` connection management, snapshot fallback for locked databases, schema mapping.
-- `src/cquarry/search.py`: Lexer, AST Parser, and Evaluator for Calibre's search grammar.
-- `src/cquarry/helpers.py`: Common domain-specific logic (star ratings, JPEG/PNG header sniffing, author normalization).
-- `src/cquarry/config.py`: Default path configuration .
+- `src/cquarry/db.py`: `CalibreDB` connection management, snapshot fallback for locked databases, schema mapping, Phase-2 extractors (`get_annotations`, `get_last_read_positions`, `get_plugin_data`, `get_conversion_profiles`), single-entity APIs (`get_book`, `search_books`, `get_format_path`).
+- `src/cquarry/search.py`: Lexer, AST Parser, and Evaluator for Calibre's search grammar (incl. saved-search interpolation, count operator, lang canonicalization).
+- `src/cquarry/helpers.py`: Common domain-specific logic (star ratings, JPEG/PNG header sniffing, author normalization, `strip_html`, `tags_to_tree`).
+- `src/cquarry/write.py`: Opt-in `WritableCalibreDB` + `register_udfs()` for trigger-safe writes. Separate module by design (spec §3.6).
+- `src/cquarry/config.py`: Default path configuration.
 - `tests/`: Extensive unit tests imported from the original CalibreQuarry repository.
+
+## Testing
+Run with the source tree on the path so you exercise this repo, not a stale installed copy:
+```sh
+PYTHONPATH=src python -m pytest tests/ -q
+```
+(The bare `python -m pytest` picks up whatever cquarry is pip-installed in the environment — check its version if results look stale.)
 
 ## Cross-Repo Implementation Rule
 If any major update or new feature is added to `cquarry`, you MUST immediately assess and implement it throughout `~/.gitrepos/CalibreQuarry`, `~/.gitrepos/Bindery`, and `~/.gitrepos/Hermitage` if the update logically fits their respective domains. Keep the entire Calibre ecosystem synchronized with `cquarry`'s latest capabilities.

@@ -14,6 +14,9 @@ from cquarry.helpers import (
     get_image_size,
     get_jpeg_size,
     get_png_size,
+    normalize_rating,
+    strip_html,
+    tags_to_tree,
 )
 
 
@@ -144,6 +147,46 @@ class TestImageSizing(unittest.TestCase):
             self.assertIsNone(get_image_size(p))
         finally:
             os.unlink(p)
+
+
+class TestHtmlSanitizer(unittest.TestCase):
+    def test_strips_tags_and_unescapes_entities(self):
+        self.assertEqual(strip_html("<p>Hello <b>world</b>!</p>"), "Hello world !")
+
+    def test_block_tags_become_newlines(self):
+        out = strip_html("<div>One</div><div>Two</div>")
+        self.assertEqual(out, "One\nTwo")
+
+    def test_script_and_style_dropped(self):
+        self.assertEqual(
+            strip_html("<style>p{}</style><p>Text</p><script>x()</script>"), "Text"
+        )
+
+    def test_entities_and_nbsp(self):
+        self.assertEqual(strip_html("A&nbsp;&amp;&nbsp;B"), "A & B")
+
+    def test_empty_and_none(self):
+        self.assertEqual(strip_html(None), "")
+        self.assertEqual(strip_html(""), "")
+
+
+class TestTagTree(unittest.TestCase):
+    def test_builds_nested_dict(self):
+        tree = tags_to_tree(["Fiction.Science Fiction.Space", "Fiction.Fantasy"])
+        self.assertEqual(
+            tree,
+            {"Fiction": {"Science Fiction": {"Space": {}}, "Fantasy": {}}},
+        )
+
+    def test_handles_empty_and_flat(self):
+        self.assertEqual(tags_to_tree([]), {})
+        self.assertEqual(tags_to_tree(["NonFic"]), {"NonFic": {}})
+
+
+class TestNormalizeRatingAlias(unittest.TestCase):
+    def test_alias_matches_canonical(self):
+        self.assertIs(normalize_rating, calibre_rating_to_stars)
+        self.assertEqual(normalize_rating(8), 4.0)
 
 
 if __name__ == "__main__":

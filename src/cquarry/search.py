@@ -10,21 +10,31 @@ Coverage:
     ``or`` / ``and`` / ``not`` and implicit AND, ``location:query`` tokens.
   - Candidate-set boolean evaluation (matches Calibre's and/or/not semantics).
   - Match kinds: contains (default), ``=`` exact, ``~`` regex, ``^`` accent.
-  - Field locations: title, authors/author, author_sort, series, publisher,
-    tags/tag (hierarchical), rating, formats/format, languages/language,
-    pubdate, timestamp/date, last_modified, identifiers/identifier/isbn,
-    comments/comment, cover, id, uuid, ``#custom`` columns, ``all`` and ``vl:``.
+  - Exact-match modifiers on every text field: leading ``.`` (subtree) and
+    ``..`` (component) matching under ``=``, e.g. ``author:=..Cj. Cherryh``.
+  - Multi-valued count operator: ``tags:#>3``, ``authors:#=2``, and
+    ``identifiers:#<5`` compare the number of values in a multi-valued field.
+  - Field locations: title, title_sort, authors/author, author_sort, series,
+    publisher, series_sort, tags/tag (hierarchical), rating, formats/format,
+    languages/language (canonicalized: ``languages:English`` matches ``eng``),
+    pubdate, timestamp/date, last_modified, size (bytes with k/m/g suffixes),
+    pages, identifiers/identifier/isbn, comments/comment, cover, id, uuid,
+    ``#custom`` columns, ``all``, ``vl:`` and ``search:``.
+  - Saved-search interpolation: ``search:"My Saved Search"`` resolves through
+    the provider (Calibre stores them in the ``preferences`` table), including
+    nested references with cycle detection.
   - Numeric relational (``= > < >= <= !=`` and ``true``/``false``), date
     relational (incl. ``today``/``yesterday``/``thismonth``/``N daysago``),
-    boolean columns.
+    boolean columns, tristate boolean keywords (``checked``, ``blank``, ...).
 
 Deliberate, documented deviations from Calibre (dependency-bound):
   - ``~`` regex uses the stdlib ``re`` engine, not Calibre's third-party
     ``regex`` module (no ``VERSION1``/``\\X``; otherwise compatible).
   - Accent/contains folding uses ``unicodedata`` (NFKD) rather than ICU
     collation, so punctuation-insensitivity is not reproduced.
-  - GPM templates (``@...:``) and saved-search references (``search:``) are not
-    evaluated.
+  - GPM templates (``@...:``) are tokenized for parse parity but not evaluated.
+  - GUI-state locations that only exist inside Calibre's own UI (``marked``,
+    ``ondevice``, ``in_tag_browser``) are not implemented.
   - ``tags:`` uses cquarry's anchored hierarchical match (``Foo`` matches ``Foo``
     and ``Foo.*``) rather than Calibre's raw substring default. This is a
     long-standing cquarry invariant; see the project's CLAUDE.md.
@@ -34,10 +44,6 @@ import re
 import unicodedata
 from datetime import date, datetime, timedelta
 from typing import Any, Protocol
-
-# re.Scanner is a real, stable stdlib helper but is undocumented and absent
-# from typeshed, so the access needs an explicit type-checker ignore.
-_Scanner = re.Scanner  # type: ignore[attr-defined]
 
 # --- Match kinds ---
 CONTAINS = 0
@@ -63,8 +69,10 @@ DT_VL = "vl"
 # Canonical location -> datatype, for the built-in Calibre fields.
 _BUILTIN_DATATYPES: dict[str, str] = {
     "title": DT_TEXT,
+    "title_sort": DT_TEXT,
     "author_sort": DT_TEXT,
     "series": DT_TEXT,
+    "series_sort": DT_TEXT,
     "publisher": DT_TEXT,
     "comments": DT_TEXT,
     "uuid": DT_TEXT,
@@ -74,6 +82,8 @@ _BUILTIN_DATATYPES: dict[str, str] = {
     "tags": DT_HIER,
     "rating": DT_RATING,
     "series_index": DT_FLOAT,
+    "size": DT_FLOAT,  # total bytes across all formats; k/m/g suffixes honored
+    "pages": DT_INT,  # sourced from a '#pages' custom column when present
     "id": DT_INT,
     "pubdate": DT_DATE,
     "timestamp": DT_DATE,
@@ -109,6 +119,69 @@ _ALL_FIELDS = (
     "comments",
 )
 
+# English language names -> ISO 639-2 codes, mirroring Calibre's
+# lang_map so `languages:English` matches books stored with `eng`.
+_LANG_MAP: dict[str, str] = {
+    "afrikaans": "afr",
+    "albanian": "sqi",
+    "arabic": "ara",
+    "armenian": "hye",
+    "basque": "eus",
+    "belarusian": "bel",
+    "bengali": "ben",
+    "bosnian": "bos",
+    "bulgarian": "bul",
+    "catalan": "cat",
+    "chinese": "zho",
+    "croatian": "hrv",
+    "czech": "ces",
+    "danish": "dan",
+    "dutch": "nld",
+    "english": "eng",
+    "esperanto": "epo",
+    "estonian": "est",
+    "filipino": "fil",
+    "finnish": "fin",
+    "french": "fra",
+    "galician": "glg",
+    "georgian": "kat",
+    "german": "deu",
+    "greek": "ell",
+    "hebrew": "heb",
+    "hindi": "hin",
+    "hungarian": "hun",
+    "icelandic": "isl",
+    "indonesian": "ind",
+    "irish": "gle",
+    "italian": "ita",
+    "japanese": "jpn",
+    "korean": "kor",
+    "latin": "lat",
+    "latvian": "lav",
+    "lithuanian": "lit",
+    "macedonian": "mkd",
+    "malay": "msa",
+    "norwegian": "nor",
+    "persian": "fas",
+    "polish": "pol",
+    "portuguese": "por",
+    "romanian": "ron",
+    "russian": "rus",
+    "serbian": "srp",
+    "slovak": "slk",
+    "slovenian": "slv",
+    "spanish": "spa",
+    "swahili": "swa",
+    "swedish": "swe",
+    "thai": "tha",
+    "turkish": "tur",
+    "ukrainian": "ukr",
+    "urdu": "urd",
+    "vietnamese": "vie",
+    "welsh": "cym",
+    "yiddish": "yid",
+}
+
 
 class ParseException(Exception):
     """Raised for malformed search expressions."""
@@ -135,6 +208,10 @@ class MetadataProvider(Protocol):
         """Return a virtual library's search expression, or None if unknown."""
         ...
 
+    def saved_search(self, name: str) -> str | None:
+        """Return a saved search's expression, or None if unknown."""
+        ...
+
     def custom_locations(self) -> dict[str, str]:
         """Return {location_token: datatype} for custom columns (e.g. '#read')."""
         ...
@@ -152,15 +229,14 @@ class _Parser:
     EOF = 4
     REPLACEMENTS = tuple(("\\" + x, chr(i + 1)) for i, x in enumerate('\\"()'))
 
-    _scanner = _Scanner(
-        [
-            (r"[()]", lambda _, t: (_Parser.OPCODE, t)),
-            (r'@.+?:[^")\s]+', lambda _, t: (_Parser.WORD, str(t))),
-            (r'[^"()\s]+', lambda _, t: (_Parser.WORD, str(t))),
-            (r'".*?(?:(?<!\\)")', lambda _, t: (_Parser.QUOTED_WORD, t[1:-1])),
-            (r"\s+", None),
-        ],
-        flags=re.DOTALL,
+    # Token grammar, tried in order at each position (replaces the old
+    # re.Scanner: same semantics, documented API only).
+    #   @...:word        GPM template reference (tokenized, not evaluated)
+    #   "..."            quoted word (trailing quote must not be escaped)
+    #   [^"()\s]+        bare word
+    #   [()]             grouping opcode
+    _TOKEN_RE = re.compile(
+        r'(@.+?:[^")\s]+|".*?(?:(?<!\\)")|[^"()\s]+|[()])', re.DOTALL
     )
 
     def __init__(self, locations: set[str]):
@@ -171,9 +247,25 @@ class _Parser:
     def _tokenize(self, expr: str) -> list[tuple[int, str]]:
         for k, v in self.REPLACEMENTS:
             expr = expr.replace(k, v)
-        tokens, remainder = self._scanner.scan(expr)
-        if remainder:
-            raise ParseException(f"Could not parse near: {remainder!r}")
+        tokens: list[tuple[int, str]] = []
+        pos = 0
+        for m in self._TOKEN_RE.finditer(expr):
+            gap = expr[pos : m.start()]
+            if gap.strip():
+                raise ParseException(f"Could not parse near: {gap!r}")
+            t = m.group(0)
+            if t in ("(", ")"):
+                tokens.append((self.OPCODE, t))
+            elif t.startswith('"'):
+                if len(t) < 2 or not t.endswith('"'):
+                    raise ParseException(f"Unterminated quoted string near: {t!r}")
+                tokens.append((self.QUOTED_WORD, t[1:-1]))
+            else:
+                tokens.append((self.WORD, t))
+            pos = m.end()
+        tail = expr[pos:]
+        if tail.strip():
+            raise ParseException(f"Could not parse near: {tail!r}")
 
         def unescape(x: str) -> str:
             for k, v in self.REPLACEMENTS:
@@ -296,7 +388,12 @@ def _matchkind(query: str) -> tuple[int, str]:
 
 
 def _match_text(query: str, values: list[str], kind: int) -> bool:
-    """Match a (single- or multi-valued) plain text field."""
+    """Match a (single- or multi-valued) plain text field.
+
+    Under ``=`` exact match, Calibre's leading-dot modifiers apply to every
+    text field: ``.foo`` matches the subtree rooted at ``foo`` and ``..foo``
+    matches a single dot-delimited *component* exactly.
+    """
     if kind == REGEXP:
         try:
             pat = re.compile(query, re.IGNORECASE | re.UNICODE)
@@ -308,7 +405,17 @@ def _match_text(query: str, values: list[str], kind: int) -> bool:
     for v in values:
         fv = _fold(v)
         if kind == EQUALS:
-            if fv == q:
+            if q.startswith(".."):
+                sq = q[2:]
+                if fv == q or sq in [c for c in fv.split(".") if c]:
+                    return True
+            elif q.startswith("."):
+                qq = q[1:]
+                if fv.startswith(qq) and (
+                    len(fv) == len(qq) or fv[len(qq) : len(qq) + 1] == "."
+                ):
+                    return True
+            elif fv == q:
                 return True
         else:  # CONTAINS / ACCENT both fold accents here
             if q in fv:
@@ -372,9 +479,9 @@ def _num_predicate(query: str, datatype: str):
     ``true``/``false`` test value presence/absence; otherwise a relational
     comparison against the parsed number.
     """
-    if query == "true":
+    if query in _BOOL_TRUE:
         return lambda v: v is not None and (datatype != DT_RATING or v > 0)
-    if query == "false":
+    if query in _BOOL_FALSE:
         return lambda v: v is None or (datatype == DT_RATING and not v)
 
     op = _NUM_RELOPS[3][1]  # '='
@@ -395,6 +502,43 @@ def _num_predicate(query: str, datatype: str):
     except (ValueError, TypeError) as e:
         raise ParseException(f"Non-numeric value in query: {query!r}") from e
     return lambda v: v is not None and op(v, q)
+
+
+_COUNT_RE = re.compile(r"^#(!=|>=|<=|=|>|<)?(\d+)$")
+
+
+def _count_predicate(query: str):
+    """Parse a multi-valued count query like ``#>3`` into a len() predicate."""
+    m = _COUNT_RE.match(query.strip())
+    if not m:
+        raise ParseException(
+            f"Invalid count operator in query: {query!r} (expected #<relop><n>)"
+        )
+    opname, count = m.group(1) or "=", int(m.group(2))
+    op = dict(_NUM_RELOPS)[opname]
+    return lambda n: op(n, count)
+
+
+def _canonical_languages(query: str) -> str:
+    """Canonicalize English language names to their ISO 639-2 codes.
+
+    ``languages:English`` must match books stored with ``eng``, mirroring
+    Calibre's internal lang_map. Unknown tokens pass through untouched so raw
+    codes and free text keep working.
+    """
+    if ":" in query or not query:
+        return query  # identifiers-style keypair queries are not language names
+
+    def canon(token: str) -> str:
+        low = token.strip().lower()
+        if not low:
+            return token
+        mapped = _LANG_MAP.get(low)
+        if mapped is None and low.startswith("="):
+            mapped = _LANG_MAP.get(low[1:])
+        return mapped if mapped is not None else token
+
+    return ",".join(canon(t) for t in query.split(","))
 
 
 class _DateQuery:
@@ -425,7 +569,8 @@ class _DateQuery:
         m = re.match(r"^(\d+)\s*(?:days?ago|_daysago)$", ql)
         if m:
             return today - timedelta(days=int(m.group(1))), 3
-        parts = q.split("-")
+        # Calibre also accepts slashes as date separators: 2024/06/15.
+        parts = q.replace("/", "-").split("-")
         try:
             if len(parts) == 1:
                 return date(int(parts[0]), 1, 1), 1
@@ -503,8 +648,26 @@ def _parse_date(raw: str | None) -> date | None:
         return None
 
 
-_BOOL_TRUE = {"true", "yes"}
-_BOOL_FALSE = {"false", "no"}
+_BOOL_TRUE = {
+    "true",
+    "yes",
+    "checked",
+    "_true",
+    "_yes",
+    "_checked",
+}
+_BOOL_FALSE = {
+    "false",
+    "no",
+    "unchecked",
+    "blank",
+    "empty",
+    "_false",
+    "_no",
+    "_unchecked",
+    "_blank",
+    "_empty",
+}
 
 
 # ============================================================================
@@ -519,7 +682,10 @@ class SearchEngine:
         self.provider = provider
         self._custom = provider.custom_locations()
         self.locations = (
-            set(_BUILTIN_DATATYPES) | set(_ALIASES) | {"isbn"} | set(self._custom)
+            set(_BUILTIN_DATATYPES)
+            | set(_ALIASES)
+            | {"isbn", "search"}
+            | set(self._custom)
         )
 
     def search(self, expr: str) -> set[int]:
@@ -568,12 +734,32 @@ class SearchEngine:
         if location == "vl":
             return self._match_vl(query, candidates, seen)
 
+        if location == "search":
+            return self._match_saved_search(query, candidates, seen)
+
         if location == "all":
             return self._match_all(query, candidates)
 
         datatype = self._datatype(location)
         if datatype is None:
             return set()  # unsupported location (e.g. unrecognised) -> no matches
+
+        # Multi-valued count operator: tags:#>3, authors:#=2, identifiers:#<5.
+        if query.startswith("#") and datatype in (
+            DT_TEXT_MULTI,
+            DT_HIER,
+            DT_IDENTIFIERS,
+        ):
+            pred = _count_predicate(query)
+            out = set()
+            for b in candidates:
+                if datatype == DT_IDENTIFIERS:
+                    n = len(self.provider.field(b, "identifiers") or {})
+                else:
+                    n = len(self._values(b, location))
+                if pred(n):
+                    out.add(b)
+            return out
 
         if datatype == DT_IDENTIFIERS:
             return self._match_identifiers(original, query, candidates)
@@ -583,6 +769,8 @@ class SearchEngine:
             return self._match_numeric(location, datatype, query, candidates)
         if datatype == DT_DATE:
             return self._match_date(location, query, candidates)
+        if location == "languages":
+            query = _canonical_languages(query)
         # text-like
         return self._match_textlike(location, datatype, query, candidates)
 
@@ -687,9 +875,17 @@ class SearchEngine:
 
     def _match_all(self, query, candidates) -> set[int]:
         kind, q = _matchkind(query)
+        fields = list(_ALL_FIELDS)
+        # Calibre's bare-term search also sweeps user text columns; numeric,
+        # date, bool and identifier columns are excluded from 'all'.
+        fields += [
+            loc
+            for loc, dt in self._custom.items()
+            if dt in (DT_TEXT, DT_TEXT_MULTI, DT_HIER)
+        ]
         out = set()
         for b in candidates:
-            for loc in _ALL_FIELDS:
+            for loc in fields:
                 vals = self._values(b, loc)
                 # 'all' treats every field as plain substring text
                 if _match_text(q, vals, kind):
@@ -698,11 +894,24 @@ class SearchEngine:
         return out
 
     def _match_vl(self, name: str, candidates: set[int], seen: set[str]) -> set[int]:
-        key = name.lower()
+        key = "vl:" + name.lower()
         if key in seen:
             raise ParseException(f"Recursive virtual library reference: {name!r}")
         expr = self.provider.vl_expression(name)
         if expr is None:
-            return set()
+            raise ParseException(f"Unknown virtual library: {name!r}")
+        tree = _Parser(self.locations).parse(expr.strip())
+        return candidates & self._evaluate(tree, self.provider.all_ids(), seen | {key})
+
+    def _match_saved_search(
+        self, name: str, candidates: set[int], seen: set[str]
+    ) -> set[int]:
+        name = name.strip().strip('"')
+        key = "ss:" + name.lower()
+        if key in seen:
+            raise ParseException(f"Recursive saved search reference: {name!r}")
+        expr = self.provider.saved_search(name)
+        if expr is None:
+            raise ParseException(f"Unknown saved search: {name!r}")
         tree = _Parser(self.locations).parse(expr.strip())
         return candidates & self._evaluate(tree, self.provider.all_ids(), seen | {key})
