@@ -82,7 +82,7 @@ class TestCalibreDB(unittest.TestCase):
         books = db.get_all_books()
         self.assertEqual(len(books), 1)
         self.assertEqual(books[0]["title"], "Book 1")
-        self.assertEqual(books[0]["authors"], "Author")
+        self.assertEqual(books[0]["authors"], ["Author"])
 
 
 if __name__ == "__main__":
