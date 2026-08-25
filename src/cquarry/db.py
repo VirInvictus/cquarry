@@ -12,6 +12,7 @@ from cquarry.search import (
     DT_DATE,
     DT_FLOAT,
     DT_INT,
+    DT_RATING,
     DT_TEXT,
     DT_TEXT_MULTI,
     SearchEngine,
@@ -120,15 +121,21 @@ class CalibreDB:
 
         # Authors
         amap = {}
-        for row in self.conn.execute("SELECT bal.book, a.name FROM books_authors_link bal JOIN authors a ON a.id = bal.author ORDER BY bal.id"):
+        for row in self.conn.execute(
+            "SELECT bal.book, a.name FROM books_authors_link bal JOIN authors a ON a.id = bal.author ORDER BY bal.id"
+        ):
             amap.setdefault(row["book"], []).append(row["name"])
         # Tags
         tmap = {}
-        for row in self.conn.execute("SELECT btl.book, t.name FROM books_tags_link btl JOIN tags t ON t.id = btl.tag ORDER BY t.name"):
+        for row in self.conn.execute(
+            "SELECT btl.book, t.name FROM books_tags_link btl JOIN tags t ON t.id = btl.tag ORDER BY t.name"
+        ):
             tmap.setdefault(row["book"], []).append(row["name"])
         # Languages
         lmap = {}
-        for row in self.conn.execute("SELECT bll.book, l.lang_code FROM books_languages_link bll JOIN languages l ON l.id = bll.lang_code"):
+        for row in self.conn.execute(
+            "SELECT bll.book, l.lang_code FROM books_languages_link bll JOIN languages l ON l.id = bll.lang_code"
+        ):
             lmap.setdefault(row["book"], []).append(row["lang_code"])
         # Formats
         fmap = {}

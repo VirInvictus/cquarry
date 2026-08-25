@@ -258,7 +258,9 @@ class _Parser:
             loc = words[0].lower()
             words = words[1:]
             suffix = ":".join(words)
-            if self._ttype() == self.QUOTED_WORD and (not suffix or suffix.endswith("=") or suffix.endswith(":")):
+            if self._ttype() == self.QUOTED_WORD and (
+                not suffix or suffix.endswith("=") or suffix.endswith(":")
+            ):
                 suffix += self._token(advance=True)
             return ["token", loc, suffix]
         return ["token", "all", ":".join(words)]
@@ -618,7 +620,7 @@ class SearchEngine:
 
     def _match_date(self, location, query, candidates) -> set[int]:
         q = query.lower().strip()
-        kind, q = _matchkind(q)
+        _kind, q = _matchkind(q)
         if q in _BOOL_FALSE or q == "":
             return {
                 b

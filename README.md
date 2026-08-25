@@ -199,6 +199,7 @@ Persistent configuration for database path discovery.
 
 ```python
 import cquarry
+
 print(cquarry.__version__)  # "1.0.3"
 ```
 

@@ -1,7 +1,5 @@
 import json
 import os
-import sys
-from pathlib import Path
 
 VERSION = "1.0.3"
 
