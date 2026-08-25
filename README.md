@@ -109,7 +109,7 @@ with CalibreDB("/path/to/metadata.db") as db:
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `get_annotations(book_id=None)` | `list[dict[str, Any]]` | E-reader highlights, bookmarks, and notes from the `annotations` table; `annot_data` is decoded JSON when possible. |
-| `get_last_read_positions(book_id=None)` | `list[dict[str, Any]]` | Per-device reading progress (`device`, `cfi`, `pos_frac` 0.0–1.0, `epoch_time`). |
+| `get_last_read_positions(book_id=None)` | `list[dict[str, Any]]` | Per-device reading progress (`device`, `cfi`, `pos_frac` 0.0–1.0, `epoch`). |
 | `get_plugin_data(book_id=None, name=None)` | `list[dict[str, Any]]` | Third-party payloads from `books_plugin_data` (Goodreads IDs, word counts, ...). |
 | `get_conversion_profiles(book_id=None)` | `list[dict[str, Any]]` | Books with manual conversion overrides; the pickled recipe blob stays raw bytes (`data_size` gives its length). |
 
@@ -245,7 +245,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.1.0"
+print(cquarry.__version__)  # "1.1.1"
 ```
 
 ### Writes (`cquarry.write`) — opt-in

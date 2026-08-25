@@ -503,12 +503,15 @@ class CalibreDB:
     ) -> list[dict[str, Any]]:
         """Map reading progress per device from ``last_read_positions``.
 
-        Each row carries ``book``, ``user_type``, ``user``, ``device``,
-        ``cfi``, ``pos_frac`` (0.0-1.0 progress fraction) and ``epoch_time``.
+        Each row carries ``book``, ``format``, ``user``, ``device``, ``cfi``,
+        ``epoch`` (unix seconds — sort key for "most recent") and
+        ``pos_frac`` (0.0-1.0 progress fraction). Columns follow Calibre's
+        real schema exactly (there is no ``user_type`` and the time column is
+        ``epoch``, not ``epoch_time``).
         """
         cur = self.conn.cursor()
         sql = (
-            "SELECT book, user_type, user, device, cfi, pos_frac, epoch_time "
+            "SELECT id, book, format, user, device, cfi, epoch, pos_frac "
             "FROM last_read_positions"
         )
         params: tuple = ()

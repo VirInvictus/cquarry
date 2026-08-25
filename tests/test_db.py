@@ -162,19 +162,27 @@ class TestPhase2Extractors(unittest.TestCase):
             INSERT INTO books VALUES (1, 'Annotated');
             CREATE TABLE annotations (
                 id INTEGER PRIMARY KEY, book INTEGER, format TEXT,
-                user_type TEXT, user TEXT, timestamp TEXT,
+                user_type TEXT, user TEXT, timestamp REAL,
                 annot_id TEXT, annot_type TEXT, annot_data TEXT
             );
             INSERT INTO annotations VALUES
-                (1, 1, 'EPUB', 'local', 'reader', '2025-01-01T00:00:00',
+                (1, 1, 'EPUB', 'local', 'reader', 1750000000,
                  'a1', 'highlight', '{"text": "wise words"}');
             CREATE TABLE last_read_positions (
-                book INTEGER, user_type TEXT, user TEXT, device TEXT,
-                cfi TEXT, pos_frac REAL, epoch_time REAL,
-                PRIMARY KEY (book, user_type, user, device)
+                id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL,
+                format TEXT NOT NULL COLLATE NOCASE,
+                user TEXT NOT NULL,
+                device TEXT NOT NULL,
+                cfi TEXT NOT NULL,
+                epoch REAL NOT NULL,
+                pos_frac REAL NOT NULL DEFAULT 0,
+                UNIQUE(user, device, book, format)
             );
-            INSERT INTO last_read_positions VALUES
-                (1, 'local', 'reader', 'kobo', 'epubcfi(/6/4)', 0.42, 1750000000);
+            INSERT INTO last_read_positions (book, format, user, device, cfi, epoch, pos_frac)
+            VALUES
+                (1, 'EPUB', 'reader', 'kobo', 'epubcfi(/6/4)', 1750000000, 0.42),
+                (1, 'EPUB', 'reader', 'phone', 'epubcfi(/6/9)', 1750000100, 0.90);
             CREATE TABLE books_plugin_data (book INTEGER, name TEXT, val TEXT);
             INSERT INTO books_plugin_data VALUES
                 (1, 'wordcount', '98000'),
@@ -198,9 +206,15 @@ class TestPhase2Extractors(unittest.TestCase):
         self.assertEqual(notes[0]["annot_data"], {"text": "wise words"})
 
     def test_reading_positions(self):
-        rows = self.db.get_last_read_positions()
-        self.assertEqual(rows[0]["device"], "kobo")
-        self.assertAlmostEqual(rows[0]["pos_frac"], 0.42)
+        # Real schema columns only: format/user/device/cfi/epoch/pos_frac.
+        rows = self.db.get_last_read_positions(1)
+        by_device = {r["device"]: r for r in rows}
+        self.assertAlmostEqual(by_device["kobo"]["pos_frac"], 0.42)
+        # Most-recent device is whatever has the highest epoch.
+        latest = max(rows, key=lambda r: r["epoch"])
+        self.assertEqual(latest["device"], "phone")
+        self.assertAlmostEqual(latest["pos_frac"], 0.90)
+        self.assertEqual(self.db.get_last_read_positions(999), [])
 
     def test_plugin_data_filters_by_name(self):
         counts = self.db.get_plugin_data(name="wordcount")

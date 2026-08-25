@@ -1,3 +1,7 @@
+## v1.1.1 (2026-08-25)
+
+- **Fix**: `get_last_read_positions()` now matches Calibre’s real schema — the table has no `user_type` column and its time field is `epoch`, not `epoch_time`. Against a live library the old SELECT silently returned an empty list on OperationalError; rows now surface `id/book/format/user/device/cfi/epoch/pos_frac` exactly as stored. Caught by Carrel-calibre-web’s CI fixture, which uses a schema dumped from a real library.
+
 ## v1.1.0 (2026-08-25)
 
 ### Search parity (Phase 4 — now actually true)
