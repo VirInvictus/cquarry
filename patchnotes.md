@@ -1,3 +1,12 @@
+## v1.0.3 (2026-08-24)
+- **Fix**: Prevented infinite loops in `get_jpeg_size` by asserting frame payload lengths are valid.
+- **Fix**: Re-wrote AST quoted-colon parsing block in `_base_token` to successfully preserve strings like `identifiers:isbn:"value"`.
+- **Fix**: Fixed logical rating searches (`#rating:false`) by properly declaring `#rating` as `DT_RATING`.
+- **Fix**: Added dynamic series index generation for custom `#series` columns in location routing.
+- **Fix**: Eliminated Calibre format-splitting bugs for author/tag strings containing commas by omitting `GROUP_CONCAT` in favor of dictionary mapping and native python lists.
+- **Fix**: Shielded `resolve_vl` from virtual library recursion explosions.
+- **Fix**: Extracted date-time components accurately in ISO-8601 targets, preventing exact match failures on ISO strings containing `T`.
+
 ## v1.0.2 (2026-08-24)
 
 - **Build:** Configured pyproject.toml to ignore strict ruff lints blocking the CI pipeline.

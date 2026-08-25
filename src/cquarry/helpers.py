@@ -72,6 +72,8 @@ def get_jpeg_size(filepath: str) -> tuple[int, int] | None:
                 if len(seg) < 2:
                     return None
                 length = struct.unpack(">H", seg)[0]
+                if length < 2:
+                    return None
                 if m in _JPEG_SOF_MARKERS:
                     payload = f.read(5)  # precision(1) + height(2) + width(2)
                     if len(payload) < 5:

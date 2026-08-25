@@ -104,13 +104,9 @@ class CalibreDB:
                 b.id, b.title, b.sort as title_sort, b.author_sort,
                 b.timestamp, b.pubdate, b.has_cover, b.last_modified,
                 b.series_index, b.path,
-                (SELECT GROUP_CONCAT(name, ', ') FROM (SELECT a_inner.name as name FROM books_authors_link bal JOIN authors a_inner ON a_inner.id = bal.author WHERE bal.book = b.id ORDER BY bal.id)) as authors,
-                (SELECT GROUP_CONCAT(format, ', ') FROM data d WHERE d.book = b.id) as formats,
-                (SELECT GROUP_CONCAT(name, ', ') FROM (SELECT t_inner.name as name FROM books_tags_link btl JOIN tags t_inner ON t_inner.id = btl.tag WHERE btl.book = b.id ORDER BY t_inner.name)) as tags,
                 s.name as series,
                 r.rating,
-                p.name as publisher,
-                (SELECT GROUP_CONCAT(l.lang_code, ', ') FROM books_languages_link bll JOIN languages l ON l.id = bll.lang_code WHERE bll.book = b.id) as languages
+                p.name as publisher
             FROM books b
             LEFT JOIN books_series_link bsl ON bsl.book = b.id
             LEFT JOIN series s ON s.id = bsl.series
@@ -120,7 +116,32 @@ class CalibreDB:
             LEFT JOIN publishers p ON p.id = bpl.publisher
             ORDER BY b.author_sort, b.sort
         """)
-        self._books_cache = [dict(row) for row in cur.fetchall()]
+        books = [dict(row) for row in cur.fetchall()]
+
+        # Authors
+        amap = {}
+        for row in self.conn.execute("SELECT bal.book, a.name FROM books_authors_link bal JOIN authors a ON a.id = bal.author ORDER BY bal.id"):
+            amap.setdefault(row["book"], []).append(row["name"])
+        # Tags
+        tmap = {}
+        for row in self.conn.execute("SELECT btl.book, t.name FROM books_tags_link btl JOIN tags t ON t.id = btl.tag ORDER BY t.name"):
+            tmap.setdefault(row["book"], []).append(row["name"])
+        # Languages
+        lmap = {}
+        for row in self.conn.execute("SELECT bll.book, l.lang_code FROM books_languages_link bll JOIN languages l ON l.id = bll.lang_code"):
+            lmap.setdefault(row["book"], []).append(row["lang_code"])
+        # Formats
+        fmap = {}
+        for row in self.conn.execute("SELECT book, format FROM data"):
+            fmap.setdefault(row["book"], []).append(row["format"])
+
+        for b in books:
+            b["authors"] = amap.get(b["id"], [])
+            b["tags"] = tmap.get(b["id"], [])
+            b["languages"] = lmap.get(b["id"], [])
+            b["formats"] = fmap.get(b["id"], [])
+
+        self._books_cache = books
         return self._books_cache
 
     def get_identifiers(self, book_id: int) -> dict[str, str]:
@@ -296,7 +317,7 @@ class CalibreDB:
                 f"Unknown virtual library: '{vl_name}'. "
                 f"Available: {', '.join(sorted(vls.keys()))}"
             )
-        return self._engine().search(vls[vl_name])
+        return self._engine()._match_vl(vl_name, self.all_ids(), set())
 
     # --- search.MetadataProvider interface ---
 
@@ -347,20 +368,17 @@ class CalibreDB:
         if self._search_view is not None:
             return self._search_view
 
-        def _split(s: str | None) -> list[str]:
-            return [p.strip() for p in s.split(",")] if s else []
-
         view: dict[int, dict[str, Any]] = {}
         for b in self.get_all_books():
             view[b["id"]] = {
                 "title": b["title"] or "",
-                "authors": _split(b["authors"]),
+                "authors": b["authors"],
                 "author_sort": b["author_sort"] or "",
                 "series": b["series"] or "",
                 "publisher": b["publisher"] or "",
-                "tags": _split(b["tags"]),
-                "formats": _split(b["formats"]),
-                "languages": _split(b["languages"]),
+                "tags": b["tags"],
+                "formats": b["formats"],
+                "languages": b["languages"],
                 "rating": calibre_rating_to_stars(b["rating"]),
                 "series_index": b["series_index"],
                 "id": b["id"],
@@ -397,7 +415,7 @@ class CalibreDB:
         "series": DT_TEXT,
         "int": DT_INT,
         "float": DT_FLOAT,
-        "rating": DT_FLOAT,
+        "rating": DT_RATING,
         "bool": DT_BOOL,
         "datetime": DT_DATE,
     }
@@ -411,6 +429,8 @@ class CalibreDB:
             if col["datatype"] == "text" and col["is_multiple"]:
                 engine_dt = DT_TEXT_MULTI
             out["#" + col["label"]] = engine_dt
+            if col["datatype"] == "series":
+                out["#" + col["label"] + "_index"] = DT_FLOAT
         return out
 
     def _custom_by_label(self) -> dict[str, dict[str, Any]]:

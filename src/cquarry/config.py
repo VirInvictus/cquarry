@@ -1,7 +1,9 @@
 import json
 import os
+import sys
+from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.0.3"
 
 DEFAULT_DB_PATHS = [
     "metadata.db",
