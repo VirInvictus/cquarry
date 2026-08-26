@@ -2,12 +2,13 @@
 
 This roadmap outlines the planned evolution of `cquarry` from a read-only metadata extractor to a full-featured Calibre ecosystem bridge, utilizing the structural discoveries documented in `database_report.md`.
 
-> **Status (v1.4.0, 2026-08-26):** Phases 1–5 are implemented and covered by tests.
-> Phase 6: write-path correctness + dirtied visibility (v1.2.0), read-side batch 1
-> (v1.3.0) and read-side batch 2 — entity columns, display config, preferences,
-> grouped-search parity, annotation search (v1.4.0) — are shipped and synced
-> across all four consumers. Remaining: write-side expansion, then Phase 7
-> (Carrel data-layer extraction).
+> **Status (v1.5.0, 2026-08-26):** Phases 1–5 are implemented and covered by tests.
+> Phase 6 is complete: write-path correctness + dirtied visibility (v1.2.0),
+> read-side batches 1–2 (v1.3.0/v1.4.0) and the write-side expansion (v1.5.0)
+> are shipped and synced across all four consumers — every checkbox below is
+> either ticked or explicitly waived/deferred with a reason. What remains is
+> Phase 7 (Carrel data-layer extraction), plus the open conditional items
+> noted inline (`add_book` design, Carrel reading-status toggle).
 
 ## Phase 1: Read-Only Enhancements (Current & Near-Term)
 *Context: Improving our query capabilities using existing read-only mechanics (ref: database_report.md Sections 1-4).*
@@ -175,7 +176,7 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
   - Upstream sync:
     - [x] *Bindery*: choose/report the audited EPUB via this API instead of raw `data` lookups (pairs with its existing `get_format_path` call site). — **Waived**: its single call site pre-filters EPUB rows in SQL and needs exactly one path; `get_format_path` remains the right tool there. Revisit if Bindery grows multi-format reporting.
     - [x] *Hermitage*: "open with external reader" format picker showing per-format sizes. *(v1.4.0: reader launcher resolves exact files via `get_formats()` first, glob kept as fallback.)*
-    - [ ] *CalibreQuarry*: per-format disk-usage reporting in export/audit modes. — **Deferred** to the format-management item below; it wants an aggregate (`SUM(uncompressed_size) GROUP BY format`) helper rather than N×`get_formats()` calls, which lands naturally with that API batch.
+    - [x] *CalibreQuarry*: per-format disk-usage reporting in export/audit modes. *(Done in v3.19.0 via `--format-stats`, powered by `get_format_stats()`.)*
 - [x] **Cover helpers:** `has_cover` flag exists; no `get_cover_path(book_id)` resolving `<root>/<books.path>/cover.jpg` with disk verification.
   - *(Shipped in v1.3.0: `.jpg` primary with `.png` fallback, `verify=` toggle, ValueError on unknown books.)*
   - Upstream sync:
@@ -238,33 +239,37 @@ in calibre-web — and makes cquarry grow the read APIs a real web frontend need
 - [ ] **Rebrand decision + README attribution** once the swap is complete.
 
 ### Write-side expansion (after the dirtied fix lands)
-- [ ] **Entity setters:** authors (N:M link + name/sort computation), series (+`series_index`), publisher, rating (UNIQUE(rating) dedup), languages (canonicalize to ISO codes).
+- [x] **Entity setters:** authors (N:M link + name/sort computation), series (+`series_index`), publisher, rating (UNIQUE(rating) dedup), languages (canonicalize to ISO codes).
+  - *(Shipped in v1.5.0: NOCASE find-or-create, author_sort recomputation from per-author sort keys joined " & ", series_index defaults/preservation, ratings stored ×2 with dedup, language canonicalization via the new public `search.canonical_language`.)*
   - Upstream sync:
-    - [ ] *CalibreQuarry*: CLI verbs (`--set-authors`, `--set-series`, `--set-rating`, …) become this repo's first real `WritableCalibreDB` consumers.
-    - [ ] *Hermitage*: scope-assess lightweight edit popovers; default posture stays read-mostly (waive explicitly if declined).
+    - [x] *CalibreQuarry*: CLI verbs (`--set-authors`, `--set-rating`, …) become this repo's first real `WritableCalibreDB` consumers. *(v3.18.0 `--set-title` was first; v3.19.0 adds the full verb surface through a shared `_run_write` dispatcher.)*
+    - [x] *Hermitage*: scope-assess lightweight edit popovers; default posture stays read-mostly (waive explicitly if declined). — **Waived**: Hermitage's spec pins a read-mostly posture; no edit UI is planned, and cquarry's write module remains available if that ever changes.
     - *Carrel / Bindery*: unaffected.
-- [ ] **`set_comments`:** 1:1 upsert/delete on `comments`.
+- [x] **`set_comments`:** 1:1 upsert/delete on `comments`.
   - Upstream sync:
-    - [ ] *CalibreQuarry*: `--set-comments` verb.
-    - [ ] *Hermitage*: optional description editing in the detail view.
+    - [x] *CalibreQuarry*: `--set-comments` / `--clear-comments` verbs. *(v3.19.0.)*
+    - [x] *Hermitage*: optional description editing in the detail view. — **Waived** with the read-mostly posture above.
     - *Carrel / Bindery*: unaffected (read-only rendering).
-- [ ] **Custom-column writers:** Pattern A (normalized: value table + link) vs Pattern B (direct `book` column); enumeration validation against `display.enum_values`; tristate bool handling. Depends on the display-config read item above.
+- [x] **Custom-column writers:** Pattern A (normalized: value table + link) vs Pattern B (direct `book` column); enumeration validation against `display.enum_values`; tristate bool handling. Depends on the display-config read item above.
+  - *(Shipped in v1.5.0: layout auto-detected by link-table existence; enum validation; tristate bools; non-editable/composite columns raise.)*
   - Upstream sync:
-    - [ ] *Hermitage*: reading-status dropdown writing `#reading_status` (enum-validated).
-    - [ ] *CalibreQuarry*: generic `--set-column <label> <value>`.
-    - [ ] *Carrel-calibre-web*: optional reading-status toggle in the reader (its detail template already surfaces Calibre sync state).
+    - [ ] *Hermitage*: reading-status dropdown writing `#reading_status` (enum-validated). — **Waived** with the read-mostly posture above.
+    - [x] *CalibreQuarry*: generic `--set-column <label> <value>`. *(v3.19.0, plus `--clear-column`; non-editable columns surface as clean errors.)*
+    - [ ] *Carrel-calibre-web*: optional reading-status toggle in the reader (its detail template already surfaces Calibre sync state). — **Deferred to Phase 7**: writing belongs to the data-layer extraction, not a pre-extraction patch.
     - *Bindery*: unaffected (keeps tag-based flagging).
-- [ ] **Book lifecycle:** `remove_book` must satisfy the full `fkc_delete_*` trigger ordering across every link table, `comments`, `data`, `annotations`, `last_read_positions`, plugin/custom data; optional guarded `add_book` row insert (triggers auto-fill `sort`/`uuid`).
+- [x] **Book lifecycle:** `remove_book` must satisfy the full `fkc_delete_*` trigger ordering across every link table, `comments`, `data`, `annotations`, `last_read_positions`, plugin/custom data; optional guarded `add_book` row insert (triggers auto-fill `sort`/`uuid`).
+  - *(Shipped in v1.5.0 minus `add_book`: custom columns in both PRAGMA-detected patterns + both dirtied queues cleaned before the cascade trigger fires, orphaned entities pruned after. `add_book` stays open — creation flows want more design (path layout, cover handling) than a bare row insert.)*
   - Upstream sync:
-    - [ ] *CalibreQuarry*: guarded delete command (dry-run default, explicit confirm flag).
+    - [x] *CalibreQuarry*: guarded delete command (dry-run default, explicit confirm flag). *(v3.19.0: `--remove-book ID [--confirm-remove]`, dry-run prints title+formats.)*
     - *Hermitage / Carrel / Bindery*: intentionally none — deletion stays a CLI-only operation.
-- [ ] **Format management:** register/drop `data` rows (name, size) and toggle `has_cover`.
+- [x] **Format management:** register/drop `data` rows (name, size) and toggle `has_cover`.
+  - *(Shipped in v1.5.0: `add_format` rejects case-insensitive duplicates, `remove_format`, `set_has_cover`; files stay the caller's responsibility by design.)*
   - Upstream sync:
-    - [ ] *Bindery*: register repaired/replacement EPUBs if write-back is ever added to its repair flow.
-    - [ ] *CalibreQuarry*: import/export bookkeeping around format rows.
+    - [ ] *Bindery*: register repaired/replacement EPUBs if write-back is ever added to its repair flow. — **Conditional-future waiver**: its repair flow currently writes files via atomic replace without touching metadata.db rows; revisit only if that changes.
+    - [x] *CalibreQuarry*: import/export bookkeeping around format rows. *(v3.19.0: `--format-stats` covers the reporting side via `get_format_stats()`.)*
 
 ### Documentation drift
-- [ ] **spec.md §5 item 7 is stale:** "There is no native pages table" was true historically; upstream now treats `books_pages_link` as a managed one-to-one field. Rewrite once the fallback above ships. *(cquarry-internal; no upstream impact)*
+- [x] **spec.md §5 item 7 is stale:** "There is no native pages table" was true historically; upstream now treats `books_pages_link` as a managed one-to-one field. Rewrite once the fallback above ships. *(cquarry-internal; no upstream impact)* — **Done in v1.3.0**: §5 item 7 was removed and replaced with a resolution note; the `pages:` row in §4 documents native-first sourcing.
 
 > **Version-sync reminder** (Phase 5 practice, applies to EVERY item above): bump
 > `VERSION` + `__init__.py` + `config.py` + `README.md` + `spec.md` together, log the
