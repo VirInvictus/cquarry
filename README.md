@@ -4,7 +4,7 @@
   <p>Canonical read-only database layer and search grammar engine for Calibre libraries.</p>
 </div>
 
-This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry) (CLI/TUI), [Hermitage](https://github.com/VirInvictus/Hermitage) (GTK4 gallery), and [Carrel-calibre-web](https://github.com/VirInvictus/Carrel-calibre-web) (web reader). By centralizing the search grammar parser and metadata access, cquarry ensures that virtual library definitions and search queries evaluate identically across every frontend in the ecosystem.
+This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry) (CLI/TUI), [Hermitage](https://github.com/VirInvictus/Hermitage) (GTK4 gallery), [Carrel-calibre-web](https://github.com/VirInvictus/Carrel-calibre-web) (web reader), and [Bindery](https://github.com/VirInvictus/Bindery) (EPUB repair & audit). By centralizing the search grammar parser and metadata access, cquarry ensures that virtual library definitions and search queries evaluate identically across every frontend in the ecosystem.
 
 ## Features
 
@@ -408,6 +408,16 @@ See [spec.md](spec.md) for the full contract and [roadmap.md](roadmap.md) for pl
 [calibre-web](https://github.com/janeczku/calibre-web) that uses cquarry as its search and
 virtual-library engine. Features proven there flow back into cquarry's roadmap (see Phase 7);
 calibre-web's original authors deserve the credit for the web experience that fork builds on.
+
+## Support
+
+If cquarry's useful to you and you'd like to chip in:
+
+- liberapay · [liberapay.com/bdkl](https://liberapay.com/bdkl/)
+- bitcoin
+  ```
+  bc1qkge6zr45tzqfwfmvma2ylumt6mg7wlwmhr05yv
+  ```
 
 ## License
 
