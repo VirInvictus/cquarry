@@ -18,8 +18,13 @@ Coverage:
     publisher, series_sort, tags/tag (hierarchical), rating, formats/format,
     languages/language (canonicalized: ``languages:English`` matches ``eng``),
     pubdate, timestamp/date, last_modified, size (bytes with k/m/g suffixes),
-    pages, identifiers/identifier/isbn, comments/comment, cover, id, uuid,
-    ``#custom`` columns, ``all``, ``vl:`` and ``search:``.
+    pages, identifiers/identifier/isbn, comments/comment, annotations (the
+    book's concatenated annotation text; presence via ``true``/``false``),
+    cover, id, uuid, ``#custom`` columns, ``all``, ``vl:`` and ``search:``.
+  - Grouped search terms: ``GroupName:query`` expands to the union over the
+    group's member locations (provider-supplied, from Calibre's
+    ``grouped_search_terms`` preference); ``GroupName:false`` inverts. Real
+    field names always win over same-named groups.
   - Saved-search interpolation: ``search:"My Saved Search"`` resolves through
     the provider (Calibre stores them in the ``preferences`` table), including
     nested references with cycle detection.
@@ -90,6 +95,7 @@ _BUILTIN_DATATYPES: dict[str, str] = {
     "last_modified": DT_DATE,
     "identifiers": DT_IDENTIFIERS,
     "cover": DT_BOOL,
+    "annotations": DT_TEXT,  # concatenated annotation searchable_text (1.4)
     "all": DT_ALL,
     "vl": DT_VL,
 }
@@ -681,11 +687,24 @@ class SearchEngine:
     def __init__(self, provider: MetadataProvider):
         self.provider = provider
         self._custom = provider.custom_locations()
+        # Grouped search terms (Calibre's preferences key of the same name):
+        # group name -> member locations. Optional provider hook — standalone
+        # providers simply don't define it and get no groups.
+        gst = getattr(provider, "grouped_search_terms", None)
+        raw = gst() if callable(gst) else {}
+        self._grouped: dict[str, list[str]] = {}
+        if isinstance(raw, dict):
+            for name, members in raw.items():
+                if isinstance(members, list) and members:
+                    self._grouped[str(name).lower()] = [
+                        self._canonical(str(m)) for m in members
+                    ]
         self.locations = (
             set(_BUILTIN_DATATYPES)
             | set(_ALIASES)
             | {"isbn", "search"}
             | set(self._custom)
+            | set(self._grouped)
         )
 
     def search(self, expr: str) -> set[int]:
@@ -723,7 +742,12 @@ class SearchEngine:
         return None
 
     def _get_matches(
-        self, location: str, query: str, candidates: set[int], seen: set[str]
+        self,
+        location: str,
+        query: str,
+        candidates: set[int],
+        seen: set[str],
+        allow_groups: bool = True,
     ) -> set[int]:
         if not candidates or query is None:
             return set()
@@ -742,7 +766,34 @@ class SearchEngine:
 
         datatype = self._datatype(location)
         if datatype is None:
-            return set()  # unsupported location (e.g. unrecognised) -> no matches
+            # Grouped search term (Calibre parity): "GroupName:query" expands
+            # to the union of its member locations; "GroupName:false" matches
+            # books where NO member matches. Real fields always win over a
+            # same-named group. The '@Name' spelling is accepted too, though
+            # the tokenizer reserves leading-'@' tokens for GPM templates, so
+            # users write the bare form. Nesting a group inside a group is a
+            # ParseException, mirroring upstream's recursion guard.
+            group_key = original.removeprefix("@")
+            members = self._grouped.get(group_key)
+            if members is None:
+                return set()  # unsupported location -> no matches
+            if not allow_groups:
+                raise ParseException(f"Recursive query group detected: {group_key}")
+            invert = query.strip().lower() == "false"
+            member_query = "true" if invert else query
+            matches: set[int] = set()
+            for member in members:
+                found = self._get_matches(
+                    member,
+                    member_query,
+                    candidates - matches,
+                    seen,
+                    allow_groups=False,
+                )
+                matches |= found
+            if invert:
+                return set(self.provider.all_ids()) - matches
+            return matches
 
         # Multi-valued count operator: tags:#>3, authors:#=2, identifiers:#<5.
         if query.startswith("#") and datatype in (

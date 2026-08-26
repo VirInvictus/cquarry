@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import sqlite3
@@ -441,6 +442,195 @@ class TestLibraryUuidAndFormats(unittest.TestCase):
                 db.get_cover_path(999)
         finally:
             db.close()
+
+
+_SCHEMA_V28 = """
+CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT,
+    timestamp TEXT, pubdate TEXT, has_cover INT, last_modified TEXT,
+    series_index REAL DEFAULT 1.0, path TEXT, uuid TEXT);
+CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INT, author INT);
+CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT, link TEXT);
+CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INT, tag INT);
+CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INT, series INT);
+CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INT, publisher INT);
+CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT, link TEXT);
+CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INT, lang_code INT);
+CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INT);
+CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INT, rating INT);
+CREATE TABLE data (id INTEGER PRIMARY KEY, book INT, format TEXT, name TEXT, uncompressed_size INT);
+CREATE TABLE identifiers (book INT, type TEXT, val TEXT);
+CREATE TABLE comments (book INT, text TEXT);
+CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
+CREATE TABLE annotations (
+    id INTEGER PRIMARY KEY, book INT, format TEXT, user_type TEXT, user TEXT,
+    timestamp TEXT, annot_id TEXT, annot_type TEXT, annot_data TEXT,
+    searchable_text TEXT
+);
+CREATE TABLE custom_columns (
+    id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT,
+    editable BOOL, display TEXT, is_multiple BOOL DEFAULT 0,
+    normalized BOOL DEFAULT 0
+);
+CREATE TABLE custom_column_1 (
+    id INTEGER PRIMARY KEY, value TEXT, link TEXT DEFAULT ''
+);
+CREATE TABLE books_custom_column_1_link (book INT, value INT);
+"""
+
+
+class TestReadSideV14(unittest.TestCase):
+    """Author/entity secondary columns, custom-column display config, the
+    generic preferences accessor, grouped-search expansion and the
+    ``annotations:`` location."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        con = sqlite3.connect(os.path.join(self.temp_dir, "metadata.db"))
+        con.executescript(_SCHEMA_V28)
+        con.executemany(
+            "INSERT INTO books (id,title,sort,path) VALUES (?,?,?,?)",
+            [
+                (1, "Ancillary Justice", "Ancillary Justice", "a/aj (1)"),
+                (2, "Dune", "Dune", "b/dune (2)"),
+            ],
+        )
+        # Author with true sort key and an author-page URL; second author bare.
+        con.executemany(
+            "INSERT INTO authors VALUES (?,?,?,?)",
+            [
+                (1, "Ann Leckie", "Leckie, Ann", "https://example.com/leckie"),
+                (2, "Frank Herbert", "", ""),
+            ],
+        )
+        con.executemany(
+            "INSERT INTO books_authors_link (book,author) VALUES (?,?)",
+            [(1, 1), (2, 2)],
+        )
+        con.execute("INSERT INTO tags (name, link) VALUES ('Fic.SciFi', '')")
+        con.executemany(
+            "INSERT INTO books_tags_link (book,tag) VALUES (?,1)", [(1,), (2,)]
+        )
+        con.execute(
+            "INSERT INTO publishers (name,sort,link) VALUES ('Orbit','','https://orbit')"
+        )
+        con.execute("INSERT INTO books_publishers_link (book,publisher) VALUES (1,1)")
+        # Enumeration column with display config (enum values + colors).
+        display_json = (
+            '{"enum_values": ["Read", "Reading"], "enum_colors": {"Read": "#00ff00"}}'
+        )
+        con.execute(
+            "INSERT INTO custom_columns VALUES "
+            "(1,'status','Status','enumeration',1,?,0,1)",
+            (display_json,),
+        )
+        con.execute("INSERT INTO custom_column_1 (value) VALUES ('Read')")
+        con.execute("INSERT INTO books_custom_column_1_link VALUES (1,1)")
+        # Annotations feed the annotations: location.
+        con.execute(
+            "INSERT INTO annotations (book, format, searchable_text, annot_data) "
+            "VALUES (1, 'EPUB', 'the night dye was still wet on her hands', '{}')"
+        )
+        # Preferences exercising the typed accessor.
+        prefs = {
+            "grouped_search_terms": {"People": ["authors", "series"]},
+            "user_categories": {"Favorites": [{"name": "Fic.SciFi", "label": ":tags"}]},
+            "tag_browser_category_order": ["authors", "tags"],
+            "tag_browser_hidden_categories": ["languages"],
+            "field_metadata": {"#status": {"datatype": "enumeration", "colnum": 1}},
+            "plain_note": "just a string",
+        }
+        for key, val in prefs.items():
+            con.execute(
+                "INSERT INTO preferences (key,val) VALUES (?,?)",
+                (key, json.dumps(val)),
+            )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(os.path.join(self.temp_dir, "metadata.db"))
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_author_sort_and_link_parallel_arrays(self):
+        b = self.db.get_book(1)
+        self.assertEqual(b["authors"], ["Ann Leckie"])
+        self.assertEqual(b["author_sorts"], ["Leckie, Ann"])
+        self.assertEqual(b["author_links"], ["https://example.com/leckie"])
+        row = {x["id"]: x for x in self.db.get_all_books()}[2]
+        self.assertEqual(row["author_sorts"], [""])  # author has no sort set
+
+    def test_get_entities_shapes(self):
+        authors = self.db.get_entities("authors")
+        leckie = next(a for a in authors if a["name"] == "Ann Leckie")
+        self.assertEqual(leckie["count"], 1)
+        self.assertEqual(leckie["sort"], "Leckie, Ann")
+        self.assertEqual(leckie["link"], "https://example.com/leckie")
+        tags = self.db.get_entities("tags")
+        self.assertEqual(tags[0]["name"], "Fic.SciFi")
+        self.assertEqual(tags[0]["count"], 2)
+        pubs = self.db.get_entities("publishers")
+        self.assertEqual(pubs[0]["link"], "https://orbit")
+
+    def test_get_entities_unknown_kind_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.get_entities("ratings")  # not part of the uniform API
+
+    def test_custom_column_display_config(self):
+        cols = self.db.get_custom_columns()
+        status = cols["Status"]
+        self.assertTrue(status["editable"])
+        self.assertTrue(status["normalized"])
+        self.assertEqual(status["display"]["enum_values"], ["Read", "Reading"])
+        self.assertEqual(status["display"]["enum_colors"], {"Read": "#00ff00"})
+
+    def test_preferences_accessor(self):
+        self.assertEqual(self.db.get_preference("plain_note"), "just a string")
+        self.assertEqual(
+            self.db.get_preference("user_categories"),
+            {"Favorites": [{"name": "Fic.SciFi", "label": ":tags"}]},
+        )
+        self.assertIsNone(self.db.get_preference("missing"))
+        self.assertEqual(self.db.get_preference("missing", 7), 7)
+
+    def test_typed_preference_helpers(self):
+        fm = self.db.get_field_metadata()
+        self.assertEqual(fm["#status"]["colnum"], 1)
+        self.assertEqual(
+            self.db.get_grouped_search_terms(), {"People": ["authors", "series"]}
+        )
+        self.assertIn("Favorites", self.db.get_user_categories())
+        state = self.db.get_tag_browser_state()
+        self.assertEqual(state["order"], ["authors", "tags"])
+        self.assertEqual(state["hidden"], ["languages"])
+
+    def test_grouped_search_expansion(self):
+        # People covers authors AND series: Leckie matches via authors,
+        # Herbert via authors; "dune" is a title and matches neither member.
+        self.assertEqual(self.db.search("People:leckie"), {1})
+        self.assertEqual(self.db.search("people:herbert"), {2})
+        self.assertEqual(self.db.search("People:dune"), set())
+        # Union semantics: a term matching either member finds both books.
+        both = self.db.search("(People:leckie or People:herbert)")
+        self.assertEqual(both, {1, 2})
+
+    def test_grouped_search_false_inverts(self):
+        self.assertEqual(self.db.search("People:false"), set())
+        self.assertEqual(self.db.search("not People:false"), {1, 2})
+
+    def test_annotations_location_search(self):
+        self.assertEqual(self.db.search('annotations:"dye was still wet"'), {1})
+        self.assertEqual(self.db.search("annotations:wet"), {1})
+        self.assertEqual(self.db.search("annotations:true"), {1})
+        self.assertNotIn(1, self.db.search("annotations:false"))
+
+    def test_bare_terms_do_not_scan_annotations(self):
+        # Calibre's all-location excludes annotation text; 'wet' lives only
+        # in an annotation, so a bare term must not match book 1 through it.
+        self.assertEqual(self.db.search("wet"), set())
 
 
 if __name__ == "__main__":

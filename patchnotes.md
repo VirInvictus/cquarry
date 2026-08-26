@@ -1,3 +1,15 @@
+## v1.4.0 (2026-08-26)
+
+### Read-side coverage (Phase 6, batch 2)
+- **Entity secondary columns:** book rows gain `author_sorts` and `author_links` — arrays parallel to `authors` carrying each author's true sort key and link URL (empty strings on ancient schemas). New `get_entities(kind)` returns `{id, name, sort, link, count}` for authors / series / publishers / tags / languages, name-sorted; `PRAGMA` guards keep pre-column schemas working. (`ratings.link` remains unread — no consumer need; revisit on demand.)
+- **Custom-column display config:** `get_custom_columns()` values now include `editable`, `normalized`, and the decoded `display` JSON (`enum_values` / `enum_colors` / `composite_template` …), with documented defaults on schemas predating those columns.
+- **Generic preferences accessor:** `get_preference(key, default)` reads anything in the `preferences` table (JSON decoded where it parses, cached); typed helpers cover the high-traffic keys: `get_field_metadata()`, `get_grouped_search_terms()`, `get_user_categories()`, `get_tag_browser_state()` (order + hidden).
+- **Grouped search terms (search parity):** the engine resolves `GroupName:query` as a union over the group's member locations, `GroupName:false` inverted, real fields winning over same-named groups, nesting raising `ParseException` — upstream semantics from `preferences.grouped_search_terms`. Providers opt in via an optional `grouped_search_terms()` hook.
+- **Annotation search:** new `annotations:` location matches each book's concatenated annotation `searchable_text` with full text-match kinds (substring/exact/regex) plus `true`/`false` presence. Bare terms never sweep annotations, mirroring upstream. Documented deviation: ordinary matching instead of FTS stemming/ranking.
+
+### Internal
+- Test suite grew from 118 to 128 tests: parallel-array shape, entity shapes/counts/kind errors, display-config decoding, preference typing, grouped expansion/inversion, annotation matching and all-exclusion.
+
 ## v1.3.0 (2026-08-26)
 
 ### Read-side coverage (Phase 6)

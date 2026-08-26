@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.3.0  
+**Version:** 1.4.0  
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -74,6 +74,10 @@ For `token` nodes, the evaluator dispatches to a type-specific matcher based on 
 
 **Saved-search interpolation.** `search:"Name"` behaves identically to `vl:` but resolves against the provider's saved searches (Calibre's `preferences.saved_searches`). Nested references compose; cycles and unknown names raise `ParseException`.
 
+**Grouped search terms.** Calibre's `preferences.grouped_search_terms` maps a group name to member search locations; the engine resolves `GroupName:query` (and `@GroupName:query`) as the union over members, each evaluated without further group recursion — nesting is a `ParseException`. `GroupName:false` matches books where no member matches (upstream's inversion). Real field names always win over same-named groups.
+
+**Annotation search.** The `annotations` location exposes each book's concatenated annotation `searchable_text`; presence keywords (`true`/`false`) and all text match kinds work against it. Bare terms (`all`) never sweep annotation text, mirroring upstream.
+
 **The `all` pseudo-location.** Bare terms search `title`, `authors`, `author_sort`, `series`, `publisher`, `tags`, `comments`, **plus** any custom column whose engine datatype is text-like (text, text_multi, hier). Numeric, date, bool, and identifier custom columns are excluded, mirroring Calibre.
 
 ### 3.3 Helpers (`helpers.py`)
@@ -133,6 +137,7 @@ Canonical locations, their datatypes, and recognized aliases. Custom columns are
 | `series_index` | float | |
 | `size` | float (bytes) | |
 | `pages` | int | native `books_pages_link` first, `#pages` custom column fallback |
+| `annotations` | text | concatenated `searchable_text`; `all` never sweeps it |
 | `id` | int | |
 | `pubdate` | date | |
 | `timestamp` | date | `date` |

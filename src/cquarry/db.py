@@ -50,6 +50,9 @@ class CalibreDB:
         self._comments_cache: dict[int, str] | None = None
         self._pages_col_cache: Any = _UNSET
         self._pages_cache: dict[int, int] | None = None
+        self._prefs_cache: dict[str, Any] | None = None
+        self._cc_schema_cache: dict[str, bool] | None = None
+        self._annotations_text_cache: dict[int, str] | None = None
 
         self.conn = self._open(db_path)
         self.conn.row_factory = sqlite3.Row
@@ -124,12 +127,32 @@ class CalibreDB:
         """)
         books = [dict(row) for row in cur.fetchall()]
 
-        # Authors
-        amap = {}
-        for row in self.conn.execute(
-            "SELECT bal.book, a.name FROM books_authors_link bal JOIN authors a ON a.id = bal.author ORDER BY bal.id"
-        ):
-            amap.setdefault(row["book"], []).append(row["name"])
+        # Authors with their secondary columns (true sort key, link URL) as
+        # arrays parallel to `authors` — link-table order throughout. Ancient
+        # schemas without authors.sort/link degrade to empty strings.
+        amap: dict[int, list[str]] = {}
+        asortmap: dict[int, list[str]] = {}
+        alinkmap: dict[int, list[str]] = {}
+        try:
+            rows = self.conn.execute(
+                "SELECT bal.book, a.name, a.sort, a.link "
+                "FROM books_authors_link bal JOIN authors a ON a.id = bal.author "
+                "ORDER BY bal.id"
+            )
+            for row in rows:
+                bid = row["book"]
+                amap.setdefault(bid, []).append(row["name"])
+                asortmap.setdefault(bid, []).append(row["sort"] or "")
+                alinkmap.setdefault(bid, []).append(row["link"] or "")
+        except sqlite3.OperationalError:
+            for row in self.conn.execute(
+                "SELECT bal.book, a.name FROM books_authors_link bal "
+                "JOIN authors a ON a.id = bal.author ORDER BY bal.id"
+            ):
+                bid = row["book"]
+                amap.setdefault(bid, []).append(row["name"])
+                asortmap.setdefault(bid, []).append("")
+                alinkmap.setdefault(bid, []).append("")
         # Tags
         tmap = {}
         for row in self.conn.execute(
@@ -162,6 +185,8 @@ class CalibreDB:
 
         for b in books:
             b["authors"] = amap.get(b["id"], [])
+            b["author_sorts"] = asortmap.get(b["id"], [])
+            b["author_links"] = alinkmap.get(b["id"], [])
             b["tags"] = tmap.get(b["id"], [])
             b["languages"] = lmap.get(b["id"], [])
             b["formats"] = fmap.get(b["id"], [])
@@ -234,12 +259,28 @@ class CalibreDB:
         if row is None:
             return None
         b = dict(row)
-        cur.execute(
-            "SELECT a.name FROM books_authors_link bal "
-            "JOIN authors a ON a.id = bal.author WHERE bal.book = ? ORDER BY bal.id",
-            (book_id,),
-        )
-        b["authors"] = [r["name"] for r in cur.fetchall()]
+        try:
+            cur.execute(
+                "SELECT a.name, a.sort, a.link FROM books_authors_link bal "
+                "JOIN authors a ON a.id = bal.author WHERE bal.book = ? "
+                "ORDER BY bal.id",
+                (book_id,),
+            )
+            rows = cur.fetchall()
+            b["authors"] = [r["name"] for r in rows]
+            b["author_sorts"] = [r["sort"] or "" for r in rows]
+            b["author_links"] = [r["link"] or "" for r in rows]
+        except sqlite3.OperationalError:
+            cur.execute(
+                "SELECT a.name FROM books_authors_link bal "
+                "JOIN authors a ON a.id = bal.author WHERE bal.book = ? "
+                "ORDER BY bal.id",
+                (book_id,),
+            )
+            rows = cur.fetchall()
+            b["authors"] = [r["name"] for r in rows]
+            b["author_sorts"] = [""] * len(rows)
+            b["author_links"] = [""] * len(rows)
         cur.execute(
             "SELECT t.name FROM books_tags_link btl "
             "JOIN tags t ON t.id = btl.tag WHERE btl.book = ? ORDER BY t.name",
@@ -434,16 +475,109 @@ class CalibreDB:
             )
         return out
 
+    def _custom_columns_schema(self) -> dict[str, bool]:
+        """Which optional columns the custom_columns table has (cached).
+
+        ``editable``/``display``/``normalized`` arrived after the earliest
+        schemas; consumers on ancient databases get documented defaults
+        instead of an OperationalError.
+        """
+        if self._cc_schema_cache is None:
+            cols = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(custom_columns)")
+            }
+            self._cc_schema_cache = {
+                "editable": "editable" in cols,
+                "display": "display" in cols,
+                "normalized": "normalized" in cols,
+            }
+        return self._cc_schema_cache
+
     def get_custom_columns(self) -> dict[str, dict[str, Any]]:
-        """Return metadata for all custom columns, keyed by display name."""
+        """Return metadata for all custom columns, keyed by display name.
+
+        Each value carries ``id``, ``label``, ``name``, ``datatype`` and
+        ``is_multiple``, plus the display-config fields (cquarry >= 1.4):
+        ``editable`` (bool), ``normalized`` (bool) and ``display`` — the
+        decoded JSON blob holding ``enum_values``/``enum_colors``/
+        ``composite_template`` etc. Schemas predating a column get the
+        documented defaults (editable=True, normalized=False, display={}).
+        """
         cur = self.conn.cursor()
+        schema = self._custom_columns_schema()
+        extra = []
+        if schema["editable"]:
+            extra.append("editable")
+        if schema["normalized"]:
+            extra.append("normalized")
+        if schema["display"]:
+            extra.append("display")
+        select = "SELECT id, label, name, datatype, is_multiple"
+        if extra:
+            select += ", " + ", ".join(extra)
         try:
-            cur.execute(
-                "SELECT id, label, name, datatype, is_multiple FROM custom_columns"
-            )
-            return {row["name"]: dict(row) for row in cur.fetchall()}
+            cur.execute(select + " FROM custom_columns")
         except sqlite3.OperationalError:
             return {}
+        out: dict[str, dict[str, Any]] = {}
+        for row in cur.fetchall():
+            rec = dict(row)
+            rec.setdefault("editable", True)
+            rec.setdefault("normalized", False)
+            raw_display = rec.pop("display", None) if schema["display"] else None
+            decoded: Any = None
+            if isinstance(raw_display, str) and raw_display.strip():
+                try:
+                    decoded = json.loads(raw_display)
+                except json.JSONDecodeError:
+                    decoded = None
+            rec["display"] = decoded if isinstance(decoded, dict) else {}
+            out[rec["name"]] = rec
+        return out
+
+    def get_entities(self, kind: str) -> list[dict[str, Any]]:
+        """Entity rows with secondary columns and book counts.
+
+        ``kind`` is one of ``authors``, ``series``, ``publishers``,
+        ``tags``, ``languages``. Returns ``[{id, name, sort, link, count}]``
+        sorted by name — the data behind author cards and browse facets.
+        ``sort``/``link`` are ``""`` when the entity has none or the schema
+        predates the column; languages key their name under ``lang_code`` but
+        still surface it as ``name``. Unknown kinds raise ValueError.
+        """
+        table_map = {
+            "authors": ("authors", "books_authors_link", "author"),
+            "series": ("series", "books_series_link", "series"),
+            "publishers": ("publishers", "books_publishers_link", "publisher"),
+            "tags": ("tags", "books_tags_link", "tag"),
+            "languages": ("languages", "books_languages_link", "lang_code"),
+        }
+        if kind not in table_map:
+            raise ValueError(
+                f"Unknown entity kind {kind!r}. Available: {', '.join(sorted(table_map))}"
+            )
+        table, link_table, fk = table_map[kind]
+        name_col = "lang_code" if kind == "languages" else "name"
+
+        # Which secondary columns does this entity table have?
+        cols = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+        sort_expr = "COALESCE(sort, '')" if "sort" in cols else "''"
+        link_expr = "COALESCE(link, '')" if "link" in cols else "''"
+        pk = "id"
+        out: list[dict[str, Any]] = []
+        try:
+            rows = self.conn.execute(
+                f"SELECT e.{pk} AS id, e.{name_col} AS name, "
+                f"{sort_expr} AS sort, {link_expr} AS link, "
+                f"COUNT(l.book) AS count "
+                f"FROM {table} e LEFT JOIN {link_table} l ON l.{fk} = e.{pk} "
+                f"GROUP BY e.{pk} ORDER BY e.{name_col} COLLATE NOCASE"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        for row in rows:
+            out.append(dict(row))
+        return out
 
     def load_custom_column(self, col_name: str) -> dict[int, Any]:
         """Load values for a specific custom column (by display name). Returns {book_id: value(s)}."""
@@ -714,6 +848,112 @@ class CalibreDB:
             return []
         return [row["book"] for row in cur.fetchall()]
 
+    # --- Preferences (generic accessor) ---
+
+    def _preferences(self) -> dict[str, Any]:
+        """Every row of the ``preferences`` table, JSON-decoded where it parses.
+
+        Calibre stores nearly everything as JSON; a handful of keys are plain
+        strings and survive as strings. Cached — preferences are GUI state,
+        not something a short-lived read connection should poll.
+        """
+        if self._prefs_cache is None:
+            prefs: dict[str, Any] = {}
+            try:
+                cur = self.conn.cursor()
+                cur.execute("SELECT key, val FROM preferences")
+                for row in cur.fetchall():
+                    raw = row["val"]
+                    if isinstance(raw, str) and raw.strip():
+                        try:
+                            prefs[row["key"]] = json.loads(raw)
+                            continue
+                        except json.JSONDecodeError:
+                            pass
+                    prefs[row["key"]] = raw
+            except sqlite3.OperationalError:
+                pass  # schema predates the table
+            self._prefs_cache = prefs
+        return self._prefs_cache
+
+    def get_preference(self, key: str, default: Any = None) -> Any:
+        """Typed read of one Calibre preference (JSON decoded when possible).
+
+        Returns ``default`` when the key is absent or the schema predates the
+        ``preferences`` table. See also :meth:`get_field_metadata`,
+        :meth:`get_grouped_search_terms`, :meth:`get_user_categories` and
+        :meth:`get_tag_browser_state` for the high-traffic keys.
+        """
+        return self._preferences().get(key, default)
+
+    def get_field_metadata(self) -> dict[str, Any]:
+        """Calibre's rich ``field_metadata`` preference, decoded.
+
+        Maps custom-column label -> {column, datatype, display, category_sort,
+        ...}. The ``custom_columns`` table stays authoritative for existence;
+        this carries the GUI-side richness (e.g. ``display`` even on schemas
+        whose table column is missing).
+        """
+        fm = self.get_preference("field_metadata", {})
+        return fm if isinstance(fm, dict) else {}
+
+    def get_grouped_search_terms(self) -> dict[str, list[str]]:
+        """Grouped search terms: group name -> member search locations.
+
+        Mirrors Calibre's preferences key of the same name; drives
+        ``GroupName:query`` expansion in the search engine (see spec §3.2).
+        """
+        gst = self.get_preference("grouped_search_terms", {})
+        return gst if isinstance(gst, dict) else {}
+
+    def get_user_categories(self) -> dict[str, list[dict[str, Any]]]:
+        """User-defined tag-browser categories: name -> [{name, label, ...}]."""
+        uc = self.get_preference("user_categories", {})
+        return uc if isinstance(uc, dict) else {}
+
+    def get_tag_browser_state(self) -> dict[str, Any]:
+        """Tag-browser layout state: {"order": [...], "hidden": [...]}.
+
+        Reads ``tag_browser_category_order`` and
+        ``tag_browser_hidden_categories`` so frontends can mirror Calibre's
+        own browse-sidebar layout, the same way :meth:`get_vl_ui_state` does
+        for virtual libraries.
+        """
+        order = self.get_preference("tag_browser_category_order", [])
+        hidden = self.get_preference("tag_browser_hidden_categories", [])
+        return {
+            "order": order if isinstance(order, list) else [],
+            "hidden": hidden if isinstance(hidden, list) else [],
+        }
+
+    def grouped_search_terms(self) -> dict[str, list[str]]:
+        """MetadataProvider hook: grouped search terms for the engine."""
+        return self.get_grouped_search_terms()
+
+    def _annotations_text(self, book_id: int) -> str:
+        """Concatenated annotation searchable text for one book (cached).
+
+        Feeds the ``annotations:`` search location. Empty string when the
+        book has no annotations or the schema predates the table.
+        """
+        if self._annotations_text_cache is None:
+            self._annotations_text_cache = {}
+        if book_id not in self._annotations_text_cache:
+            parts: list[str] = []
+            try:
+                cur = self.conn.cursor()
+                cur.execute(
+                    "SELECT searchable_text FROM annotations "
+                    "WHERE book = ? AND searchable_text IS NOT NULL "
+                    "ORDER BY id",
+                    (book_id,),
+                )
+                parts = [r[0] for r in cur.fetchall() if r[0]]
+            except sqlite3.OperationalError:
+                pass
+            self._annotations_text_cache[book_id] = "\n".join(parts)
+        return self._annotations_text_cache[book_id]
+
     # --- Search & virtual library resolution ---
 
     def _engine(self) -> SearchEngine:
@@ -803,6 +1043,12 @@ class CalibreDB:
             # column labelled 'pages' remains the fallback on older schemas.
             val = self._page_counts().get(book_id)
             return int(val) if isinstance(val, (int, float)) else None
+
+        if location == "annotations":
+            # Annotation highlights/bookmarks text (cquarry >= 1.4). Grammar-
+            # consistent substring/exact/regex matching over the concatenated
+            # searchable_text; `true`/`false` test presence naturally.
+            return self._annotations_text(book_id)
 
         rec = self._build_search_view().get(book_id)
         return rec.get(location) if rec else None

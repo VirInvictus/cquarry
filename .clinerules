@@ -24,7 +24,7 @@ The canonical read-only SQLite database layer and search grammar engine for Cali
 - **Dirtied queue is read-only on the read side.** `CalibreDB.get_dirtied_books()` only observes; clearing entries is Calibre's job (`mark_book_as_clean()`). Never DELETE from it in cquarry code.
 
 ## Layout
-- `src/cquarry/db.py`: `CalibreDB` connection management, snapshot fallback for locked databases, schema mapping, Phase-2 extractors (`get_annotations`, `get_last_read_positions`, `get_plugin_data`, `get_conversion_profiles`), single-entity APIs (`get_book`, `search_books`, `get_format_path`), read-side coverage (`get_dirtied_books`, `get_formats`, `get_cover_path`, `get_library_uuid`, native `pages` via `books_pages_link`).
+- `src/cquarry/db.py`: `CalibreDB` connection management, snapshot fallback for locked databases, schema mapping, Phase-2 extractors (`get_annotations`, `get_last_read_positions`, `get_plugin_data`, `get_conversion_profiles`), single-entity APIs (`get_book`, `search_books`, `get_format_path`), read-side coverage (`get_dirtied_books`, `get_formats`, `get_cover_path`, `get_library_uuid`, native `pages` via `books_pages_link`, entity secondary columns via `get_entities`, typed preferences via `get_preference`/`get_field_metadata`/`get_user_categories`/`get_tag_browser_state`).
 - `src/cquarry/search.py`: Lexer, AST Parser, and Evaluator for Calibre's search grammar (incl. saved-search interpolation, count operator, lang canonicalization).
 - `src/cquarry/helpers.py`: Common domain-specific logic (star ratings, JPEG/PNG header sniffing, author normalization, `strip_html`, `tags_to_tree`).
 - `src/cquarry/write.py`: Opt-in `WritableCalibreDB` + `register_udfs()` for trigger-safe writes. Separate module by design (spec §3.6).
