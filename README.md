@@ -11,6 +11,7 @@ This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry
 - **Direct SQLite access.** No `calibredb` binary required, no Calibre Python initialization overhead.
 - **Lock-safe snapshots.** Automatically detects if Calibre holds an exclusive write lock on `metadata.db` and routes queries through a temporary WAL-consistent copy.
 - **Full search grammar parity.** A recursive-descent parser faithfully porting Calibre's native search capabilities: boolean logic, field prefixes, date math (hyphen *and* slash separators), hierarchical tags with `.`/`..` component modifiers on every text field, custom columns, identifiers, saved-search interpolation (`search:"Name"`), multi-valued count operators (`tags:#>3`), language canonicalization (`languages:English` → `eng`), and nested virtual library cross-references.
+- **Native page counts.** The `pages:` location reads Calibre's own `books_pages_link` table first (maintained by upstream's CountPages integration) and falls back to an int custom column labelled `pages`; counts also ride along in every book row.
 - **Metadata portability.** Read e-reader annotations, per-device reading progress, third-party plugin data, and conversion profiles; sanitize comments HTML for display.
 - **Opt-in write path.** `cquarry.write.WritableCalibreDB` offers trigger-safe title/tag/identifier mutations in a separate module the read-only API can never touch — every mutation bumps `last_modified` *and* queues the book in `metadata_dirtied`, so Calibre regenerates the sidecar OPF (and re-pushes to wireless readers) on its next run.
 - **Context manager.** `CalibreDB` supports `with` statements for automatic cleanup of snapshot files.
@@ -93,10 +94,13 @@ with CalibreDB("/path/to/metadata.db") as db:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `get_all_books()` | `list[dict[str, Any]]` | Every book in the library, pre-hydrated with `authors`, `tags`, `series`, `rating`, `publisher`, `languages`, `formats`, `title_sort`, `author_sort`, `timestamp`, `pubdate`, `last_modified`, `has_cover`, `series_index`, `size`, and `path`. `authors`, `tags`, `languages`, and `formats` are exposed natively as `list[str]` arrays. Results are cached after the first call. |
+| `get_all_books()` | `list[dict[str, Any]]` | Every book in the library, pre-hydrated with `authors`, `tags`, `series`, `rating`, `publisher`, `languages`, `formats`, `title_sort`, `author_sort`, `timestamp`, `pubdate`, `last_modified`, `has_cover`, `series_index`, `size`, `pages`, and `path`. `authors`, `tags`, `languages`, and `formats` are exposed natively as `list[str]` arrays. Results are cached after the first call. |
 | `get_book(book_id)` | `dict[str, Any] \| None` | Fetch one hydrated record (same shape as a `get_all_books()` row) without scanning the library. |
 | `search_books(query)` | `list[dict[str, Any]]` | Evaluate a search expression and return the hydrated matching books. |
 | `get_format_path(book_id, fmt, verify=True)` | `str` | Absolute filesystem path for a book's format file, built from the original DB location. Raises `ValueError` for unknown book/format, `FileNotFoundError` when `verify` is set and the file is missing. |
+| `get_formats(book_id)` | `dict[str, dict[str, Any]]` | Per-format detail: `{fmt: {path, size_bytes, name}}` (path unverified; size from the catalogued uncompressed size). `{}` for unknown books. |
+| `get_cover_path(book_id, verify=True)` | `str \| None` | Resolved cover image path (`cover.jpg`, falling back to `cover.png`) from the original DB location. With `verify` (default) returns None when no file exists on disk; without it returns the `.jpg` path unconditionally. Raises `ValueError` for unknown books. |
+| `get_library_uuid()` | `str \| None` | The library's identity UUID (`library_id` table) — stable across moves/restores, unlike per-book uuids; the right cache key for per-library state. None on very old schemas. |
 | `get_identifiers(book_id)` | `dict[str, str]` | All identifiers for a book (e.g. `isbn`, `amazon`, `lcc`), keyed by type. |
 | `get_all_tags()` | `list[str]` | Every distinct tag name, sorted alphabetically. |
 | `get_tag_counts()` | `list[tuple[str, int]]` | `(tag_name, book_count)` pairs, sorted by tag name. |
@@ -250,7 +254,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.2.0"
+print(cquarry.__version__)  # "1.3.0"
 ```
 
 ### Writes (`cquarry.write`) — opt-in
@@ -306,7 +310,7 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 | `formats` | `format` | text_multi | |
 | `languages` | `language`, `lang` | text_multi | English names canonicalized to ISO codes |
 | `size` | | float (bytes) | Total across formats; `k`/`m`/`g` suffixes |
-| `pages` | | int | Via a `#pages` custom column when present |
+| `pages` | | int | Native `books_pages_link` first; `#pages` custom column fallback |
 | `pubdate` | | date | |
 | `timestamp` | `date` | date | |
 | `last_modified` | | date | |
@@ -352,7 +356,6 @@ identifiers:true               # has any identifier at all
 - **GUI-state locations.** `marked`, `ondevice`, and `in_tag_browser` exist only inside Calibre's own UI session and are not implemented.
 - **Hierarchical tag matching.** `tags:` uses cquarry's anchored match (`Foo` matches `Foo` and `Foo.*`) rather than Calibre's raw substring default. This is a long-standing project invariant.
 - **`series_sort` format.** Computed as `"Series [index]"`.
-- **`pages` sourcing.** No native pages table exists; the location resolves through an int custom column labelled `pages` when present.
 
 ## Development
 

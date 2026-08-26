@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.2.0  
+**Version:** 1.3.0  
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -132,7 +132,7 @@ Canonical locations, their datatypes, and recognized aliases. Custom columns are
 | `rating` | rating | |
 | `series_index` | float | |
 | `size` | float (bytes) | |
-| `pages` | int | via `#pages` custom column |
+| `pages` | int | native `books_pages_link` first, `#pages` custom column fallback |
 | `id` | int | |
 | `pubdate` | date | |
 | `timestamp` | date | `date` |
@@ -152,7 +152,8 @@ These are permanent, dependency- or GUI-bound limitations, not bugs.
 4. **GUI-state locations.** `marked`, `ondevice`, and `in_tag_browser` reflect state that only exists inside Calibre's own UI session; they are not implemented.
 5. **Tag matching default.** `tags:Foo` uses anchored prefix matching (matches `Foo` and `Foo.*`), not Calibre's raw substring matching (which would also match `BarFoo`). This is a deliberate project invariant, not a porting gap; it matches how every consumer in the ecosystem has always treated tags.
 6. **`series_sort` format.** Computed as `"Series [index]"`; Calibre builds an equivalent sort string internally but does not expose its exact formatting contract.
-7. **`pages` sourcing.** There is no native pages table in `metadata.db`; the location resolves through an int custom column labelled `pages` when present, else no book ever matches.
+
+*(Former item 7 — "`pages` sourcing" — was resolved in v1.3.0: Calibre now maintains page counts natively in `books_pages_link`, which cquarry reads first with the `#pages` custom column kept as an older-schema fallback. It is no longer a deviation.)*
 
 ## 6. Downstream consumers
 
@@ -160,10 +161,10 @@ cquarry is the shared foundation. Changes to its behavior affect all of these:
 
 | Consumer | What it uses |
 |----------|-------------|
-| **CalibreQuarry** (CLI/TUI) | `CalibreDB`, `search()`, `search_books()`, `get_book()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `get_annotations()`, `get_plugin_data()`, `get_dirtied_books()`, `get_all_series()`, `get_tag_counts()`, `get_format_path()`, `find_db()`, `format_stars()`, `strip_html()`, `tags_to_tree()`, `normalize_author_display()`, `detect_series_gaps()`, `get_image_size()`, `color()`, `write.WritableCalibreDB` |
+| **CalibreQuarry** (CLI/TUI) | `CalibreDB`, `search()`, `search_books()`, `get_book()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `get_annotations()`, `get_plugin_data()`, `get_dirtied_books()`, `get_formats()`, `get_cover_path()`, `get_library_uuid()`, `get_all_series()`, `get_tag_counts()`, `get_format_path()`, `find_db()`, `format_stars()`, `strip_html()`, `tags_to_tree()`, `normalize_author_display()`, `detect_series_gaps()`, `get_image_size()`, `color()`, `write.WritableCalibreDB` |
 | **Hermitage** (GTK4 gallery) | `CalibreDB`, `search()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_saved_searches()`, `get_vl_ui_state()`, `get_annotations()`, `get_last_read_positions()`, `normalize_rating()` |
 | **Carrel-calibre-web** (web reader) | `CalibreDB`, `search()`, `get_virtual_libraries()` |
-| **Bindery** (EPUB repair) | `get_image_size()` (cover audit), `get_format_path()` (EPUB resolution), `write.WritableCalibreDB` (optional flag tagging) |
+| **Bindery** (EPUB repair) | `get_image_size()` (cover audit), `get_format_path()` (EPUB resolution), `get_formats()` (audited-format reporting), `write.WritableCalibreDB` (optional flag tagging) |
 
 ## 7. Out of scope (non-goals)
 

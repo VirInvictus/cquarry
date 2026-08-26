@@ -49,6 +49,7 @@ class CalibreDB:
         self._custom_val_cache: dict[str, dict[int, Any]] = {}
         self._comments_cache: dict[int, str] | None = None
         self._pages_col_cache: Any = _UNSET
+        self._pages_cache: dict[int, int] | None = None
 
         self.conn = self._open(db_path)
         self.conn.row_factory = sqlite3.Row
@@ -155,15 +156,47 @@ class CalibreDB:
         except sqlite3.OperationalError:
             pass  # very old schemas may lack uncompressed_size
 
+        # Page counts: Calibre now manages them natively in books_pages_link;
+        # older conventions put them in an int custom column labelled 'pages'.
+        pmap = self._page_counts()
+
         for b in books:
             b["authors"] = amap.get(b["id"], [])
             b["tags"] = tmap.get(b["id"], [])
             b["languages"] = lmap.get(b["id"], [])
             b["formats"] = fmap.get(b["id"], [])
             b["size"] = smap.get(b["id"])
+            b["pages"] = pmap.get(b["id"])
 
         self._books_cache = books
         return self._books_cache
+
+    def _page_counts(self) -> dict[int, int]:
+        """Book-id -> page-count map, native table first, custom column second.
+
+        ``books_pages_link`` is upstream-managed (cache.py maintains it and
+        ships the CountPages plugin results there); when absent, fall back to
+        an int/float custom column labelled 'pages'. Both lookups are cached.
+        """
+        if self._pages_cache is not None:
+            return self._pages_cache
+        pages: dict[int, int] = {}
+        cur = self.conn.cursor()
+        try:
+            for row in cur.execute(
+                "SELECT book, pages FROM books_pages_link WHERE pages IS NOT NULL"
+            ):
+                pages[row["book"]] = int(row["pages"])
+        except sqlite3.OperationalError:
+            pass  # schema predates the native table
+        if not pages:
+            col = self._pages_column()
+            if col is not None:
+                for bid, val in self.load_custom_column(col["name"]).items():
+                    if isinstance(val, (int, float)):
+                        pages[bid] = int(val)
+        self._pages_cache = pages
+        return self._pages_cache
 
     def get_identifiers(self, book_id: int) -> dict[str, str]:
         cur = self.conn.cursor()
@@ -221,6 +254,7 @@ class CalibreDB:
         b["languages"] = [r["lang_code"] for r in cur.fetchall()]
         cur.execute("SELECT format FROM data WHERE book = ?", (book_id,))
         b["formats"] = [r["format"] for r in cur.fetchall()]
+        b["pages"] = self._page_counts().get(book_id)
         return b
 
     def search_books(self, query: str) -> list[dict[str, Any]]:
@@ -263,6 +297,88 @@ class CalibreDB:
         if verify and not os.path.exists(path):
             raise FileNotFoundError(f"Format file missing on disk: {path}")
         return path
+
+    def get_formats(self, book_id: int) -> dict[str, dict[str, Any]]:
+        """Per-format detail for a book: ``{fmt: {path, size_bytes, name}}``.
+
+        ``path`` follows Calibre's storage layout from the original DB location
+        (not verified against disk — pair with ``os.path.exists`` or use
+        :meth:`get_format_path` for verification). ``size_bytes`` is the
+        catalogued uncompressed size (None on schemas lacking the column);
+        ``name`` is the filename stem Calibre stores in ``data.name``.
+        Returns ``{}`` for unknown books.
+        """
+        cur = self.conn.cursor()
+        brow = cur.execute("SELECT path FROM books WHERE id = ?", (book_id,)).fetchone()
+        if brow is None:
+            return {}
+        root = os.path.dirname(os.path.abspath(self.db_path))
+        out: dict[str, dict[str, Any]] = {}
+        try:
+            rows = cur.execute(
+                "SELECT format, name, uncompressed_size FROM data WHERE book = ?",
+                (book_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = cur.execute(
+                "SELECT format, name, NULL as uncompressed_size FROM data WHERE book = ?",
+                (book_id,),
+            ).fetchall()
+        for row in rows:
+            fmt = row["format"]
+            if not fmt:
+                continue
+            out[fmt.upper()] = {
+                "path": os.path.join(
+                    root, brow["path"], row["name"] + "." + fmt.lower()
+                ),
+                "size_bytes": row["uncompressed_size"],
+                "name": row["name"],
+            }
+        return out
+
+    def get_cover_path(self, book_id: int, verify: bool = True) -> str | None:
+        """Resolve a book's cover image path (``cover.jpg``, falling back to
+        ``cover.png``).
+
+        Builds ``<library root>/<books.path>/cover.jpg`` per Calibre's storage
+        layout from the original DB location (snapshot-safe). With ``verify``
+        set (default), returns None instead of a path when no cover file
+        exists on disk; without it, returns the .jpg path unconditionally so
+        callers can distinguish 'catalogued' from 'present'. Raises ValueError
+        when the book is unknown.
+        """
+        cur = self.conn.cursor()
+        brow = cur.execute(
+            "SELECT path, has_cover FROM books WHERE id = ?", (book_id,)
+        ).fetchone()
+        if brow is None:
+            raise ValueError(f"Book {book_id} not found")
+        root = os.path.dirname(os.path.abspath(self.db_path))
+        jpg = os.path.join(root, brow["path"], "cover.jpg")
+        png = os.path.join(root, brow["path"], "cover.png")
+        if not verify:
+            return jpg
+        if os.path.exists(jpg):
+            return jpg
+        if os.path.exists(png):
+            return png
+        return None
+
+    def get_library_uuid(self) -> str | None:
+        """The library's identity UUID from the ``library_id`` table.
+
+        Book uuids are per-copy; this one identifies the library itself and
+        survives moves/restores, making it the right key for consumers that
+        cache state per library (a bundled copy of the same library yields a
+        different UUID than the original). Returns None when the table or row
+        is missing (very old schemas).
+        """
+        try:
+            row = self.conn.execute("SELECT uuid FROM library_id LIMIT 1").fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row["uuid"] if row else None
 
     def get_all_tags(self) -> list[str]:
         cur = self.conn.cursor()
@@ -683,12 +799,9 @@ class CalibreDB:
             return self._comments_cache[book_id]
 
         if location == "pages":
-            # Calibre has no native pages table; conventions place page counts
-            # in an int custom column labelled 'pages'. Resolve lazily.
-            col = self._pages_column()
-            if col is None:
-                return None
-            val = self._custom_value(book_id, "#pages")
+            # Native books_pages_link first (upstream-managed); an int custom
+            # column labelled 'pages' remains the fallback on older schemas.
+            val = self._page_counts().get(book_id)
             return int(val) if isinstance(val, (int, float)) else None
 
         rec = self._build_search_view().get(book_id)

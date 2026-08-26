@@ -1,3 +1,14 @@
+## v1.3.0 (2026-08-26)
+
+### Read-side coverage (Phase 6)
+- **Native page counts:** the `pages:` search location now reads Calibre's own `books_pages_link` table first (upstream-managed since the CountPages integration; guarded by an OperationalError catch for older schemas), keeping an int custom column labelled `pages` as fallback. Page counts also surface as a `pages` key on every `get_all_books()`/`get_book()` row. This resolves former documented deviation §5 item 7.
+- **New API `get_formats(book_id)`** returns per-format detail `{fmt: {path, size_bytes, name}}` (unverified path from the original DB location; catalogued uncompressed size; filename stem) so consumers can pick/report formats without raw `data` queries.
+- **New API `get_cover_path(book_id, verify=True)`** resolves `<library>/<books.path>/cover.jpg` with a `cover.png` fallback and disk verification (None when absent); `verify=False` returns the catalogued path unconditionally. Raises ValueError for unknown books.
+- **New API `get_library_uuid()`** exposes the library's identity UUID from `library_id` — stable across moves/restores, unlike per-book uuids; intended as the cache key for per-library state in web/GUI consumers. None on schemas without the table.
+
+### Internal
+- Test suite grew from 111 to 118 tests: native-vs-fallback page precedence, end-to-end `pages:` searches, UUID round-trips, format-map shape, and cover-path variants (jpg/png/missing/unverified).
+
 ## v1.2.0 (2026-08-25)
 
 ### Write-path correctness (Phase 6)
