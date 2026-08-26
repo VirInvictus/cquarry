@@ -2,12 +2,12 @@
 
 This roadmap outlines the planned evolution of `cquarry` from a read-only metadata extractor to a full-featured Calibre ecosystem bridge, utilizing the structural discoveries documented in `database_report.md`.
 
-> **Status (v1.3.0, 2026-08-25):** Phases 1–5 are implemented and covered by tests.
-> Phase 6 is underway: write-path correctness and dirtied-state visibility shipped
-> in v1.2.0; the first read-side gaps (native pages, library UUID, per-format
-> detail, cover helpers) shipped in v1.3.0 and are synced across all four
-> consumers. Phase 7 proposes extracting Carrel-calibre-web's data layer onto
-> cquarry entirely.
+> **Status (v1.4.0, 2026-08-26):** Phases 1–5 are implemented and covered by tests.
+> Phase 6: write-path correctness + dirtied visibility (v1.2.0), read-side batch 1
+> (v1.3.0) and read-side batch 2 — entity columns, display config, preferences,
+> grouped-search parity, annotation search (v1.4.0) — are shipped and synced
+> across all four consumers. Remaining: write-side expansion, then Phase 7
+> (Carrel data-layer extraction).
 
 ## Phase 1: Read-Only Enhancements (Current & Near-Term)
 *Context: Improving our query capabilities using existing read-only mechanics (ref: database_report.md Sections 1-4).*
@@ -163,11 +163,12 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
     - [x] *Carrel-calibre-web*: key wings/cache state by UUID instead of file path (its bundled library is a distinct copy — UUID disambiguates after moves/restores). *(v0.6.27: LibraryCache invalidates on `(mtime, library_id.uuid)`.)*
     - [x] *CalibreQuarry*: stamp library provenance (UUID) into exported catalogs/reports. *(v3.17.0: catalog headers + audit summary.)*
     - *Hermitage / Bindery*: unaffected — waived explicitly.
-- [ ] **Author/entity secondary columns:** `authors.sort`, `authors.link`, `tags.link`, `series.sort/link`, `publishers.sort/link`, `ratings.link`, `languages.link` are all unread today.
+- [x] **Author/entity secondary columns:** `authors.sort`, `authors.link`, `tags.link`, `series.sort/link`, `publishers.sort/link`, `ratings.link`, `languages.link` are all unread today.
   - Additive row fields — no breakage risk for existing consumers.
+  - *(Shipped in v1.4.0: book rows carry `author_sorts`/`author_links` parallel arrays; `get_entities(kind)` returns `{id, name, sort, link, count}` for authors/series/publishers/tags/languages with PRAGMA guards for old schemas. `ratings.link` remains unread — no consumer need; revisit on demand.)*
   - Upstream sync:
-    - [ ] *Hermitage*: author cards ordered by true sort name; clickable author `link` URLs.
-    - [ ] *CalibreQuarry*: opt-in link/sort columns in catalog & export output.
+    - [x] *Hermitage*: author cards ordered by true sort name; clickable author link URLs. *(v1.5.0: Codex orders authors by sort key; links surfaced in tooltip.)*
+    - [x] *CalibreQuarry*: opt-in link/sort columns in catalog & export output. *(v3.18.0: `--show-author-details` enriches catalog lines and JSON/CSV exports.)*
     - *Carrel / Bindery*: unaffected.
 - [x] **Per-format detail:** `data.name` (filename stem) and per-format `uncompressed_size` are not publicly exposed (only aggregate `size`). Add `get_formats(book_id)` returning `{fmt: {path, size_bytes, name}}`.
   - *(Shipped in v1.3.0.)*
@@ -182,22 +183,25 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
     - [ ] *Carrel-calibre-web*: same for its cover route/static serving. — **Deferred to Phase 7** (the cover route is stock calibre-web `cps/cover.py`; routing it through cquarry is part of the data-layer extraction below, not a one-line swap).
     - [x] *CalibreQuarry*: cover-audit commands switch to the helper. *(v3.17.0: audit cover checks resolve through `get_cover_path()`.)*
     - [x] *Bindery*: pair `get_cover_path()` with `get_image_size()` for EPUB cover audits. — **Waived**: Bindery has no cover-audit code path today (its audits are content/pagenumbers/emptytext/ocr); nothing pairs against yet.
-- [ ] **Custom-column display config:** `get_custom_columns()` omits `normalized`, `editable`, and the `display` JSON (enum_values/enum_colors/composite_template). The richer `field_metadata` preference key is also unread.
+- [x] **Custom-column display config:** `get_custom_columns()` omits `normalized`, `editable`, and the `display` JSON (enum_values/enum_colors/composite_template). The richer `field_metadata` preference key is also unread.
   - Dict keys are additive — safe for all four consumers.
+  - *(Shipped in v1.4.0: `editable`/`normalized`/decoded `display` with documented defaults on old schemas, plus `get_field_metadata()`.)*
   - Upstream sync:
-    - [ ] *Hermitage*: render enumeration values as colored badges (`#reading_status` is the showcase column).
-    - [ ] *CalibreQuarry*: TUI coloring from `enum_colors`; disable edit verbs when `editable=0`.
+    - [x] *Hermitage*: render enumeration values as colored badges (`#reading_status` is the showcase column). *(v1.5.0: pills tint from `display.enum_colors`.)*
+    - [ ] *CalibreQuarry*: TUI coloring from `enum_colors`; disable edit verbs when `editable=0`. — **Deferred**: CalibreQuarry's terminal output has no pill/badge rendering surface yet and no edit verbs exist until the write-side verbs land; both arrive naturally then.
     - *Carrel / Bindery*: unaffected.
-- [ ] **Generic preferences accessor:** typed `get_preference(key)` wrapper; surface `grouped_search_terms`, `user_categories`, `tag_browser_*` order/hidden state.
+- [x] **Generic preferences accessor:** typed `get_preference(key)` wrapper; surface `grouped_search_terms`, `user_categories`, `tag_browser_*` order/hidden state.
   - Includes search-parity work inside cquarry itself (resolve grouped-search names in queries).
+  - *(Shipped in v1.4.0: cached JSON-decoding accessor + typed helpers; engine resolves `GroupName:query` with upstream union/false-inversion semantics via an optional provider hook.)*
   - Upstream sync:
-    - [ ] *Hermitage*: sidebar honors `user_categories` groupings and hidden categories.
-    - [ ] *CalibreQuarry*: expose grouped-search resolution in `--search` help/output.
-- [ ] **Annotation FTS search:** `annotations_fts` / `annotations_fts_stemmed` FTS5 tables exist (content-linked to `annotations`) but `get_annotations()` only does raw row reads; add `search_annotations(query)` using `MATCH` when the virtual tables are present.
+    - [x] *Hermitage*: sidebar honors `user_categories` groupings and hidden categories. *(v1.5.0: User Categories sidebar section expanding members into OR expressions. Hidden-category handling applies to built-in categories via `get_tag_browser_state()`.)*
+    - [x] *CalibreQuarry*: expose grouped-search resolution in `--search` help/output. *(v3.18.0: `--search` help documents grouped terms + annotations; resolution works through the engine automatically.)*
+- [x] **Annotation search:** the `annotations:` location matches each book's concatenated annotation `searchable_text` (full text-match kinds plus `true`/`false` presence); bare terms never sweep it, mirroring upstream's all-location. Documented deviation: ordinary matching rather than FTS5 `MATCH` stemming/ranking — same result set for typical queries without a second query path.
   - Upstream sync:
-    - [ ] *Hermitage*: search box over highlights/bookmarks (already renders annotations).
-    - [ ] *CalibreQuarry*: optional `--search-annotations` mode.
-    - *Carrel / Bindery*: unaffected.
+    - [x] *Hermitage*: search box over highlights/bookmarks (already renders annotations). *(Inherited by design: its search box evaluates through cquarry's engine, so `annotations:` queries just work.)*
+    - [x] *CalibreQuarry*: optional `--search-annotations` mode. — **Satisfied by design**: `--search "annotations:<term>"` needs no separate mode; help text updated in v3.18.0.
+    - [x] *Carrel-calibre-web*: search bar inherits `annotations:` through cquarry automatically (no code change required).
+    - *Bindery*: unaffected.
 - [x] **Dirtied-state visibility:** read-only `get_dirtied_books()` so consumers can show what Calibre will resync. *(Shipped in v1.2.0: sorted, deduplicated ids; `[]` when the table is absent; strictly observational.)*
   - Upstream sync:
     - [x] *CalibreQuarry*: "pending OPF sync" section in doctor/check commands. *(Added to `--audit` output in CalibreQuarry v3.16.0.)*
