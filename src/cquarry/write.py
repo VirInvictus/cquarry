@@ -995,8 +995,7 @@ class WritableCalibreDB:
                 # (id, value, link) and are cleaned via their links above,
                 # leaving shared values intact for other books.
                 cols = {
-                    r[1]
-                    for r in self.conn.execute(f"PRAGMA table_info({value_table})")
+                    r[1] for r in self.conn.execute(f"PRAGMA table_info({value_table})")
                 }
                 if "book" in cols:
                     self.conn.execute(
