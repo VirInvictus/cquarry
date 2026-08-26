@@ -1,3 +1,12 @@
+## v1.2.0 (2026-08-25)
+
+### Write-path correctness (Phase 6)
+- **OPF sync fix:** every `WritableCalibreDB` mutation now records the book id in Calibre's `metadata_dirtied` queue (`INSERT OR IGNORE`; guarded by a cached `sqlite_master` existence check for pre-existing schemas). Previously writes only bumped `books.last_modified`, but upstream regenerates a book's sidecar `.opf` — and re-pushes metadata to wireless readers — *only* for ids present in `metadata_dirtied` (backend.py `dirty_books()`/`dirtied_books()`), so external edits never reached OPF/wireless sync. No-op mutations still queue nothing.
+- **New read API: `CalibreDB.get_dirtied_books()`** returns the sorted, deduplicated ids awaiting resync so consumers can show what Calibre will pick up at its next startup (`[]` when the table is absent). Strictly observational — clearing the queue remains Calibre's job.
+
+### Internal
+- Test suite grew from 104 to 111 tests: per-mutation dirtied-queue assertions (including no-op and duplicate-insert semantics against the real `UNIQUE(book)` schema) and reader coverage for missing-table tolerance.
+
 ## v1.1.1 (2026-08-25)
 
 - **Fix**: `get_last_read_positions()` now matches Calibre’s real schema — the table has no `user_type` column and its time field is `epoch`, not `epoch_time`. Against a live library the old SELECT silently returned an empty list on OperationalError; rows now surface `id/book/format/user/device/cfi/epoch/pos_frac` exactly as stored. Caught by Carrel-calibre-web’s CI fixture, which uses a schema dumped from a real library.

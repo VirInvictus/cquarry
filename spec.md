@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -104,10 +104,12 @@ A JSON file at `~/.config/cquarry/config.json` persists the database path across
 **Safety contract:**
 - Registers Calibre's trigger dependencies before any statement runs: `title_sort()`, `uuid4()`, and the `PYNOCASE` collation. Calibre's `books_insert_trg` / `books_update_trg` abort any write when these are missing.
 - Opens with a 30 s `busy_timeout` so a running Calibre degrades writes to waiting rather than erroring.
-- Mutations run in explicit `BEGIN IMMEDIATE` transactions and bump `books.last_modified` so Calibre regenerates sidecar `.opf` files.
+- Mutations run in explicit `BEGIN IMMEDIATE` transactions, bump `books.last_modified`, AND insert the book id into `metadata_dirtied` (`INSERT OR IGNORE`). Calibre regenerates a book's sidecar `.opf` — and re-pushes metadata to wireless readers — only for ids present in that table (backend.py `dirty_books()` / `dirtied_books()`); it consumes and clears the queue at startup. Skipping the insert would leave external edits invisible to OPF/wireless sync forever. The insert is guarded by a cached `sqlite_master` existence check so schemas predating the table keep working.
 - Tag removal deletes link-table rows before possibly pruning the orphaned tag — the order `fkc_delete_on_tags` requires.
 
 **API:** `update_title(book_id, title)` (refreshes `sort` via `title_sort`), `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` (return whether stored state changed), `set_identifier(book_id, type, val)` / `set_identifiers(book_id, pairs)` (EAV upserts honoring `UNIQUE(book, type)`; `None`/blank deletes).
+
+The read side exposes the same queue for observability: `CalibreDB.get_dirtied_books()` returns the sorted, deduplicated ids awaiting resync (empty list when the table is absent). It never clears the queue — that remains Calibre's job (`mark_book_as_clean()`).
 
 ## 4. Field location table
 
@@ -158,7 +160,7 @@ cquarry is the shared foundation. Changes to its behavior affect all of these:
 
 | Consumer | What it uses |
 |----------|-------------|
-| **CalibreQuarry** (CLI/TUI) | `CalibreDB`, `search()`, `search_books()`, `get_book()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `get_annotations()`, `get_plugin_data()`, `get_all_series()`, `get_tag_counts()`, `get_format_path()`, `find_db()`, `format_stars()`, `strip_html()`, `tags_to_tree()`, `normalize_author_display()`, `detect_series_gaps()`, `get_image_size()`, `color()`, `write.WritableCalibreDB` |
+| **CalibreQuarry** (CLI/TUI) | `CalibreDB`, `search()`, `search_books()`, `get_book()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `get_annotations()`, `get_plugin_data()`, `get_dirtied_books()`, `get_all_series()`, `get_tag_counts()`, `get_format_path()`, `find_db()`, `format_stars()`, `strip_html()`, `tags_to_tree()`, `normalize_author_display()`, `detect_series_gaps()`, `get_image_size()`, `color()`, `write.WritableCalibreDB` |
 | **Hermitage** (GTK4 gallery) | `CalibreDB`, `search()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_saved_searches()`, `get_vl_ui_state()`, `get_annotations()`, `get_last_read_positions()`, `normalize_rating()` |
 | **Carrel-calibre-web** (web reader) | `CalibreDB`, `search()`, `get_virtual_libraries()` |
 | **Bindery** (EPUB repair) | `get_image_size()` (cover audit), `get_format_path()` (EPUB resolution), `write.WritableCalibreDB` (optional flag tagging) |

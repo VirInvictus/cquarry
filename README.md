@@ -12,7 +12,7 @@ This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry
 - **Lock-safe snapshots.** Automatically detects if Calibre holds an exclusive write lock on `metadata.db` and routes queries through a temporary WAL-consistent copy.
 - **Full search grammar parity.** A recursive-descent parser faithfully porting Calibre's native search capabilities: boolean logic, field prefixes, date math (hyphen *and* slash separators), hierarchical tags with `.`/`..` component modifiers on every text field, custom columns, identifiers, saved-search interpolation (`search:"Name"`), multi-valued count operators (`tags:#>3`), language canonicalization (`languages:English` → `eng`), and nested virtual library cross-references.
 - **Metadata portability.** Read e-reader annotations, per-device reading progress, third-party plugin data, and conversion profiles; sanitize comments HTML for display.
-- **Opt-in write path.** `cquarry.write.WritableCalibreDB` offers trigger-safe title/tag/identifier mutations in a separate module the read-only API can never touch.
+- **Opt-in write path.** `cquarry.write.WritableCalibreDB` offers trigger-safe title/tag/identifier mutations in a separate module the read-only API can never touch — every mutation bumps `last_modified` *and* queues the book in `metadata_dirtied`, so Calibre regenerates the sidecar OPF (and re-pushes to wireless readers) on its next run.
 - **Context manager.** `CalibreDB` supports `with` statements for automatic cleanup of snapshot files.
 - **Zero dependencies.** Pure Python 3.14+ stdlib (`sqlite3`, `re`, `json`, `unicodedata`).
 
@@ -58,6 +58,10 @@ from cquarry.write import WritableCalibreDB
 with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:
     wdb.add_tag(42, "Audited")
     wdb.set_identifier(42, "isbn", "9780123456789")
+
+# Every mutation queues an OPF regeneration; check what Calibre will resync:
+with CalibreDB("~/Calibre Library/metadata.db") as db:
+    print(db.get_dirtied_books())  # e.g. [42]
 ```
 
 ## Installation
@@ -112,8 +116,9 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_last_read_positions(book_id=None)` | `list[dict[str, Any]]` | Per-device reading progress (`device`, `cfi`, `pos_frac` 0.0–1.0, `epoch`). |
 | `get_plugin_data(book_id=None, name=None)` | `list[dict[str, Any]]` | Third-party payloads from `books_plugin_data` (Goodreads IDs, word counts, ...). |
 | `get_conversion_profiles(book_id=None)` | `list[dict[str, Any]]` | Books with manual conversion overrides; the pickled recipe blob stays raw bytes (`data_size` gives its length). |
+| `get_dirtied_books()` | `list[int]` | Book ids queued for OPF resync in `metadata_dirtied` — i.e. what Calibre will regenerate/push at its next startup. Sorted, deduplicated; read-only (clearing the queue remains Calibre's job). |
 
-All four return `[]` on databases whose schema predates the tables.
+All five return `[]` on databases whose schema predates the tables.
 
 #### Search and virtual library resolution
 
@@ -245,7 +250,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.1.1"
+print(cquarry.__version__)  # "1.2.0"
 ```
 
 ### Writes (`cquarry.write`) — opt-in
@@ -257,6 +262,8 @@ print(cquarry.__version__)  # "1.1.1"
 | `update_title(book_id, new_title)` | Rename with refreshed sort key and `last_modified`. |
 | `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` | Idempotent tag mutation following Calibre's link-table sequence; returns whether state changed. |
 | `set_identifier(book_id, type, val)` / `set_identifiers(book_id, pairs)` | EAV upserts honoring `UNIQUE(book, type)`; `None` deletes. |
+
+Every state-changing mutation also inserts the book id into `metadata_dirtied` (`INSERT OR IGNORE`; the table's `UNIQUE(book)` keeps it one row per book), which is what tells Calibre to regenerate that book's sidecar `.opf` and re-push metadata to wireless readers on its next startup. No-op mutations queue nothing, and databases predating the table keep working (the insert is guarded by a cached existence check).
 
 ## Search Grammar
 

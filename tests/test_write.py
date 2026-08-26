@@ -169,5 +169,127 @@ class TestWritableCalibreDB(unittest.TestCase):
             check.close()
 
 
+class TestMetadataDirtied(unittest.TestCase):
+    """Every mutation must queue OPF regeneration via ``metadata_dirtied``.
+
+    Calibre regenerates a book's sidecar .opf only for ids present in that
+    table (backend.py ``dirtied_books()``), so a write path that skips the
+    insert leaves external edits invisible to Calibre's sync machinery.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                timestamp TEXT, last_modified TEXT, path TEXT
+            );
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+            CREATE TABLE books_tags_link (
+                id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER,
+                UNIQUE(book, tag)
+            );
+            CREATE TABLE identifiers (
+                id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT,
+                UNIQUE(book, type)
+            );
+            CREATE TABLE metadata_dirtied (
+                id INTEGER PRIMARY KEY, book INTEGER NOT NULL,
+                UNIQUE(book)
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _dirtied(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [
+                r[0]
+                for r in conn.execute(
+                    "SELECT book FROM metadata_dirtied ORDER BY book"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def _seed_books(self, wdb, *ids):
+        for i in ids:
+            wdb.conn.execute(
+                "INSERT INTO books (id, title) VALUES (?, ?)", (i, f"T{i}")
+            )
+        wdb.conn.commit()
+
+    def test_update_title_marks_dirty(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self._seed_books(wdb, 1, 2)
+            wdb.update_title(1, "Renamed")
+        self.assertEqual(self._dirtied(), [1])
+
+    def test_tag_mutations_mark_dirty_only_on_change(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self._seed_books(wdb, 1, 2)
+            self.assertTrue(wdb.add_tag(1, "Audited"))
+            # No-op re-add must not queue anything new.
+            self.assertFalse(wdb.add_tag(1, "Audited"))
+            self.assertTrue(wdb.add_tag(2, "Audited"))
+            self.assertTrue(wdb.remove_tag(1, "Audited"))
+            # No-op remove of an absent link.
+            self.assertFalse(wdb.remove_tag(1, "Audited"))
+        self.assertEqual(self._dirtied(), [1, 2])
+
+    def test_identifier_upserts_mark_dirty(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self._seed_books(wdb, 3)
+            wdb.set_identifiers(3, {"isbn": "9780000000000", "goodreads": None})
+        self.assertEqual(self._dirtied(), [3])
+
+    def test_repeated_mutations_do_not_duplicate_rows(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self._seed_books(wdb, 5)
+            wdb.update_title(5, "One")
+            wdb.update_title(5, "Two")
+            wdb.add_tag(5, "X")
+        # INSERT OR IGNORE semantics: one queued entry per book.
+        self.assertEqual(self._dirtied(), [5])
+
+    def test_schema_without_table_still_writes(self):
+        # Databases predating metadata_dirtied keep working: the existence
+        # check degrades to a no-op instead of raising OperationalError.
+        legacy = os.path.join(self.temp_dir, "legacy.db")
+        conn = sqlite3.connect(legacy)
+        conn.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                timestamp TEXT, last_modified TEXT, path TEXT
+            );
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+            CREATE TABLE books_tags_link (
+                id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER,
+                UNIQUE(book, tag)
+            );
+            CREATE TABLE identifiers (
+                id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT,
+                UNIQUE(book, type)
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(legacy) as wdb:
+            wdb.conn.execute("INSERT INTO books (id, title) VALUES (1, 'T')")
+            wdb.conn.commit()
+            self.assertTrue(wdb.add_tag(1, "Audited"))
+            wdb.update_title(1, "Renamed")
+
+
 if __name__ == "__main__":
     unittest.main()

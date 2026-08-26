@@ -10,8 +10,13 @@ Safety contract:
   - Registers the custom SQL functions Calibre's triggers call (``title_sort``,
     ``uuid4``) plus its ``PYNOCASE`` collation BEFORE any statement runs;
     without them ``books_insert_trg`` / ``books_update_trg`` abort writes.
-  - Every mutation bumps ``books.last_modified`` so Calibre regenerates the
-    book's sidecar .opf on its next run.
+  - Every mutation bumps ``books.last_modified`` AND records the book id in
+    the ``metadata_dirtied`` queue. Calibre only regenerates a book's sidecar
+    .opf (and pushes it to wireless readers) for ids present in that table
+    (backend.py ``dirtied_books()``), so skipping the insert would leave
+    external edits invisible to Calibre's sync machinery forever. Databases
+    from before the table existed keep working: the insert is guarded by an
+    existence check.
   - Mutations run inside explicit ``BEGIN IMMEDIATE`` transactions.
   - Tag deletion cleans ``books_tags_link`` before ``tags`` to satisfy the
     ``fkc_delete_on_tags`` trigger ordering.
@@ -87,6 +92,7 @@ class WritableCalibreDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout = 30000")
         register_udfs(self.conn)
+        self._dirtied_supported: bool | None = None
 
     # -- lifecycle --
 
@@ -118,10 +124,35 @@ class WritableCalibreDB:
         if row is None:
             raise ValueError(f"Book {book_id} not found")
 
+    def _mark_dirty(self, book_id: int) -> None:
+        """Queue the book for OPF regeneration in ``metadata_dirtied``.
+
+        Calibre regenerates a book's sidecar .opf — and re-pushes metadata to
+        wireless devices — ONLY for ids present in this table; it consumes and
+        clears the queue at startup (backend.py ``dirty_books()`` /
+        ``dirtied_books()``). Without this insert, external mutations bump
+        ``last_modified`` but never reach OPF/wireless sync. The insert is
+        skipped on schemas predating the table (existence check cached per
+        connection).
+        """
+        if self._dirtied_supported is None:
+            row = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'metadata_dirtied'"
+            ).fetchone()
+            self._dirtied_supported = row is not None
+        if self._dirtied_supported:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO metadata_dirtied(book) VALUES (?)",
+                (book_id,),
+            )
+
     def _touch_book(self, book_id: int) -> None:
+        """Bump ``last_modified`` and queue OPF regeneration for the book."""
         self.conn.execute(
             "UPDATE books SET last_modified = ? WHERE id = ?", (self._now(), book_id)
         )
+        self._mark_dirty(book_id)
 
     # -- Phase 3 write APIs --
 
@@ -137,6 +168,7 @@ class WritableCalibreDB:
                 "UPDATE books SET title = ?, sort = ?, last_modified = ? WHERE id = ?",
                 (new_title, title_sort(new_title), self._now(), book_id),
             )
+            self._mark_dirty(book_id)
             self.conn.commit()
         except Exception:
             self.conn.rollback()

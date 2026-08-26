@@ -2,12 +2,9 @@
 
 This roadmap outlines the planned evolution of `cquarry` from a read-only metadata extractor to a full-featured Calibre ecosystem bridge, utilizing the structural discoveries documented in `database_report.md`.
 
-> **Status (v1.1.0, 2026-08-25):** every item below is implemented and covered by tests.
-> A sweep this release found several boxes checked ahead of reality — Phase 2's
-> extractors, Phase 3's write module, and most of Phase 4's parity items existed
-> only as checkboxes. All are now real: extractors live on `CalibreDB`, writes in
-> `cquarry.write.WritableCalibreDB`, and the search-parity gaps are closed in
-> `search.py`.
+> **Status (v1.2.0, 2026-08-25):** Phases 1–5 are implemented and covered by tests.
+> Phase 6 is underway: write-path correctness (the `metadata_dirtied` queue) and
+> dirtied-state visibility shipped in v1.2.0; read-side gaps are next.
 
 ## Phase 1: Read-Only Enhancements (Current & Near-Term)
 *Context: Improving our query capabilities using existing read-only mechanics (ref: database_report.md Sections 1-4).*
@@ -127,3 +124,113 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
 - [x] **Eliminate N+1 Comment Queries:** Eagerly cache or batch-fetch comments during `_build_search_view()` to prevent thousands of single-row queries.
 - [x] **Drop `re.Scanner`:** Replace undocumented `re.Scanner` with standard `re.finditer` for pure stdlib compliance.
 - [x] **Saved Searches Interpolation:** Support Calibre's `search:"Name"` by parsing the `preferences` table.
+
+## Phase 6: Full Database Coverage (researched 2026-08-25)
+*Context: exhaustive audit of `metadata.db` (user_version 27, 48 tables, 60 triggers), cross-checked against Calibre master (`db/backend.py`, `db/cache.py`, `db/page_count.py`). Findings from the schema archaeology sweep; nothing below is implemented yet.*
+
+> **Upstream-sync policy** (per .clinerules Cross-Repo Implementation Rule): a phase item
+> counts as done only when the cquarry change lands AND every affected consumer repo is
+> synced (or explicitly waived here). Consumers: *CalibreQuarry* (CLI/TUI),
+> *Hermitage* (GTK4 gallery), *Carrel-calibre-web* (web reader; ships its own older
+> uv-25 library copy — use it as the low-schema test fixture for every read item),
+> *Bindery* (EPUB repair; live `WritableCalibreDB.add_tag()` caller).
+
+### Correctness first (write path)
+- [x] **Mark books dirty in `metadata_dirtied`:** Upstream regenerates a book's sidecar `.opf` ONLY for ids present in `metadata_dirtied` (backend.py `dirty_books()`/`dirtied_books()`; consumed at startup then cleared). `WritableCalibreDB` currently bumps `last_modified` only — external edits never reach OPF/wireless sync. Every mutation must also `INSERT OR IGNORE INTO metadata_dirtied(book)`.
+  - Pure behavior fix, no API change; consumers inherit it on version bump. *(Shipped in v1.2.0 — every mutation routes through `_touch_book()`/`_mark_dirty()`, guarded by a cached existence check for old schemas.)*
+  - Upstream sync:
+    - [x] *Bindery*: re-run audit flag-tagging (`src/bindery/audit.py` `add_tag` path); confirm tagged books' `.opf` regenerate on next Calibre start. *(Verified against the real user_version-27 schema: tagged ids land in `metadata_dirtied`, which is exactly the queue backend.py consumes for OPF regeneration; see Bindery patchnotes v0.18.1.)*
+    - [x] *CalibreQuarry*: has zero `WritableCalibreDB` call sites today despite spec §6 listing it — wire its first write flow and verify OPF propagation end-to-end. *(New `--set-title ID TITLE` verb ships in CalibreQuarry v3.16.0 alongside a `--audit` "pending OPF sync" section.)*
+    - *Hermitage / Carrel*: read-only, unaffected (no checkbox).
+- [ ] **`annotations_dirtied` on annotation writes** (same mechanism; backend copies it into `metadata_dirtied` at startup).
+  - Deferred until the ecosystem's first annotation writer lands (Phase 6 write-side expansion); the mechanism will ride along with it.
+  - Upstream sync: none today — no ecosystem repo writes annotations yet; revisit when the annotations writer lands.
+
+### Read-side gaps found
+- [ ] **Native `pages` field:** `books_pages_link` is now an upstream-managed table (cache.py maintains it natively; FIELD_MAP index 22). This library already holds 7,631 populated rows via CountPages. cquarry's `pages:` search location only probes a custom column labelled `pages`, so it matches nothing here. Add a `books_pages_link` fallback (guarded by `sqlite_master` existence check).
+  - Upstream sync:
+    - [ ] *CalibreQuarry*: surface page counts in analytics/detail output.
+    - [ ] *Hermitage*: page count in the book info popover.
+    - [ ] *Carrel-calibre-web*: optional — native page count on the detail page (template already carries reader-state hooks).
+    - *Bindery*: unaffected.
+- [ ] **Library UUID:** expose `library_id.uuid` (`get_library_uuid()`); book uuids are fetched internally but absent from `get_all_books()`/`get_book()` rows.
+  - Upstream sync:
+    - [ ] *Carrel-calibre-web*: key wings/cache state by UUID instead of file path (its bundled library is a distinct copy — UUID disambiguates after moves/restores).
+    - [ ] *CalibreQuarry*: stamp library provenance (UUID) into exported catalogs/reports.
+    - *Hermitage / Bindery*: unaffected.
+- [ ] **Author/entity secondary columns:** `authors.sort`, `authors.link`, `tags.link`, `series.sort/link`, `publishers.sort/link`, `ratings.link`, `languages.link` are all unread today.
+  - Additive row fields — no breakage risk for existing consumers.
+  - Upstream sync:
+    - [ ] *Hermitage*: author cards ordered by true sort name; clickable author `link` URLs.
+    - [ ] *CalibreQuarry*: opt-in link/sort columns in catalog & export output.
+    - *Carrel / Bindery*: unaffected.
+- [ ] **Per-format detail:** `data.name` (filename stem) and per-format `uncompressed_size` are not publicly exposed (only aggregate `size`). Add `get_formats(book_id)` returning `{fmt: {path, size_bytes, name}}`.
+  - Upstream sync:
+    - [ ] *Bindery*: choose/report the audited EPUB via this API instead of raw `data` lookups (pairs with its existing `get_format_path` call site).
+    - [ ] *Hermitage*: "open with external reader" format picker showing per-format sizes.
+    - [ ] *CalibreQuarry*: per-format disk-usage reporting in export/audit modes.
+- [ ] **Cover helpers:** `has_cover` flag exists; no `get_cover_path(book_id)` resolving `<root>/<books.path>/cover.jpg` with disk verification.
+  - Upstream sync:
+    - [ ] *Hermitage*: audit how thumbnails resolve today, then route through `get_cover_path()`.
+    - [ ] *Carrel-calibre-web*: same for its cover route/static serving.
+    - [ ] *CalibreQuarry*: cover-audit commands switch to the helper.
+    - [ ] *Bindery*: pair `get_cover_path()` with `get_image_size()` for EPUB cover audits.
+- [ ] **Custom-column display config:** `get_custom_columns()` omits `normalized`, `editable`, and the `display` JSON (enum_values/enum_colors/composite_template). The richer `field_metadata` preference key is also unread.
+  - Dict keys are additive — safe for all four consumers.
+  - Upstream sync:
+    - [ ] *Hermitage*: render enumeration values as colored badges (`#reading_status` is the showcase column).
+    - [ ] *CalibreQuarry*: TUI coloring from `enum_colors`; disable edit verbs when `editable=0`.
+    - *Carrel / Bindery*: unaffected.
+- [ ] **Generic preferences accessor:** typed `get_preference(key)` wrapper; surface `grouped_search_terms`, `user_categories`, `tag_browser_*` order/hidden state.
+  - Includes search-parity work inside cquarry itself (resolve grouped-search names in queries).
+  - Upstream sync:
+    - [ ] *Hermitage*: sidebar honors `user_categories` groupings and hidden categories.
+    - [ ] *CalibreQuarry*: expose grouped-search resolution in `--search` help/output.
+- [ ] **Annotation FTS search:** `annotations_fts` / `annotations_fts_stemmed` FTS5 tables exist (content-linked to `annotations`) but `get_annotations()` only does raw row reads; add `search_annotations(query)` using `MATCH` when the virtual tables are present.
+  - Upstream sync:
+    - [ ] *Hermitage*: search box over highlights/bookmarks (already renders annotations).
+    - [ ] *CalibreQuarry*: optional `--search-annotations` mode.
+    - *Carrel / Bindery*: unaffected.
+- [x] **Dirtied-state visibility:** read-only `get_dirtied_books()` so consumers can show what Calibre will resync. *(Shipped in v1.2.0: sorted, deduplicated ids; `[]` when the table is absent; strictly observational.)*
+  - Upstream sync:
+    - [x] *CalibreQuarry*: "pending OPF sync" section in doctor/check commands. *(Added to `--audit` output in CalibreQuarry v3.16.0.)*
+    - *Others*: unaffected.
+- [ ] **Notes system (adjacent DB):** modern Calibre stores category-item notes in `.calnotes/notes.db` (`notes`, `resources`, `notes_resources_link`; present but empty in this library). Out of `metadata.db` scope but worth a separate read-only module eventually.
+  - Upstream sync (future):
+    - [ ] *Hermitage*: display author/tag/publisher notes.
+    - [ ] *CalibreQuarry*: include notes in catalog exports.
+
+### Write-side expansion (after the dirtied fix lands)
+- [ ] **Entity setters:** authors (N:M link + name/sort computation), series (+`series_index`), publisher, rating (UNIQUE(rating) dedup), languages (canonicalize to ISO codes).
+  - Upstream sync:
+    - [ ] *CalibreQuarry*: CLI verbs (`--set-authors`, `--set-series`, `--set-rating`, …) become this repo's first real `WritableCalibreDB` consumers.
+    - [ ] *Hermitage*: scope-assess lightweight edit popovers; default posture stays read-mostly (waive explicitly if declined).
+    - *Carrel / Bindery*: unaffected.
+- [ ] **`set_comments`:** 1:1 upsert/delete on `comments`.
+  - Upstream sync:
+    - [ ] *CalibreQuarry*: `--set-comments` verb.
+    - [ ] *Hermitage*: optional description editing in the detail view.
+    - *Carrel / Bindery*: unaffected (read-only rendering).
+- [ ] **Custom-column writers:** Pattern A (normalized: value table + link) vs Pattern B (direct `book` column); enumeration validation against `display.enum_values`; tristate bool handling. Depends on the display-config read item above.
+  - Upstream sync:
+    - [ ] *Hermitage*: reading-status dropdown writing `#reading_status` (enum-validated).
+    - [ ] *CalibreQuarry*: generic `--set-column <label> <value>`.
+    - [ ] *Carrel-calibre-web*: optional reading-status toggle in the reader (its detail template already surfaces Calibre sync state).
+    - *Bindery*: unaffected (keeps tag-based flagging).
+- [ ] **Book lifecycle:** `remove_book` must satisfy the full `fkc_delete_*` trigger ordering across every link table, `comments`, `data`, `annotations`, `last_read_positions`, plugin/custom data; optional guarded `add_book` row insert (triggers auto-fill `sort`/`uuid`).
+  - Upstream sync:
+    - [ ] *CalibreQuarry*: guarded delete command (dry-run default, explicit confirm flag).
+    - *Hermitage / Carrel / Bindery*: intentionally none — deletion stays a CLI-only operation.
+- [ ] **Format management:** register/drop `data` rows (name, size) and toggle `has_cover`.
+  - Upstream sync:
+    - [ ] *Bindery*: register repaired/replacement EPUBs if write-back is ever added to its repair flow.
+    - [ ] *CalibreQuarry*: import/export bookkeeping around format rows.
+
+### Documentation drift
+- [ ] **spec.md §5 item 7 is stale:** "There is no native pages table" was true historically; upstream now treats `books_pages_link` as a managed one-to-one field. Rewrite once the fallback above ships. *(cquarry-internal; no upstream impact)*
+
+> **Version-sync reminder** (Phase 5 practice, applies to EVERY item above): bump
+> `VERSION` + `__init__.py` + `config.py` + `README.md` + `spec.md` together, log the
+> change in `patchnotes.md`, and mirror any behavior-affecting fix into each synced
+> consumer repo's own patchnotes before ticking its checkbox.
+

@@ -1,4 +1,8 @@
-# CLAUDE.md (cquarry)
+<!-- .clinerules for cquarry — converted from CLAUDE.md on 2026-08-25 during the Cline migration. -->
+<!-- The original CLAUDE.md is kept untouched alongside this file (provenance + deep reference). -->
+<!-- Claude Code machinery was neutralized: self-references point at this file; global rules are ~/.clinerules/. -->
+
+# .clinerules (cquarry)
 
 Per-project guidance. Overrides the global file where they conflict.
 

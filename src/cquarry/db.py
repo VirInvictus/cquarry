@@ -581,6 +581,23 @@ class CalibreDB:
             out.append(rec)
         return out
 
+    def get_dirtied_books(self) -> list[int]:
+        """List book ids queued for OPF resync in ``metadata_dirtied``.
+
+        Calibre regenerates a book's sidecar .opf (and re-pushes metadata to
+        wireless readers) only for ids in this table, consuming it at startup.
+        Consumers can use the returned ids to show what Calibre will resync —
+        e.g. a "pending OPF sync" section in audit/doctor output. Returns an
+        empty list on schemas predating the table. Read-only: clearing the
+        queue remains Calibre's job (``mark_book_as_clean()``).
+        """
+        cur = self.conn.cursor()
+        try:
+            cur.execute("SELECT DISTINCT book FROM metadata_dirtied ORDER BY book")
+        except sqlite3.OperationalError:
+            return []
+        return [row["book"] for row in cur.fetchall()]
+
     # --- Search & virtual library resolution ---
 
     def _engine(self) -> SearchEngine:

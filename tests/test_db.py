@@ -189,6 +189,11 @@ class TestPhase2Extractors(unittest.TestCase):
                 (1, 'goodreads_id', '12345');
             CREATE TABLE conversion_options (book INTEGER, format TEXT, data BLOB);
             INSERT INTO conversion_options VALUES (1, 'EPUB', X'000102');
+            CREATE TABLE metadata_dirtied (
+                id INTEGER PRIMARY KEY, book INTEGER NOT NULL,
+                UNIQUE(book)
+            );
+            INSERT INTO metadata_dirtied (book) VALUES (7), (3);
             """
         )
         conn.commit()
@@ -225,6 +230,23 @@ class TestPhase2Extractors(unittest.TestCase):
         profs = self.db.get_conversion_profiles()
         self.assertEqual(profs[0]["format"], "EPUB")
         self.assertEqual(profs[0]["data_size"], 3)
+
+    def test_dirtied_books_sorted_and_unique(self):
+        # Seeded 7, 3, 7 — INSERT OR IGNORE in real libraries keeps it unique,
+        # but the reader must not care: sorted ids, duplicates collapsed.
+        self.assertEqual(self.db.get_dirtied_books(), [3, 7])
+
+    def test_dirtied_books_missing_table_returns_empty(self):
+        bare = os.path.join(self.temp_dir, "bare.db")
+        conn = sqlite3.connect(bare)
+        conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+        conn.commit()
+        conn.close()
+        db = CalibreDB(bare)
+        try:
+            self.assertEqual(db.get_dirtied_books(), [])
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":
