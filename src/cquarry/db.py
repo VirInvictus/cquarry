@@ -421,6 +421,28 @@ class CalibreDB:
             return None
         return row["uuid"] if row else None
 
+    def get_format_stats(self) -> dict[str, dict[str, int]]:
+        """Per-format aggregates across the library: ``{fmt: {count, bytes}}``.
+
+        ``count`` is how many books carry the format and ``bytes`` the total
+        catalogued uncompressed size — one query for disk-usage reports
+        instead of N×:meth:`get_formats`. Formats lacking size data report
+        ``bytes`` as 0. Returns ``{}`` on schemas without a ``data`` table.
+        """
+        out: dict[str, dict[str, int]] = {}
+        try:
+            rows = self.conn.execute(
+                "SELECT upper(format) AS fmt, COUNT(*) AS count, "
+                "COALESCE(SUM(uncompressed_size), 0) AS bytes "
+                "FROM data GROUP BY upper(format) ORDER BY fmt"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        for row in rows:
+            if row["fmt"]:
+                out[row["fmt"]] = {"count": row["count"], "bytes": row["bytes"]}
+        return out
+
     def get_all_tags(self) -> list[str]:
         cur = self.conn.cursor()
         cur.execute("SELECT DISTINCT name FROM tags ORDER BY name")

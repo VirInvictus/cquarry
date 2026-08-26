@@ -18,6 +18,8 @@ The canonical read-only SQLite database layer and search grammar engine for Cali
 - **Raw comments are HTML.** Anything rendered must pass through `helpers.strip_html()` first.
 - **Writes must queue OPF resync.** Every `WritableCalibreDB` mutation inserts the book id into `metadata_dirtied` (Calibre regenerates sidecar `.opf`s only for queued ids). New write APIs MUST route through `_touch_book()`/`_mark_dirty()` — never bump `last_modified` alone.
 - **Dirtied queue is read-only on the read side.** `CalibreDB.get_dirtied_books()` only observes; clearing entries is Calibre's job (`mark_book_as_clean()`). Never DELETE from it in cquarry code.
+- **Custom-column writers follow physical layout, not flags.** Detect Pattern A (value table + link) vs B (direct `book` column) by link-table existence — the same rule as the reader. Enumerations validate against `display.enum_values`; non-editable columns raise; composite columns have no storage and raise.
+- **Entity writes prune orphans AFTER links go.** The fkc_delete_on_* triggers abort while references remain; clean links first, then delete unreferenced entity rows.
 
 ## Layout
 - `src/cquarry/db.py`: `CalibreDB` connection management, snapshot fallback for locked databases, schema mapping, Phase-2 extractors (`get_annotations`, `get_last_read_positions`, `get_plugin_data`, `get_conversion_profiles`), single-entity APIs (`get_book`, `search_books`, `get_format_path`), read-side coverage (`get_dirtied_books`, `get_formats`, `get_cover_path`, `get_library_uuid`, native `pages` via `books_pages_link`, entity secondary columns via `get_entities`, typed preferences via `get_preference`/`get_field_metadata`/`get_user_categories`/`get_tag_browser_state`).

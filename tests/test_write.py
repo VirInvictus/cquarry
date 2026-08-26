@@ -293,3 +293,200 @@ class TestMetadataDirtied(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_WRITE_SCHEMA = """
+CREATE TABLE books (
+    id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT,
+    timestamp TEXT, pubdate TEXT, series_index REAL,
+    has_cover INTEGER DEFAULT 0, uuid TEXT, path TEXT, last_modified TEXT
+);
+CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT, link TEXT DEFAULT '');
+CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE, link TEXT DEFAULT '');
+CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER, UNIQUE(book, tag));
+CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT, link TEXT DEFAULT '');
+CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT, link TEXT DEFAULT '');
+CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER UNIQUE, link TEXT DEFAULT '');
+CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT UNIQUE, link TEXT DEFAULT '');
+CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER);
+CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, text TEXT, UNIQUE(book));
+CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT, UNIQUE(book, type));
+CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
+CREATE TABLE custom_columns (
+    id INTEGER PRIMARY KEY, label TEXT UNIQUE, name TEXT, datatype TEXT,
+    editable BOOL DEFAULT 1, display TEXT DEFAULT '{}',
+    is_multiple BOOL DEFAULT 0, normalized BOOL DEFAULT 0
+);
+CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT UNIQUE, link TEXT DEFAULT '');
+CREATE TABLE books_custom_column_1_link (book INTEGER, value INTEGER);
+CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, book INTEGER, value BOOL);
+CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
+"""
+
+
+class TestWriteSideExpansion(unittest.TestCase):
+    """Phase-6 write-side expansion: entity setters, set_comments,
+    set_custom_column, format management and remove_book."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(_WRITE_SCHEMA)
+        conn.execute(
+            "INSERT INTO books (id, title, sort, author_sort) "
+            "VALUES (1, 'Old Title', 'Old Title', 'Writer, Zed A.')"
+        )
+        conn.execute("INSERT INTO books (id, title, sort) VALUES (2, 'Other', 'Other')")
+        # Existing author with a hand-tuned sort key; shared with book 2.
+        conn.execute(
+            "INSERT INTO authors VALUES (1, 'Zed A. Writer', 'Writer, Zed A.', '')"
+        )
+        conn.executemany(
+            "INSERT INTO books_authors_link (book, author) VALUES (?, 1)", [(1,), (2,)]
+        )
+        # Enumeration column (Read/Reading/To Read) + bool column.
+        conn.execute(
+            "INSERT INTO custom_columns VALUES "
+            "(1,'status','Status','enumeration',1,?,0,1)",
+            ('{"enum_values": ["Read", "Reading", "To Read"]}',),
+        )
+        conn.execute(
+            "INSERT INTO custom_columns VALUES (2,'liked','Liked','bool',1,'{}',0,0)"
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _wdb(self):
+        return WritableCalibreDB(self.db_path)
+
+    def test_set_authors_relinks_and_recomputes_author_sort(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_authors(1, ["Ann Leckie", "Zed A. Writer"]))
+        conn = sqlite3.connect(self.db_path)
+        names = [
+            r[0]
+            for r in conn.execute(
+                "SELECT a.name FROM books_authors_link l JOIN authors a "
+                "ON a.id=l.author WHERE l.book=1 ORDER BY l.id"
+            )
+        ]
+        asort = conn.execute("SELECT author_sort FROM books WHERE id=1").fetchone()[0]
+        newsort = conn.execute(
+            "SELECT sort FROM authors WHERE name='Ann Leckie'"
+        ).fetchone()[0]
+        others = conn.execute(
+            "SELECT COUNT(*) FROM books_authors_link WHERE book=2"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(names, ["Ann Leckie", "Zed A. Writer"])
+        self.assertEqual(asort, "Ann Leckie & Writer, Zed A.")  # new author sort=name
+        self.assertEqual(newsort, "Ann Leckie")  # new rows default sort=name
+        self.assertEqual(others, 1)  # shared author survives for book 2
+
+    def test_set_authors_noop_returns_false(self):
+        with self._wdb() as wdb:
+            self.assertFalse(wdb.set_authors(1, ["Zed A. Writer"]))
+
+    def test_set_authors_empty_raises(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.set_authors(1, [])
+
+    def test_set_series_and_clear(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_series(1, "Imperial Radch", 3))
+            self.assertFalse(wdb.set_series(1, "Imperial Radch", 3))
+            self.assertTrue(wdb.set_series(1, "Imperial Radch", 4))
+            self.assertTrue(wdb.set_series(1, None))
+        conn = sqlite3.connect(self.db_path)
+        idx = conn.execute("SELECT series_index FROM books WHERE id=1").fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM series").fetchone()[0]
+        conn.close()
+        self.assertIsNone(idx)
+        self.assertEqual(count, 0)  # orphaned series pruned
+
+    def _sql2(self, query, params=()):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query, params).fetchall()]
+        finally:
+            conn.close()
+
+    def test_set_publisher_roundtrip(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_publisher(1, "Orbit"))
+            self.assertFalse(wdb.set_publisher(1, "orbit"))  # NOCASE match
+            self.assertTrue(wdb.set_publisher(1, None))
+        self.assertEqual(
+            self._sql2("SELECT COUNT(*) FROM publishers"), [(0,)]
+        )  # orphan pruned
+
+    def test_set_rating_dedups_unique_rows(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_rating(1, 4))
+            self.assertTrue(wdb.set_rating(2, 4))  # same stars -> same row
+            self.assertFalse(wdb.set_rating(2, 4))
+            self.assertTrue(wdb.set_rating(1, None))
+        self.assertEqual(self._sql2("SELECT rating FROM ratings"), [(8,)])
+
+    def test_set_rating_out_of_range_raises(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.set_rating(1, 9.5)
+
+    def test_set_languages_canonicalizes_names(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_languages(1, ["English", "fre"]))
+        codes = self._sql2(
+            "SELECT l.lang_code FROM books_languages_link bl "
+            "JOIN languages l ON l.id=bl.lang_code WHERE bl.book=1"
+        )
+        self.assertEqual(codes, [("eng",), ("fre",)])
+
+    def test_set_comments_upsert_and_clear(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_comments(1, "<p>Wise words.</p>"))
+            self.assertFalse(wdb.set_comments(1, "<p>Wise words.</p>"))
+            self.assertTrue(wdb.set_comments(1, "<p>Changed.</p>"))
+            self.assertTrue(wdb.set_comments(1, None))
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM comments"), [(0,)])
+
+    def test_set_custom_column_enumeration_validated(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#status", "Read"))
+            self.assertFalse(wdb.set_custom_column(1, "#status", "Read"))
+            with self.assertRaises(ValueError):
+                wdb.set_custom_column(1, "#status", "Not In Enum")
+
+    def test_set_custom_column_bool_tristate(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#liked", True))
+            self.assertTrue(wdb.set_custom_column(1, "#liked", False))
+            self.assertTrue(wdb.set_custom_column(1, "#liked", None))
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_2"), [(0,)])
+
+    def test_set_custom_column_not_editable_raises(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE custom_columns SET editable=0 WHERE label='status'")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.set_custom_column(1, "#status", "Read")
+
+    def test_add_remove_format_and_has_cover(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.add_format(1, "EPUB", "oldtitle", 2048))
+            with self.assertRaises(ValueError):
+                wdb.add_format(1, "epub", "dupe", 1)  # case-insensitive clash
+            self.assertTrue(wdb.remove_format(1, "EPUB"))
+            self.assertFalse(wdb.remove_format(1, "EPUB"))
+            self.assertTrue(wdb.set_has_cover(1, True))
+            self.assertFalse(wdb.set_has_cover(1, True))
+            self.assertTrue(wdb.set_has_cover(1, False))

@@ -1,3 +1,16 @@
+## v1.5.0 (2026-08-26)
+
+### Write-side expansion (Phase 6)
+- **Entity setters:** `set_authors` (relink + `author_sort` recomputation from per-author sort keys joined " & ", orphan pruning), `set_series` (+`series_index`: defaults 1.0 fresh assignment, preserved on reassignment; clearing nulls both), `set_publisher`, `set_rating` (0–5 stars stored ×2 with UNIQUE(rating) find-or-create dedup), `set_languages` (canonicalized to ISO codes via a new public `search.canonical_language`). All NOCASE-matched, transactional, no-op-honest, orphan-pruning.
+- **`set_comments`:** 1:1 upsert/clear on the UNIQUE(book) comments row; raw HTML stored verbatim (readers sanitize).
+- **Custom-column writers:** `set_custom_column(book_id, label, value)` auto-detects storage pattern by link-table existence (Pattern A value+link vs Pattern B direct), validates enumerations against `display.enum_values`, accepts tristate bools, refuses non-editable columns and composite columns (no storage).
+- **Format management:** `add_format` / `remove_format` register/drop `data` rows (duplicate formats rejected case-insensitively); `set_has_cover` toggles the flag; files remain the caller's responsibility by design.
+- **Book lifecycle:** `remove_book` cleans custom columns in both storage patterns (PRAGMA-detected) and both dirtied queues before firing the cascade trigger, then prunes orphaned entities — verified against a real user_version-27 library including normalized `custom_column_N` layouts lacking a `book` column.
+- **New read API: `get_format_stats()`** — `{fmt: {count, bytes}}` aggregates in one query (unblocks CalibreQuarry's deferred per-format disk-usage report).
+
+### Internal
+- Test suite grew from 128 to 141 tests covering every setter's change/no-op/error paths, dedup semantics, validation failures, format round-trips, and removal cascades/pruning.
+
 ## v1.4.0 (2026-08-26)
 
 ### Read-side coverage (Phase 6, batch 2)

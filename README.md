@@ -14,7 +14,7 @@ This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry
 - **Native page counts.** The `pages:` location reads Calibre's own `books_pages_link` table first (maintained by upstream's CountPages integration) and falls back to an int custom column labelled `pages`; counts also ride along in every book row.
 - **Entity secondary columns & display config.** Book rows carry `author_sorts`/`author_links` parallel to `authors`; `get_entities(kind)` exposes `{id, name, sort, link, count}` for authors/series/publishers/tags/languages; custom columns report `editable`, `normalized` and their decoded `display` JSON (`enum_values`, `enum_colors`, …); and a typed preferences accessor covers everything else (`get_preference`, `get_field_metadata`, `get_user_categories`, `get_tag_browser_state`).
 - **Metadata portability.** Read e-reader annotations, per-device reading progress, third-party plugin data, and conversion profiles; sanitize comments HTML for display.
-- **Opt-in write path.** `cquarry.write.WritableCalibreDB` offers trigger-safe title/tag/identifier mutations in a separate module the read-only API can never touch — every mutation bumps `last_modified` *and* queues the book in `metadata_dirtied`, so Calibre regenerates the sidecar OPF (and re-pushes to wireless readers) on its next run.
+- **Opt-in write path.** `cquarry.write.WritableCalibreDB` offers trigger-safe mutations in a separate module the read-only API can never touch: title, authors (with `author_sort` recomputation), series (+index), publisher, rating (UNIQUE-deduped), languages (canonicalized to ISO codes), tags, identifiers, comments, generic custom-column writes (layout auto-detected, enumerations validated against `display.enum_values`, non-editable columns refused), format registration/removal, `has_cover`, and full book removal with orphan pruning — every mutation queued in `metadata_dirtied` for OPF resync.
 - **Context manager.** `CalibreDB` supports `with` statements for automatic cleanup of snapshot files.
 - **Zero dependencies.** Pure Python 3.14+ stdlib (`sqlite3`, `re`, `json`, `unicodedata`).
 
@@ -273,6 +273,16 @@ print(cquarry.__version__)  # "1.4.0"
 | `update_title(book_id, new_title)` | Rename with refreshed sort key and `last_modified`. |
 | `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` | Idempotent tag mutation following Calibre's link-table sequence; returns whether state changed. |
 | `set_identifier(book_id, type, val)` / `set_identifiers(book_id, pairs)` | EAV upserts honoring `UNIQUE(book, type)`; `None` deletes. |
+| `set_authors(book_id, names)` | Replace the author list; recomputes `books.author_sort` from per-author sort keys (" & "-joined); prunes orphans. |
+| `set_series(book_id, name \| None, index=None)` | Assign/clear series + `series_index` (defaults 1.0 fresh, preserves on reassign). |
+| `set_publisher(book_id, name \| None)` | Replace/clear publisher; case-insensitive match; orphans pruned. |
+| `set_rating(book_id, stars \| None)` | 0–5 stars stored as ×2; UNIQUE(rating) rows deduplicated via find-or-create. |
+| `set_languages(book_id, codes \| None)` | Replace languages; English names canonicalized to ISO 639-2 via the search engine's map. |
+| `set_comments(book_id, text \| None)` | 1:1 upsert/clear of the comments HTML row. |
+| `set_custom_column(book_id, label, value)` | Generic custom-column writer: storage layout auto-detected (link-table vs direct), enumerations validated against `display.enum_values`, tristate bools accepted, non-editable/composite columns raise. |
+| `add_format(book_id, fmt, name, size)` / `remove_format(book_id, fmt)` | Register/drop `data` rows (the file itself is the caller's responsibility). |
+| `set_has_cover(book_id, has_cover)` | Toggle the catalogued flag. |
+| `remove_book(book_id)` | Full book removal: custom columns (both patterns) + dirtied queues cleaned, cascade trigger fires, orphaned entities pruned. Irreversible. |
 
 Every state-changing mutation also inserts the book id into `metadata_dirtied` (`INSERT OR IGNORE`; the table's `UNIQUE(book)` keeps it one row per book), which is what tells Calibre to regenerate that book's sidecar `.opf` and re-push metadata to wireless readers on its next startup. No-op mutations queue nothing, and databases predating the table keep working (the insert is guarded by a cached existence check).
 

@@ -547,6 +547,22 @@ def _canonical_languages(query: str) -> str:
     return ",".join(canon(t) for t in query.split(","))
 
 
+def canonical_language(name: str) -> str:
+    """Canonicalize one language name to its ISO 639-2 code.
+
+    Public wrapper over the search engine's lang map (``English`` ->
+    ``eng``); unknown tokens pass through untouched. Used by the write path
+    (``set_languages``) so reads and writes agree on codes.
+    """
+    low = name.strip().lower()
+    if not low:
+        return name
+    mapped = _LANG_MAP.get(low)
+    if mapped is None and low.startswith("="):
+        mapped = _LANG_MAP.get(low[1:])
+    return mapped if mapped is not None else name.strip()
+
+
 class _DateQuery:
     """Parsed date query: a comparison operator plus a target with precision."""
 
