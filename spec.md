@@ -11,7 +11,7 @@ The contract. Read this before changing semantics.
 
 ## 1. Mission
 
-Provide a single, canonical, read-only Calibre database and search evaluation engine for the Python ecosystem. By centralizing the parsing of Calibre's search grammar, cquarry ensures that all consumers (CLI, web, GTK4) agree exactly on which books match a given query or virtual library definition.
+Provide a single, canonical Calibre database and search evaluation engine for the Python ecosystem: every read path is strictly read-only, and the only sanctioned write path lives in an explicitly opt-in module (§3.6). By centralizing the parsing of Calibre's search grammar, cquarry ensures that all consumers (CLI, web, GTK4) agree exactly on which books match a given query or virtual library definition.
 
 ## 2. Hard constraints
 

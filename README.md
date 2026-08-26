@@ -1,7 +1,7 @@
 <div align="center">
   <img src="logo.svg" width="96" height="96" alt="cquarry logo"/>
   <h1>cquarry</h1>
-  <p>Canonical read-only database layer and search grammar engine for Calibre libraries.</p>
+  <p>Canonical Calibre database layer and search grammar engine for Calibre libraries.</p>
 </div>
 
 This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry) (CLI/TUI), [Hermitage](https://github.com/VirInvictus/Hermitage) (GTK4 gallery), [Carrel-calibre-web](https://github.com/VirInvictus/Carrel-calibre-web) (web reader), and [Bindery](https://github.com/VirInvictus/Bindery) (EPUB repair & audit). By centralizing the search grammar parser and metadata access, cquarry ensures that virtual library definitions and search queries evaluate identically across every frontend in the ecosystem.

@@ -3,7 +3,7 @@
 Per-project guidance. Overrides the global file where they conflict.
 
 ## What this is
-The canonical read-only SQLite database layer and search grammar engine for Calibre. Extracted from CalibreQuarry to serve as a shared backend for Hermitage, Wings (Carrel), and the CalibreQuarry CLI.
+The canonical SQLite database layer and search grammar engine for Calibre — every read path is strictly read-only, and writes exist only behind the explicit opt-in `cquarry.write` module. Extracted from CalibreQuarry to serve as a shared backend for Hermitage, Wings (Carrel), Bindery, and the CalibreQuarry CLI.
 
 ## Hard constraints
 - **No external dependencies.** Must run on pure Python 3.14+ standard library (`sqlite3`, `re`, `json`).
