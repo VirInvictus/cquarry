@@ -2,9 +2,12 @@
 
 This roadmap outlines the planned evolution of `cquarry` from a read-only metadata extractor to a full-featured Calibre ecosystem bridge, utilizing the structural discoveries documented in `database_report.md`.
 
-> **Status (v1.2.0, 2026-08-25):** Phases 1–5 are implemented and covered by tests.
-> Phase 6 is underway: write-path correctness (the `metadata_dirtied` queue) and
-> dirtied-state visibility shipped in v1.2.0; read-side gaps are next.
+> **Status (v1.3.0, 2026-08-25):** Phases 1–5 are implemented and covered by tests.
+> Phase 6 is underway: write-path correctness and dirtied-state visibility shipped
+> in v1.2.0; the first read-side gaps (native pages, library UUID, per-format
+> detail, cover helpers) shipped in v1.3.0 and are synced across all four
+> consumers. Phase 7 proposes extracting Carrel-calibre-web's data layer onto
+> cquarry entirely.
 
 ## Phase 1: Read-Only Enhancements (Current & Near-Term)
 *Context: Improving our query capabilities using existing read-only mechanics (ref: database_report.md Sections 1-4).*
@@ -147,34 +150,38 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
   - Upstream sync: none today — no ecosystem repo writes annotations yet; revisit when the annotations writer lands.
 
 ### Read-side gaps found
-- [ ] **Native `pages` field:** `books_pages_link` is now an upstream-managed table (cache.py maintains it natively; FIELD_MAP index 22). This library already holds 7,631 populated rows via CountPages. cquarry's `pages:` search location only probes a custom column labelled `pages`, so it matches nothing here. Add a `books_pages_link` fallback (guarded by `sqlite_master` existence check).
+- [x] **Native `pages` field:** `books_pages_link` is now an upstream-managed table (cache.py maintains it natively; FIELD_MAP index 22). This library already holds 7,631 populated rows via CountPages. cquarry's `pages:` search location only probes a custom column labelled `pages`, so it matches nothing here. Add a `books_pages_link` fallback (guarded by `sqlite_master` existence check).
+  - *(Shipped in v1.3.0: native table read first with OperationalError guard, `#pages` custom column kept as fallback; counts also ride on every book row. Former spec §5 deviation 7 rewritten.)*
   - Upstream sync:
-    - [ ] *CalibreQuarry*: surface page counts in analytics/detail output.
-    - [ ] *Hermitage*: page count in the book info popover.
-    - [ ] *Carrel-calibre-web*: optional — native page count on the detail page (template already carries reader-state hooks).
-    - *Bindery*: unaffected.
-- [ ] **Library UUID:** expose `library_id.uuid` (`get_library_uuid()`); book uuids are fetched internally but absent from `get_all_books()`/`get_book()` rows.
+    - [x] *CalibreQuarry*: surface page counts in analytics/detail output. *(v3.17.0: `pages` in JSON/CSV/AI exports.)*
+    - [x] *Hermitage*: page count in the book info popover. *(v1.4.0: `Book.pages` + Codex meta row.)*
+    - [x] *Carrel-calibre-web*: optional — native page count on the detail page (template already carries reader-state hooks). *(v0.6.27: `cps/page_count.py` template global + detail.html line.)*
+    - [x] *Bindery*: unaffected — waived explicitly (no pages surface in its audits).
+- [x] **Library UUID:** expose `library_id.uuid` (`get_library_uuid()`); book uuids are fetched internally but absent from `get_all_books()`/`get_book()` rows.
+  - *(Shipped in v1.3.0.)*
   - Upstream sync:
-    - [ ] *Carrel-calibre-web*: key wings/cache state by UUID instead of file path (its bundled library is a distinct copy — UUID disambiguates after moves/restores).
-    - [ ] *CalibreQuarry*: stamp library provenance (UUID) into exported catalogs/reports.
-    - *Hermitage / Bindery*: unaffected.
+    - [x] *Carrel-calibre-web*: key wings/cache state by UUID instead of file path (its bundled library is a distinct copy — UUID disambiguates after moves/restores). *(v0.6.27: LibraryCache invalidates on `(mtime, library_id.uuid)`.)*
+    - [x] *CalibreQuarry*: stamp library provenance (UUID) into exported catalogs/reports. *(v3.17.0: catalog headers + audit summary.)*
+    - *Hermitage / Bindery*: unaffected — waived explicitly.
 - [ ] **Author/entity secondary columns:** `authors.sort`, `authors.link`, `tags.link`, `series.sort/link`, `publishers.sort/link`, `ratings.link`, `languages.link` are all unread today.
   - Additive row fields — no breakage risk for existing consumers.
   - Upstream sync:
     - [ ] *Hermitage*: author cards ordered by true sort name; clickable author `link` URLs.
     - [ ] *CalibreQuarry*: opt-in link/sort columns in catalog & export output.
     - *Carrel / Bindery*: unaffected.
-- [ ] **Per-format detail:** `data.name` (filename stem) and per-format `uncompressed_size` are not publicly exposed (only aggregate `size`). Add `get_formats(book_id)` returning `{fmt: {path, size_bytes, name}}`.
+- [x] **Per-format detail:** `data.name` (filename stem) and per-format `uncompressed_size` are not publicly exposed (only aggregate `size`). Add `get_formats(book_id)` returning `{fmt: {path, size_bytes, name}}`.
+  - *(Shipped in v1.3.0.)*
   - Upstream sync:
-    - [ ] *Bindery*: choose/report the audited EPUB via this API instead of raw `data` lookups (pairs with its existing `get_format_path` call site).
-    - [ ] *Hermitage*: "open with external reader" format picker showing per-format sizes.
-    - [ ] *CalibreQuarry*: per-format disk-usage reporting in export/audit modes.
-- [ ] **Cover helpers:** `has_cover` flag exists; no `get_cover_path(book_id)` resolving `<root>/<books.path>/cover.jpg` with disk verification.
+    - [x] *Bindery*: choose/report the audited EPUB via this API instead of raw `data` lookups (pairs with its existing `get_format_path` call site). — **Waived**: its single call site pre-filters EPUB rows in SQL and needs exactly one path; `get_format_path` remains the right tool there. Revisit if Bindery grows multi-format reporting.
+    - [x] *Hermitage*: "open with external reader" format picker showing per-format sizes. *(v1.4.0: reader launcher resolves exact files via `get_formats()` first, glob kept as fallback.)*
+    - [ ] *CalibreQuarry*: per-format disk-usage reporting in export/audit modes. — **Deferred** to the format-management item below; it wants an aggregate (`SUM(uncompressed_size) GROUP BY format`) helper rather than N×`get_formats()` calls, which lands naturally with that API batch.
+- [x] **Cover helpers:** `has_cover` flag exists; no `get_cover_path(book_id)` resolving `<root>/<books.path>/cover.jpg` with disk verification.
+  - *(Shipped in v1.3.0: `.jpg` primary with `.png` fallback, `verify=` toggle, ValueError on unknown books.)*
   - Upstream sync:
-    - [ ] *Hermitage*: audit how thumbnails resolve today, then route through `get_cover_path()`.
-    - [ ] *Carrel-calibre-web*: same for its cover route/static serving.
-    - [ ] *CalibreQuarry*: cover-audit commands switch to the helper.
-    - [ ] *Bindery*: pair `get_cover_path()` with `get_image_size()` for EPUB cover audits.
+    - [x] *Hermitage*: audit how thumbnails resolve today, then route through `get_cover_path()`. *(v1.4.0: `Book.cover_path` delegates to cquarry, unverified semantics preserved.)*
+    - [ ] *Carrel-calibre-web*: same for its cover route/static serving. — **Deferred to Phase 7** (the cover route is stock calibre-web `cps/cover.py`; routing it through cquarry is part of the data-layer extraction below, not a one-line swap).
+    - [x] *CalibreQuarry*: cover-audit commands switch to the helper. *(v3.17.0: audit cover checks resolve through `get_cover_path()`.)*
+    - [x] *Bindery*: pair `get_cover_path()` with `get_image_size()` for EPUB cover audits. — **Waived**: Bindery has no cover-audit code path today (its audits are content/pagenumbers/emptytext/ocr); nothing pairs against yet.
 - [ ] **Custom-column display config:** `get_custom_columns()` omits `normalized`, `editable`, and the `display` JSON (enum_values/enum_colors/composite_template). The richer `field_metadata` preference key is also unread.
   - Dict keys are additive — safe for all four consumers.
   - Upstream sync:
@@ -199,6 +206,32 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
   - Upstream sync (future):
     - [ ] *Hermitage*: display author/tag/publisher notes.
     - [ ] *CalibreQuarry*: include notes in catalog exports.
+
+## Phase 7: Carrel extraction — from calibre-web fork to a cquarry-native web app (proposed 2026-08-26)
+*Context: Carrel-calibre-web is currently a calibre-web fork where seven Carrel-owned modules
+route through cquarry (`carrel_search`, `wings`, `categories`, `saved_searches`, `series_info`,
+`reader_state`, `page_count`) while the core data path still runs on stock calibre-web's own
+layer: `cps/db.py` (~1,200 lines of hand-rolled metadata.db access) plus `cps/config_sql.py`.
+Stripping that out and putting cquarry underneath turns the fork into a new project with roots
+in calibre-web — and makes cquarry grow the read APIs a real web frontend needs.*
+
+> **Attribution & licensing gate (must land before any code moves):**
+> - Pulling features/code FROM Carrel INTO cquarry requires a calibre-web attribution in
+>   cquarry's README (Acknowledgements section naming calibre-web as the fork's base).
+> - Confirm what actually needs attribution per pull: the search grammar implementation is
+>   cquarry-original (`cps/carrel_search.py` only *evaluates* through cquarry's engine), so it
+>   carries no calibre-web lineage; UI/template work and anything descended from calibre-web
+>   files does.
+> - **License check:** calibre-web is GPL-3.0; cquarry is MIT. Copying GPL code into MIT files
+>   effectively relicenses those parts. Prefer clean-room API design informed by behavioral
+>   research over verbatim code moves; if code must move, move it with its license notice and
+>   decide the project-wide licensing story first.
+
+- [ ] **Audit & boundary map:** enumerate every `cps/db.py` / `config_sql.py` call site and classify: replace-with-existing-cquarry-API, needs-new-cquarry-API, or calibre-web-domain-only (session/user/shelf logic stays).
+- [ ] **Fill the API gaps the audit finds** in cquarry (likely: paginated/sorted book listing, browse facets, shelf-equivalent reads), each flowing through the Cross-Repo Implementation Rule (upstream research for CalibreQuarry, Bindery, Hermitage).
+- [ ] **Route `cps/cover.py` through `get_cover_path()`** (deferred from Phase 6's cover-helpers item).
+- [ ] **Swap the data layer:** replace `db.py` internals module-by-module behind its existing interface until metadata.db access happens only through cquarry; delete dead code.
+- [ ] **Rebrand decision + README attribution** once the swap is complete.
 
 ### Write-side expansion (after the dirtied fix lands)
 - [ ] **Entity setters:** authors (N:M link + name/sort computation), series (+`series_index`), publisher, rating (UNIQUE(rating) dedup), languages (canonicalize to ISO codes).

@@ -370,6 +370,13 @@ Four test modules: `test_db.py` (CalibreDB against fixture databases), `test_hel
 
 See [spec.md](spec.md) for the full contract and [roadmap.md](roadmap.md) for planned work.
 
+## Acknowledgements
+
+[Carrel-calibre-web](https://github.com/VirInvictus/Carrel-calibre-web) is a fork of
+[calibre-web](https://github.com/janeczku/calibre-web) that uses cquarry as its search and
+virtual-library engine. Features proven there flow back into cquarry's roadmap (see Phase 7);
+calibre-web's original authors deserve the credit for the web experience that fork builds on.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
