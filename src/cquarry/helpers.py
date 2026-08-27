@@ -30,6 +30,19 @@ def db_uri_ro(path: str) -> str:
     return f"file:{quote(path)}?mode=ro"
 
 
+def title_sort(title: str) -> str:
+    """Calibre's title sort key: leading articles move to the end."""
+    if not title:
+        return ""
+    stripped = title.strip()
+    lowered = stripped.lower()
+    for art in ("the ", "a ", "an "):
+        if lowered.startswith(art):
+            rest = stripped[len(art) :].strip()
+            return f"{rest}, {stripped[: len(art) - 1]}"
+    return stripped
+
+
 def color(text: str, code: str) -> str:
     """Wrap text in ANSI color codes if stdout is a TTY."""
     if sys.stdout.isatty():

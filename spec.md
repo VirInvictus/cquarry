@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.4.0  
+**Version:** 1.6.0  
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -76,6 +76,8 @@ For `token` nodes, the evaluator dispatches to a type-specific matcher based on 
 
 **Grouped search terms.** Calibre's `preferences.grouped_search_terms` maps a group name to member search locations; the engine resolves `GroupName:query` (and `@GroupName:query`) as the union over members, each evaluated without further group recursion — nesting is a `ParseException`. `GroupName:false` matches books where no member matches (upstream's inversion). Real field names always win over same-named groups.
 
+**User categories.** Calibre's `preferences.user_categories` defines tag-browser pseudo-categories; `@Name:query` (cquarry ≥ 1.6) mirrors upstream's `get_user_category_matches`: a category matches the books holding any member value, probed as an exact (`=`) match on the member's own location (e.g. `tags`, `authors`, `publisher`, `#label`). A leading `.` (`@Name:.query`) includes subcategories (`Name.`-prefixed); `false` inverts; any other query text is ignored exactly as upstream (the GUI always writes `@Name:true`); queries shorter than two characters match nothing. Groups and real fields win over same-named categories; unknown `@Names` match nothing (never an `all:` text sweep).
+
 **Annotation search.** The `annotations` location exposes each book's concatenated annotation `searchable_text`; presence keywords (`true`/`false`) and all text match kinds work against it. Bare terms (`all`) never sweep annotation text, mirroring upstream.
 
 **The `all` pseudo-location.** Bare terms search `title`, `authors`, `author_sort`, `series`, `publisher`, `tags`, `comments`, **plus** any custom column whose engine datatype is text-like (text, text_multi, hier). Numeric, date, bool, and identifier custom columns are excluded, mirroring Calibre.
@@ -113,7 +115,9 @@ A JSON file at `~/.config/cquarry/config.json` persists the database path across
 
 **API:** `update_title(book_id, title)` (refreshes `sort` via `title_sort`), `add_tag` / `remove_tag` (link-table sequence), `set_identifier` / `set_identifiers` (EAV upserts; `None` deletes), plus the write-side expansion (cquarry ≥ 1.5): `set_authors` (relinks + recomputes `books.author_sort` from per-author sort keys joined " & "), `set_series` (+`series_index`, default 1.0 fresh / preserved on reassign), `set_publisher`, `set_rating` (0–5 stars stored ×2; UNIQUE(rating) rows found-or-created), `set_languages` (English names canonicalized through the engine's lang map), `set_comments` (1:1 upsert/clear on the UNIQUE(book) row), `set_custom_column` (storage layout auto-detected via link-table existence — Pattern A value+link vs Pattern B direct; enumerations validated against `display.enum_values`; tristate bools accepted; non-editable and composite columns raise), `add_format` / `remove_format` (data-row registration; files are the caller's responsibility), `set_has_cover`, and `remove_book` (custom columns in both patterns + dirtied queues cleaned first, cascade trigger fires, orphaned entities pruned after). Entity relinks prune now-orphaned entity rows once their links are gone.
 
-The read side exposes the same queue for observability: `CalibreDB.get_dirtied_books()` returns the sorted, deduplicated ids awaiting resync (empty list when the table is absent). It never clears the queue — that remains Calibre's job (`mark_book_as_clean()`).
+The read side exposes the same queue for observability: `CalibreDB.get_dirtied_books()` returns the sorted, deduplicated ids awaiting resync (empty list when the table is absent). It never clears the queue — that remains Calibre's job (`mark_book_as_clean()`). The annotations sibling queue gets the same treatment: `get_annotations_dirtied_books()` observes `annotations_dirtied`, the ids Calibre pushes highlights/bookmarks from.
+
+**Read-side completeness (cquarry ≥ 1.6).** Every remaining table and view of the schema is surfaced: `get_feeds()` lists the news-recipe rows of `feeds`; `get_tag_browser_counts()` reads Calibre's own `tag_browser_*` views (custom columns rekeyed to `#label`, the ratings view's `rating` column aliased, and `tag_browser_series`'s `title_sort()` UDF supplied locally from `helpers` for the duration of the read, then removed) while skipping the `tag_browser_filtered_*` variants, which depend on Calibre's GUI-state `books_list_filter()` function; `get_entities()` gained a `ratings` kind (the `name` column carries the half-star integer as text); and both `get_all_books()` and `get_book()` rows now carry `uuid` and `identifiers` with identical shapes between the two (previously `size` was missing from `get_book` and both ids existed only on the internal search view). Languages honor `books_languages_link.item_order` (link-id order on schemas predating the column), matching Calibre's ordering. The `meta` view is deliberately not read: it requires Calibre's in-process `sortconcat()`/`concat()` aggregates — `get_all_books()` supersedes it.
 
 ## 4. Field location table
 
@@ -145,7 +149,7 @@ Canonical locations, their datatypes, and recognized aliases. Custom columns are
 | `identifiers` | identifiers | `identifier`, `ids`, `isbn` |
 | `cover` | bool | |
 
-The special locations `vl:"Name"` and `search:"Name"` cross-reference virtual libraries and saved searches. The `all` pseudo-location (used for bare terms) searches: `title`, `authors`, `author_sort`, `series`, `publisher`, `tags`, `comments`, plus every custom column whose engine datatype is text-like.
+The special locations `vl:"Name"` and `search:"Name"` cross-reference virtual libraries and saved searches. `@Name` searches a user-defined tag-browser category (see §3.2). The `all` pseudo-location (used for bare terms) searches: `title`, `authors`, `author_sort`, `series`, `publisher`, `tags`, `comments`, plus every custom column whose engine datatype is text-like.
 
 ## 5. Documented deviations from Calibre
 

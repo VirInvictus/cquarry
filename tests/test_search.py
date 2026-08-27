@@ -694,5 +694,71 @@ class TestSavedSearchInterpolation(unittest.TestCase):
         self.assertEqual(self.s('search:"HF" and rating:5'), {1})
 
 
+class TestUserCategorySearch(unittest.TestCase):
+    """Calibre's '@Name' user-category location (get_user_category_matches)."""
+
+    def provider(self):
+        class _UserCatProvider(_FakeProvider):
+            def grouped_search_terms(self):
+                return {"Fav": ["tags"]}
+
+            def user_categories(self):
+                return {
+                    "Favorites": [
+                        ["Fic.Fantasy.Epic", "tags", 0],
+                        ["George R. R. Martin", "authors", 0],
+                    ],
+                    "Favorites.Sub": [["Fic.Fantasy", "tags", 0]],
+                    "publisher": [["Bantam", "publisher", 0]],
+                    "Fav": [["Tor", "publisher", 0]],
+                }
+
+        return _UserCatProvider()
+
+    def s(self, q):
+        return SearchEngine(self.provider()).search(q)
+
+    def test_true_matches_members_across_locations(self):
+        # Tag member (book 1) OR author member (book 1).
+        self.assertEqual(self.s("@Favorites:true"), {1})
+
+    def test_case_insensitive_name_and_query(self):
+        self.assertEqual(self.s("@favorites:TRUE"), {1})
+
+    def test_false_inverts(self):
+        self.assertEqual(self.s("@Favorites:false"), {2, 3, 4})
+
+    def test_leading_dot_includes_subcategories(self):
+        self.assertEqual(self.s("@Favorites:true"), {1})
+        self.assertEqual(self.s("@Favorites:.true"), {1, 2})
+
+    def test_other_query_text_is_ignored_like_upstream(self):
+        self.assertEqual(self.s("@Favorites:fantasy"), {1})
+
+    def test_short_query_matches_nothing(self):
+        self.assertEqual(self.s("@Favorites:a"), set())
+
+    def test_unknown_category_matches_nothing(self):
+        # Routed as a location (not an all: text search), so empty — parity
+        # with Calibre, where unknown user categories match nothing.
+        self.assertEqual(self.s("@Nope:true"), set())
+
+    def test_bare_field_beats_same_named_category(self):
+        # 'publisher' is both a real field and a user category: the bare form
+        # searches the field; only the @-form reaches the category.
+        self.assertEqual(self.s("publisher:Tor"), {2})
+        self.assertEqual(self.s("@publisher:true"), {1})
+
+    def test_group_beats_same_named_category(self):
+        # Group 'Fav' (-> tags) wins over user category 'Fav' (-> publisher).
+        self.assertEqual(self.s("@Fav:Fic.SciFi"), {3})
+        self.assertEqual(self.s("Fav:Fic.SciFi"), {3})
+
+    def test_provider_without_hook_degrades_to_nothing(self):
+        # No user_categories() on the provider: '@Name' queries match nothing
+        # instead of crashing (getattr fallback, mirroring groups).
+        self.assertEqual(SearchEngine(_FakeProvider()).search("@Favorites:true"), set())
+
+
 if __name__ == "__main__":
     unittest.main()

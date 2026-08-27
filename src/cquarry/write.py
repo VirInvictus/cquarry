@@ -37,18 +37,9 @@ import uuid as _uuid
 from datetime import UTC, datetime
 from typing import Any, Self
 
+from cquarry.helpers import title_sort
 
-def title_sort(title: str) -> str:
-    """Calibre's title sort key: leading articles move to the end."""
-    if not title:
-        return ""
-    stripped = title.strip()
-    lowered = stripped.lower()
-    for art in ("the ", "a ", "an "):
-        if lowered.startswith(art):
-            rest = stripped[len(art) :].strip()
-            return f"{rest}, {stripped[: len(art) - 1]}"
-    return stripped
+__all__ = ["WritableCalibreDB", "register_udfs", "title_sort", "uuid4"]
 
 
 def uuid4(_arg: Any = None) -> str:

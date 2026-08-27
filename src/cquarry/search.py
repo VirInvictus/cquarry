@@ -21,6 +21,11 @@ Coverage:
     pages, identifiers/identifier/isbn, comments/comment, annotations (the
     book's concatenated annotation text; presence via ``true``/``false``),
     cover, id, uuid, ``#custom`` columns, ``all``, ``vl:`` and ``search:``.
+  - User categories: ``@Name:query`` matches books holding any of the user
+    category's member values (exact match on the member's location); a
+    leading ``.`` (``@Name:.query``) includes subcategories and ``false``
+    inverts — Calibre's ``get_user_category_matches`` semantics. Provider
+    hook: ``user_categories()`` (Calibre's ``user_categories`` preference).
   - Grouped search terms: ``GroupName:query`` expands to the union over the
     group's member locations (provider-supplied, from Calibre's
     ``grouped_search_terms`` preference); ``GroupName:false`` inverts. Real
@@ -352,7 +357,10 @@ class _Parser:
             return ["token", "all", self._token(advance=True)]
 
         words = (self._token(advance=True) or "").split(":")
-        if len(words) > 1 and words[0].lower() in self.locations:
+        if len(words) > 1 and (
+            words[0].lower() in self.locations
+            or (words[0].startswith("@") and len(words[0]) > 1)
+        ):
             loc = words[0].lower()
             words = words[1:]
             suffix = ":".join(words)
@@ -715,12 +723,29 @@ class SearchEngine:
                     self._grouped[str(name).lower()] = [
                         self._canonical(str(m)) for m in members
                     ]
+        # User-defined tag-browser categories (Calibre's user_categories
+        # preference): searched as '@Name'. Optional provider hook — members
+        # are raw [value, location, ...] entries per Calibre's pref format.
+        uc = getattr(provider, "user_categories", None)
+        raw_uc = uc() if callable(uc) else {}
+        self._user_cats: dict[str, list[tuple[str, str]]] = {}
+        if isinstance(raw_uc, dict):
+            for name, members in raw_uc.items():
+                if not isinstance(members, list):
+                    continue
+                parsed: list[tuple[str, str]] = []
+                for m in members:
+                    if isinstance(m, (list, tuple)) and len(m) >= 2:
+                        parsed.append((str(m[0]), self._canonical(str(m[1]))))
+                if parsed:
+                    self._user_cats[str(name).lower()] = parsed
         self.locations = (
             set(_BUILTIN_DATATYPES)
             | set(_ALIASES)
             | {"isbn", "search"}
             | set(self._custom)
             | set(self._grouped)
+            | {f"@{name}" for name in self._user_cats}
         )
 
     def search(self, expr: str) -> set[int]:
@@ -785,13 +810,17 @@ class SearchEngine:
             # Grouped search term (Calibre parity): "GroupName:query" expands
             # to the union of its member locations; "GroupName:false" matches
             # books where NO member matches. Real fields always win over a
-            # same-named group. The '@Name' spelling is accepted too, though
-            # the tokenizer reserves leading-'@' tokens for GPM templates, so
-            # users write the bare form. Nesting a group inside a group is a
-            # ParseException, mirroring upstream's recursion guard.
+            # same-named group; '@Name' spellings route to user categories
+            # when the name is not a group. Nesting a group inside a group is
+            # a ParseException, mirroring upstream's recursion guard.
             group_key = original.removeprefix("@")
             members = self._grouped.get(group_key)
             if members is None:
+                # User-defined tag-browser category ('@Name' form). Real
+                # fields and groups win over same-named categories, mirroring
+                # upstream's check order; unknown names match nothing.
+                if original.startswith("@") and len(original) > 1:
+                    return self._match_user_category(original[1:], query, candidates)
                 return set()  # unsupported location -> no matches
             if not allow_groups:
                 raise ParseException(f"Recursive query group detected: {group_key}")
@@ -959,6 +988,34 @@ class SearchEngine:
                     out.add(b)
                     break
         return out
+
+    def _match_user_category(
+        self, name: str, query: str, candidates: set[int]
+    ) -> set[int]:
+        # Mirrors Calibre's get_user_category_matches: a category matches the
+        # books holding any of its member values, each probed as an exact
+        # ('=' + item) match on the member's own location. A leading '.' in
+        # the query includes subcategories (name + '.'); 'false' inverts. Any
+        # other query text is ignored, exactly as upstream (the GUI always
+        # writes '@Name:true'). Queries shorter than two characters match
+        # nothing, also as upstream.
+        matches: set[int] = set()
+        if len(query) < 2:
+            return matches
+        check_subcats = query.startswith(".")
+        if check_subcats:
+            query = query[1:]
+        c = set(candidates)
+        for key, members in self._user_cats.items():
+            if key != name and not (check_subcats and key.startswith(name + ".")):
+                continue
+            for item, category in members:
+                found = self._get_matches(category, "=" + item, c, set())
+                c -= found
+                matches |= found
+        if query.strip().lower() == "false":
+            return candidates - matches
+        return matches
 
     def _match_vl(self, name: str, candidates: set[int], seen: set[str]) -> set[int]:
         key = "vl:" + name.lower()

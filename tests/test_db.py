@@ -577,7 +577,7 @@ class TestReadSideV14(unittest.TestCase):
 
     def test_get_entities_unknown_kind_raises(self):
         with self.assertRaises(ValueError):
-            self.db.get_entities("ratings")  # not part of the uniform API
+            self.db.get_entities("nope")
 
     def test_custom_column_display_config(self):
         cols = self.db.get_custom_columns()
@@ -633,8 +633,252 @@ class TestReadSideV14(unittest.TestCase):
         self.assertEqual(self.db.search("wet"), set())
 
 
-if __name__ == "__main__":
-    unittest.main()
+_SCHEMA_V16 = """
+CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT,
+    timestamp TEXT, pubdate TEXT, has_cover INT, last_modified TEXT,
+    series_index REAL DEFAULT 1.0, path TEXT, uuid TEXT);
+CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INT, author INT);
+CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT, link TEXT);
+CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INT, tag INT);
+CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INT, series INT);
+CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INT, publisher INT);
+CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT, link TEXT);
+CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INT, lang_code INT,
+    item_order INT NOT NULL DEFAULT 0);
+CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INT, link TEXT DEFAULT '');
+CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INT, rating INT);
+CREATE TABLE data (id INTEGER PRIMARY KEY, book INT, format TEXT, name TEXT,
+    uncompressed_size INT);
+CREATE TABLE identifiers (book INT, type TEXT, val TEXT);
+CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+    datatype TEXT, editable BOOL, display TEXT, is_multiple BOOL DEFAULT 0,
+    normalized BOOL DEFAULT 0);
+CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, value TEXT, link TEXT DEFAULT '');
+CREATE TABLE books_custom_column_2_link (book INT, value INT);
+CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
+CREATE TABLE feeds (id INTEGER PRIMARY KEY, title TEXT, script TEXT);
+CREATE TABLE annotations_dirtied (id INTEGER PRIMARY KEY, book INT, UNIQUE(book));
+CREATE VIEW tag_browser_tags AS SELECT
+    id, name,
+    (SELECT COUNT(id) FROM books_tags_link WHERE tag=tags.id) count,
+    (SELECT AVG(ratings.rating) FROM books_tags_link AS tl,
+            books_ratings_link AS bl, ratings
+     WHERE tl.tag=tags.id AND bl.book=tl.book AND ratings.id = bl.rating
+       AND ratings.rating <> 0) avg_rating,
+    name AS sort
+ FROM tags;
+CREATE VIEW tag_browser_filtered_tags AS SELECT
+    id, name,
+    (SELECT COUNT(id) FROM books_tags_link WHERE tag=tags.id
+       AND books_list_filter(book)) count,
+    0.0 AS avg_rating,
+    name AS sort
+ FROM tags;
+CREATE VIEW tag_browser_custom_column_2 AS SELECT
+    id, value,
+    (SELECT COUNT(id) FROM books_custom_column_2_link
+      WHERE value=custom_column_2.id) count,
+    0.0 AS avg_rating,
+    value AS sort
+ FROM custom_column_2;
+CREATE VIEW tag_browser_series AS SELECT
+    id, name,
+    (SELECT COUNT(id) FROM books_series_link WHERE series=series.id) count,
+    0.0 AS avg_rating,
+    (title_sort(name)) AS sort
+ FROM series;
+CREATE VIEW tag_browser_ratings AS SELECT
+    id, rating,
+    (SELECT COUNT(id) FROM books_ratings_link WHERE rating=ratings.id) count,
+    0.0 AS avg_rating,
+    rating AS sort
+ FROM ratings;
+"""
+
+
+class TestReadSideV16(unittest.TestCase):
+    """Completeness mining: feeds, annotations_dirtied, tag_browser views,
+    the ratings entity kind, row-shape parity, and language item_order."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(path)
+        con.executescript(_SCHEMA_V16)
+        con.executemany(
+            "INSERT INTO books (id,title,sort,path,uuid) VALUES (?,?,?,?,?)",
+            [
+                (1, "Alpha", "Alpha", "a/alpha (1)", "uuid-1"),
+                (2, "Beta", "Beta", "b/beta (2)", None),
+            ],
+        )
+        con.execute("INSERT INTO authors (name) VALUES ('A. Author')")
+        con.executemany(
+            "INSERT INTO books_authors_link (book,author) VALUES (?,1)", [(1,), (2,)]
+        )
+        con.executemany(
+            "INSERT INTO tags (id,name) VALUES (?,?)", [(1, "Fic"), (2, "Solo")]
+        )
+        con.executemany(
+            "INSERT INTO books_tags_link (book,tag) VALUES (?,1)", [(1,), (2,)]
+        )
+        # Two languages where link-id order deliberately contradicts item_order.
+        con.executemany(
+            "INSERT INTO languages (id,lang_code) VALUES (?,?)",
+            [(1, "eng"), (2, "fra")],
+        )
+        con.executemany(
+            "INSERT INTO books_languages_link (id,book,lang_code,item_order) VALUES (?,?,?,?)",
+            [(1, 1, 2, 1), (2, 1, 1, 0)],
+        )
+        # Ratings: rating 4 shared by both books, rating 2 on book 2 only.
+        con.executemany(
+            "INSERT INTO ratings (id,rating,link) VALUES (?,?,?)",
+            [(1, 4, ""), (2, 2, "https://x")],
+        )
+        con.executemany(
+            "INSERT INTO books_ratings_link (book,rating) VALUES (?,?)",
+            [(1, 1), (2, 1), (2, 2)],
+        )
+        con.execute(
+            "INSERT INTO data (book,format,name,uncompressed_size) VALUES (1,'EPUB','alpha',1024)"
+        )
+        con.execute("INSERT INTO identifiers (book,type,val) VALUES (1,'isbn','123')")
+        con.execute(
+            "INSERT INTO custom_columns VALUES (2,'status','Status','enumeration',1,'{}',0,1)"
+        )
+        con.execute("INSERT INTO custom_column_2 (value) VALUES ('Read')")
+        con.execute("INSERT INTO books_custom_column_2_link VALUES (1,1)")
+        con.execute("INSERT INTO series (id,name) VALUES (1,'The Culture')")
+        con.execute("INSERT INTO books_series_link (book,series) VALUES (2,1)")
+        con.executemany(
+            "INSERT INTO feeds (title,script) VALUES (?,?)",
+            [("Zed Feed", "z"), ("Abc Feed", "a")],
+        )
+        con.executemany(
+            "INSERT INTO annotations_dirtied (book) VALUES (?)", [(2,), (1,)]
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def _old_schema_db(self):
+        path = os.path.join(self.temp_dir, "old.db")
+        con = sqlite3.connect(path)
+        con.executescript(_SCHEMA_V28)
+        con.commit()
+        con.close()
+        return CalibreDB(path)
+
+    def test_get_feeds_sorted_nocase(self):
+        feeds = self.db.get_feeds()
+        self.assertEqual([f["title"] for f in feeds], ["Abc Feed", "Zed Feed"])
+        self.assertEqual(feeds[0]["script"], "a")
+
+    def test_get_annotations_dirtied_books(self):
+        self.assertEqual(self.db.get_annotations_dirtied_books(), [1, 2])
+
+    def test_get_tag_browser_counts(self):
+        counts = self.db.get_tag_browser_counts()
+        # The filtered_* view (books_list_filter) must be skipped; native and
+        # custom views read, custom rekeyed to the #label location. The
+        # series view's title_sort() dependency is satisfied locally and the
+        # ratings view's rating-column spelling is handled.
+        self.assertEqual(set(counts), {"tags", "#status", "series", "ratings"})
+        fic = next(r for r in counts["tags"] if r["name"] == "Fic")
+        self.assertEqual(fic["count"], 2)
+        # AVG over the joined rows: book 1 rated 4, book 2 rated 4 AND 2.
+        self.assertEqual(fic["avg_rating"], 10 / 3)
+        solo = next(r for r in counts["tags"] if r["name"] == "Solo")
+        self.assertEqual(solo["count"], 0)
+        self.assertIsNone(solo["avg_rating"])
+        self.assertEqual(
+            counts["#status"],
+            [{"id": 1, "name": "Read", "count": 1, "avg_rating": 0.0, "sort": "Read"}],
+        )
+        self.assertEqual(
+            counts["series"],
+            [
+                {
+                    "id": 1,
+                    "name": "The Culture",
+                    "count": 1,
+                    "avg_rating": 0.0,
+                    "sort": "Culture, The",
+                }
+            ],
+        )
+        self.assertEqual(
+            [(r["name"], r["count"]) for r in counts["ratings"]], [("2", 1), ("4", 2)]
+        )
+
+    def test_get_tag_browser_counts_degrades_without_views(self):
+        db = self._old_schema_db()
+        try:
+            self.assertEqual(db.get_tag_browser_counts(), {})
+        finally:
+            db.close()
+
+    def test_get_feeds_and_dirtied_degrade_without_tables(self):
+        db = self._old_schema_db()
+        try:
+            self.assertEqual(db.get_feeds(), [])
+            self.assertEqual(db.get_annotations_dirtied_books(), [])
+        finally:
+            db.close()
+
+    def test_ratings_entity_kind(self):
+        ratings = self.db.get_entities("ratings")
+        self.assertEqual(
+            [(r["name"], r["count"]) for r in ratings],
+            [("2", 1), ("4", 2)],  # numeric order, half-star int as text
+        )
+        self.assertEqual(ratings[0]["link"], "https://x")
+        with self.assertRaises(ValueError):
+            self.db.get_entities("nope")
+
+    def test_row_shape_parity_between_get_book_and_get_all_books(self):
+        row = {b["id"]: b for b in self.db.get_all_books()}[1]
+        book = self.db.get_book(1)
+        self.assertEqual(sorted(row.keys()), sorted(book.keys()))
+        for key in ("size", "uuid", "identifiers", "pages", "languages"):
+            self.assertEqual(row[key], book[key], key)
+        self.assertEqual(row["uuid"], "uuid-1")
+        self.assertIsNone(self.db.get_book(2)["uuid"] or None)
+        self.assertEqual(book["identifiers"], {"isbn": "123"})
+        self.assertEqual(row["size"], 1024)
+
+    def test_languages_ordered_by_item_order(self):
+        # Link ids say fra(1), eng(2); item_order says eng first.
+        self.assertEqual(self.db.get_book(1)["languages"], ["eng", "fra"])
+        row = {b["id"]: b for b in self.db.get_all_books()}[1]
+        self.assertEqual(row["languages"], ["eng", "fra"])
+
+    def test_languages_old_schema_falls_back_to_link_order(self):
+        db = self._old_schema_db()
+        try:
+            con = sqlite3.connect(db.db_path)
+            con.execute("INSERT INTO books (id,title) VALUES (1,'Old Book')")
+            con.executemany(
+                "INSERT INTO languages (id,lang_code) VALUES (?,?)",
+                [(1, "eng"), (2, "fra")],
+            )
+            con.executemany(
+                "INSERT INTO books_languages_link (id,book,lang_code) VALUES (?,?,?)",
+                [(1, 1, 2), (2, 1, 1)],  # fra first by link id
+            )
+            con.commit()
+            con.close()
+            self.assertEqual(db.get_book(1)["languages"], ["fra", "eng"])
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":

@@ -1,3 +1,47 @@
+## v1.6.0 (2026-08-26)
+
+### Completeness mining: every table, view, and query shape (Phase 6+)
+
+Driven by a full audit against the 7,631-book testing-facility library, cross-checked
+against upstream Calibre source (`calibre/db/search.py`):
+
+- **User-category search (parity fix).** `@Name:query` now works exactly as upstream's
+  `get_user_category_matches`: books holding any member value (exact match on the member's
+  location), `@Name:.query` includes subcategories, `false` inverts, other query text is
+  ignored as upstream, <2-char queries match nothing. Groups and real fields win over
+  same-named categories; unknown `@Names` match nothing instead of silently degrading to an
+  `all:` text sweep (the previous behavior). Providers opt in via an optional
+  `user_categories()` hook (`CalibreDB` supplies `preferences.user_categories`).
+- **Row-shape parity fix.** `get_book()` now returns the exact `get_all_books()` row shape:
+  it was missing `size`. Both rows additionally carry `uuid` and `identifiers` (previously
+  only the internal search view had them); enrichment degrades gracefully on ancient schemas.
+- **Language ordering (parity fix).** A book's `languages` follow
+  `books_languages_link.item_order` (link-id tiebreaker), matching Calibre; schemas
+  predating the column keep link-id order.
+- **New read APIs.** `get_feeds()` (the `feeds` news-recipe table),
+  `get_annotations_dirtied_books()` (the annotations sibling of the OPF dirtied queue), and
+  `get_tag_browser_counts()` — Calibre's own `tag_browser_*` sidebar rollups including
+  `avg_rating`, with custom columns rekeyed to `#label`. View quirks worked around without
+  touching the database: the ratings view's `rating` column aliased to `name`, and the
+  series view's `title_sort()` UDF (moved to stdlib `helpers`; registered on the connection
+  for the duration of the read only, then removed). The `tag_browser_filtered_*` variants
+  are deliberately skipped — they call Calibre's GUI-state `books_list_filter()` function,
+  which only exists inside a running Calibre (as does the `meta` view's `sortconcat()`
+  aggregate; `meta` stays unread by design).
+- **`get_entities("ratings")`** completes entity coverage: `{id, name, sort, link, count}`
+  with the half-star integer surfaced as text (resolves the v1.4.0 deferral of
+  `ratings.link`).
+- **Docs.** `database_report.md` §6 records the in-process-function landmines discovered
+  during the audit (`meta`, `tag_browser_filtered_*`, `title_sort` in views).
+
+### Internal
+- Test suite grew from 141 to 160 tests: user-category search battery (precedence,
+  inversion, subcategories, unknown names, hookless providers), feeds / annotations-dirtied
+  / tag-browser reads with old-schema degradation, ratings entities, row-shape parity, and
+  language ordering on both current and pre-`item_order` schemas.
+- Verified against the real testing-facility library: all 9 tag-browser categories read,
+  recursive 31-VL "Unsorted" resolution unchanged, `get_all_books()` still ~0.12 s.
+
 ## v1.5.0 (2026-08-26)
 
 ### Write-side expansion (Phase 6)

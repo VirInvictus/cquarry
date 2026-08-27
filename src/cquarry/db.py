@@ -1,12 +1,13 @@
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
 import tempfile
 from typing import Any
 
-from cquarry.helpers import calibre_rating_to_stars, db_uri_ro
+from cquarry.helpers import calibre_rating_to_stars, db_uri_ro, title_sort
 from cquarry.search import (
     DT_BOOL,
     DT_DATE,
@@ -127,6 +128,22 @@ class CalibreDB:
         """)
         books = [dict(row) for row in cur.fetchall()]
 
+        # Book UUIDs (per-book; the library-level UUID lives in library_id).
+        # Ancient schemas without the column degrade to empty strings.
+        uuidmap: dict[int, str] = {}
+        try:
+            for row in self.conn.execute("SELECT id, uuid FROM books"):
+                uuidmap[row["id"]] = row["uuid"] or ""
+        except sqlite3.OperationalError:
+            pass  # schema predates the uuid column
+        # Identifiers (EAV store: one value per type per book).
+        imap: dict[int, dict[str, str]] = {}
+        try:
+            for row in self.conn.execute("SELECT book, type, val FROM identifiers"):
+                imap.setdefault(row["book"], {})[row["type"]] = row["val"]
+        except sqlite3.OperationalError:
+            pass  # schema predates the identifiers table
+
         # Authors with their secondary columns (true sort key, link URL) as
         # arrays parallel to `authors` — link-table order throughout. Ancient
         # schemas without authors.sort/link degrade to empty strings.
@@ -159,11 +176,24 @@ class CalibreDB:
             "SELECT btl.book, t.name FROM books_tags_link btl JOIN tags t ON t.id = btl.tag ORDER BY t.name"
         ):
             tmap.setdefault(row["book"], []).append(row["name"])
-        # Languages
-        lmap = {}
-        for row in self.conn.execute(
-            "SELECT bll.book, l.lang_code FROM books_languages_link bll JOIN languages l ON l.id = bll.lang_code"
-        ):
+        # Languages: Calibre orders a book's languages by the link table's
+        # item_order column (link id as tiebreaker); schemas predating
+        # item_order keep plain insertion order.
+        lmap: dict[int, list[str]] = {}
+        try:
+            lang_rows = list(
+                self.conn.execute(
+                    "SELECT bll.book, l.lang_code FROM books_languages_link bll "
+                    "JOIN languages l ON l.id = bll.lang_code "
+                    "ORDER BY bll.book, bll.item_order, bll.id"
+                )
+            )
+        except sqlite3.OperationalError:
+            lang_rows = self.conn.execute(
+                "SELECT bll.book, l.lang_code FROM books_languages_link bll "
+                "JOIN languages l ON l.id = bll.lang_code ORDER BY bll.book, bll.id"
+            )
+        for row in lang_rows:
             lmap.setdefault(row["book"], []).append(row["lang_code"])
         # Formats
         fmap = {}
@@ -192,6 +222,8 @@ class CalibreDB:
             b["formats"] = fmap.get(b["id"], [])
             b["size"] = smap.get(b["id"])
             b["pages"] = pmap.get(b["id"])
+            b["uuid"] = uuidmap.get(b["id"], "")
+            b["identifiers"] = imap.get(b["id"], {})
 
         self._books_cache = books
         return self._books_cache
@@ -231,8 +263,9 @@ class CalibreDB:
     def get_book(self, book_id: int) -> dict[str, Any] | None:
         """Fetch a single hydrated book record without scanning the library.
 
-        Returns the same shape as one ``get_all_books()`` row, or None when
-        the id does not exist.
+        Returns the same shape as one ``get_all_books()`` row — including
+        ``size``, ``uuid``, and ``identifiers`` — or None when the id does
+        not exist.
         """
         cur = self.conn.cursor()
         cur.execute(
@@ -287,14 +320,42 @@ class CalibreDB:
             (book_id,),
         )
         b["tags"] = [r["name"] for r in cur.fetchall()]
-        cur.execute(
-            "SELECT l.lang_code FROM books_languages_link bll "
-            "JOIN languages l ON l.id = bll.lang_code WHERE bll.book = ?",
-            (book_id,),
-        )
-        b["languages"] = [r["lang_code"] for r in cur.fetchall()]
+        # Languages follow the link table's item_order (see get_all_books).
+        try:
+            lang_rows = list(
+                cur.execute(
+                    "SELECT l.lang_code FROM books_languages_link bll "
+                    "JOIN languages l ON l.id = bll.lang_code WHERE bll.book = ? "
+                    "ORDER BY bll.item_order, bll.id",
+                    (book_id,),
+                )
+            )
+        except sqlite3.OperationalError:
+            lang_rows = cur.execute(
+                "SELECT l.lang_code FROM books_languages_link bll "
+                "JOIN languages l ON l.id = bll.lang_code WHERE bll.book = ? "
+                "ORDER BY bll.id",
+                (book_id,),
+            ).fetchall()
+        b["languages"] = [r["lang_code"] for r in lang_rows]
         cur.execute("SELECT format FROM data WHERE book = ?", (book_id,))
         b["formats"] = [r["format"] for r in cur.fetchall()]
+        try:
+            srow = cur.execute(
+                "SELECT SUM(uncompressed_size) AS total FROM data WHERE book = ?",
+                (book_id,),
+            ).fetchone()
+            b["size"] = srow["total"] if srow is not None else None
+        except sqlite3.OperationalError:
+            b["size"] = None  # very old schemas lack uncompressed_size
+        try:
+            urow = cur.execute(
+                "SELECT uuid FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            b["uuid"] = (urow["uuid"] or "") if urow is not None else ""
+        except sqlite3.OperationalError:
+            b["uuid"] = ""  # schema predates the uuid column
+        b["identifiers"] = self.get_identifiers(book_id)
         b["pages"] = self._page_counts().get(book_id)
         return b
 
@@ -561,11 +622,13 @@ class CalibreDB:
         """Entity rows with secondary columns and book counts.
 
         ``kind`` is one of ``authors``, ``series``, ``publishers``,
-        ``tags``, ``languages``. Returns ``[{id, name, sort, link, count}]``
-        sorted by name — the data behind author cards and browse facets.
-        ``sort``/``link`` are ``""`` when the entity has none or the schema
-        predates the column; languages key their name under ``lang_code`` but
-        still surface it as ``name``. Unknown kinds raise ValueError.
+        ``tags``, ``languages``, ``ratings``. Returns
+        ``[{id, name, sort, link, count}]`` sorted by name — the data behind
+        author cards and browse facets. ``sort``/``link`` are ``""`` when the
+        entity has none or the schema predates the column; languages key
+        their name under ``lang_code`` but still surface it as ``name``;
+        ratings have no name column, so ``name`` carries the half-star
+        integer as text. Unknown kinds raise ValueError.
         """
         table_map = {
             "authors": ("authors", "books_authors_link", "author"),
@@ -573,13 +636,19 @@ class CalibreDB:
             "publishers": ("publishers", "books_publishers_link", "publisher"),
             "tags": ("tags", "books_tags_link", "tag"),
             "languages": ("languages", "books_languages_link", "lang_code"),
+            "ratings": ("ratings", "books_ratings_link", "rating"),
         }
         if kind not in table_map:
             raise ValueError(
                 f"Unknown entity kind {kind!r}. Available: {', '.join(sorted(table_map))}"
             )
         table, link_table, fk = table_map[kind]
-        name_col = "lang_code" if kind == "languages" else "name"
+        if kind == "ratings":
+            # ratings has no `name` column; surface the rating value itself.
+            name_expr, order_expr = "CAST(e.rating AS TEXT)", "e.rating"
+        else:
+            name_col = "lang_code" if kind == "languages" else "name"
+            name_expr, order_expr = f"e.{name_col}", f"e.{name_col}"
 
         # Which secondary columns does this entity table have?
         cols = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -589,11 +658,11 @@ class CalibreDB:
         out: list[dict[str, Any]] = []
         try:
             rows = self.conn.execute(
-                f"SELECT e.{pk} AS id, e.{name_col} AS name, "
+                f"SELECT e.{pk} AS id, {name_expr} AS name, "
                 f"{sort_expr} AS sort, {link_expr} AS link, "
                 f"COUNT(l.book) AS count "
                 f"FROM {table} e LEFT JOIN {link_table} l ON l.{fk} = e.{pk} "
-                f"GROUP BY e.{pk} ORDER BY e.{name_col} COLLATE NOCASE"
+                f"GROUP BY e.{pk} ORDER BY {order_expr} COLLATE NOCASE"
             ).fetchall()
         except sqlite3.OperationalError:
             return []
@@ -870,6 +939,111 @@ class CalibreDB:
             return []
         return [row["book"] for row in cur.fetchall()]
 
+    def get_annotations_dirtied_books(self) -> list[int]:
+        """List book ids queued for annotation sync in ``annotations_dirtied``.
+
+        The annotations sibling of :meth:`get_dirtied_books`: Calibre consumes
+        this queue to push highlights/bookmarks to connected devices.
+        Read-only observation — clearing entries is Calibre's job. Returns an
+        empty list on schemas predating the table.
+        """
+        cur = self.conn.cursor()
+        try:
+            cur.execute("SELECT DISTINCT book FROM annotations_dirtied ORDER BY book")
+        except sqlite3.OperationalError:
+            return []
+        return [row["book"] for row in cur.fetchall()]
+
+    def get_feeds(self) -> list[dict[str, Any]]:
+        """Registered news feeds: ``[{id, title, script}]``.
+
+        The ``feeds`` table stores the recipe scripts behind Calibre's news
+        download feature. Empty list when the schema predates the table or it
+        is absent.
+        """
+        try:
+            cur = self.conn.execute(
+                "SELECT id, title, script FROM feeds ORDER BY title COLLATE NOCASE"
+            )
+            return [dict(row) for row in cur.fetchall()]
+        except sqlite3.OperationalError:
+            return []
+
+    def get_tag_browser_counts(self) -> dict[str, list[dict[str, Any]]]:
+        """Calibre's own tag-browser rollups from the ``tag_browser_*`` views.
+
+        Reads every pure-SQL ``tag_browser_*`` view and returns
+        ``{category: [{id, name, count, avg_rating, sort}]}`` — the exact
+        per-entity counts (and mean rating over the entity's rated books)
+        Calibre's browse sidebar shows. Custom-column categories are rekeyed
+        from ``custom_column_N`` to their ``#label`` search location; native
+        categories keep their entity names. Two view quirks are worked around
+        without touching the database: ``tag_browser_series`` sorts through
+        Calibre's ``title_sort()`` UDF, which this supplies from the stdlib
+        ``helpers`` implementation for the duration of the read (registered
+        on this connection only, then removed); and the ratings/custom views
+        name their value column ``rating``/``value`` rather than ``name``.
+        The ``tag_browser_filtered_*`` variants are deliberately skipped:
+        they call Calibre's GUI-state ``books_list_filter()`` SQL function,
+        which only exists inside a running Calibre (as does the
+        ``sortconcat()`` aggregate behind the ``meta`` view). Views that
+        still cannot be evaluated outside Calibre are silently skipped, so
+        the result degrades gracefully on such schemas.
+        """
+        try:
+            names = [
+                r[0]
+                for r in self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='view' "
+                    "AND name LIKE 'tag_browser_%'"
+                )
+            ]
+        except sqlite3.OperationalError:
+            return []
+        label_by_id: dict[int, str] = {}
+        try:
+            label_by_id = {
+                col["id"]: col["label"] for col in self.get_custom_columns().values()
+            }
+        except Exception:
+            pass
+        out: dict[str, list[dict[str, Any]]] = {}
+        # tag_browser_series calls title_sort() — a UDF that only exists
+        # inside Calibre's process. Supply the stdlib equivalent on this
+        # connection for the duration of the read, then remove it again; no
+        # database state is touched (read-only connection, SELECTs only).
+        self.conn.create_function("title_sort", 1, title_sort)
+        try:
+            for name in sorted(names):
+                if name.startswith("tag_browser_filtered_"):
+                    continue  # books_list_filter() is GUI state, not data
+                key = name[len("tag_browser_") :]
+                m = re.fullmatch(r"custom_column_(\d+)", key)
+                if m:
+                    key = "#" + label_by_id.get(int(m.group(1)), key)
+                rows = None
+                for select in (
+                    f"SELECT id, name, count, avg_rating, sort FROM {name} ",
+                    f"SELECT id, value AS name, count, avg_rating, sort FROM {name} ",
+                    f"SELECT id, CAST(rating AS TEXT) AS name, count, avg_rating, sort FROM {name} ",
+                ):
+                    try:
+                        # ORDER BY lives outside the attempted SQL so a
+                        # missing name column can fall through to the next
+                        # value-column form.
+                        rows = self.conn.execute(
+                            select + "ORDER BY 2 COLLATE NOCASE"
+                        ).fetchall()
+                        break
+                    except sqlite3.OperationalError:
+                        continue  # depends on a Calibre-process function
+                if rows is None:
+                    continue
+                out[key] = [dict(r) for r in rows]
+        finally:
+            self.conn.create_function("title_sort", 1, None)
+        return out
+
     # --- Preferences (generic accessor) ---
 
     def _preferences(self) -> dict[str, Any]:
@@ -951,6 +1125,14 @@ class CalibreDB:
     def grouped_search_terms(self) -> dict[str, list[str]]:
         """MetadataProvider hook: grouped search terms for the engine."""
         return self.get_grouped_search_terms()
+
+    def user_categories(self) -> dict[str, list]:
+        """MetadataProvider hook: user-defined tag-browser categories.
+
+        Feeds the ``@Name`` search location (see spec §4); each category maps
+        to its raw member list of ``[value, location, ...]`` entries.
+        """
+        return self.get_user_categories()
 
     def _annotations_text(self, book_id: int) -> str:
         """Concatenated annotation searchable text for one book (cached).

@@ -2,13 +2,14 @@
 
 This roadmap outlines the planned evolution of `cquarry` from a read-only metadata extractor to a full-featured Calibre ecosystem bridge, utilizing the structural discoveries documented in `database_report.md`.
 
-> **Status (v1.5.0, 2026-08-26):** Phases 1–5 are implemented and covered by tests.
+> **Status (v1.6.0, 2026-08-26):** Phases 1–5 are implemented and covered by tests.
 > Phase 6 is complete: write-path correctness + dirtied visibility (v1.2.0),
-> read-side batches 1–2 (v1.3.0/v1.4.0) and the write-side expansion (v1.5.0)
-> are shipped and synced across all four consumers — every checkbox below is
-> either ticked or explicitly waived/deferred with a reason. What remains is
-> Phase 7 (Carrel data-layer extraction), plus the open conditional items
-> noted inline (`add_book` design, Carrel reading-status toggle).
+> read-side batches 1–2 (v1.3.0/v1.4.0), the write-side expansion (v1.5.0), and the
+> v1.6.0 completeness-mining pass (user-category search, row-shape parity, language
+> `item_order`, feeds / annotations-dirtied / tag-browser views, ratings entities)
+> are shipped — every checkbox below is either ticked or explicitly waived/deferred
+> with a reason. What remains is Phase 7 (Carrel data-layer extraction), plus the
+> open conditional items noted inline (`add_book` design, Carrel reading-status toggle).
 
 ## Phase 1: Read-Only Enhancements (Current & Near-Term)
 *Context: Improving our query capabilities using existing read-only mechanics (ref: database_report.md Sections 1-4).*

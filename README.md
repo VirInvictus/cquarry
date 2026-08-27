@@ -95,14 +95,14 @@ with CalibreDB("/path/to/metadata.db") as db:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `get_all_books()` | `list[dict[str, Any]]` | Every book in the library, pre-hydrated with `authors`, `author_sorts`, `author_links` (parallel arrays), `tags`, `series`, `rating`, `publisher`, `languages`, `formats`, `title_sort`, `author_sort`, `timestamp`, `pubdate`, `last_modified`, `has_cover`, `series_index`, `size`, `pages`, and `path`. `authors`, `tags`, `languages`, and `formats` are exposed natively as `list[str]` arrays. Results are cached after the first call. |
-| `get_book(book_id)` | `dict[str, Any] \| None` | Fetch one hydrated record (same shape as a `get_all_books()` row) without scanning the library. |
+| `get_all_books()` | `list[dict[str, Any]]` | Every book in the library, pre-hydrated with `authors`, `author_sorts`, `author_links` (parallel arrays), `tags`, `series`, `rating`, `publisher`, `languages`, `formats`, `title_sort`, `author_sort`, `timestamp`, `pubdate`, `last_modified`, `has_cover`, `series_index`, `size`, `pages`, `uuid`, `identifiers`, and `path`. `authors`, `tags`, `languages`, and `formats` are exposed natively as `list[str]` arrays. Results are cached after the first call. |
+| `get_book(book_id)` | `dict[str, Any] \| None` | Fetch one hydrated record (same shape as a `get_all_books()` row, including `size`, `uuid`, and `identifiers`) without scanning the library. |
 | `search_books(query)` | `list[dict[str, Any]]` | Evaluate a search expression and return the hydrated matching books. |
 | `get_format_path(book_id, fmt, verify=True)` | `str` | Absolute filesystem path for a book's format file, built from the original DB location. Raises `ValueError` for unknown book/format, `FileNotFoundError` when `verify` is set and the file is missing. |
 | `get_formats(book_id)` | `dict[str, dict[str, Any]]` | Per-format detail: `{fmt: {path, size_bytes, name}}` (path unverified; size from the catalogued uncompressed size). `{}` for unknown books. |
 | `get_cover_path(book_id, verify=True)` | `str \| None` | Resolved cover image path (`cover.jpg`, falling back to `cover.png`) from the original DB location. With `verify` (default) returns None when no file exists on disk; without it returns the `.jpg` path unconditionally. Raises `ValueError` for unknown books. |
 | `get_library_uuid()` | `str \| None` | The library's identity UUID (`library_id` table) — stable across moves/restores, unlike per-book uuids; the right cache key for per-library state. None on very old schemas. |
-| `get_entities(kind)` | `list[dict[str, Any]]` | Entity rows for `authors` / `series` / `publishers` / `tags` / `languages`: `{id, name, sort, link, count}`, name-sorted. Raises `ValueError` for unknown kinds. |
+| `get_entities(kind)` | `list[dict[str, Any]]` | Entity rows for `authors` / `series` / `publishers` / `tags` / `languages` / `ratings`: `{id, name, sort, link, count}`, name-sorted (ratings carry the half-star integer as `name`). Raises `ValueError` for unknown kinds. |
 | `get_preference(key, default=None)` | `Any` | Typed read of any Calibre preference from the `preferences` table (JSON decoded where it parses). |
 | `get_field_metadata()` | `dict[str, Any]` | The rich `field_metadata` preference: per-custom-column GUI metadata keyed by label. |
 | `get_grouped_search_terms()` | `dict[str, list[str]]` | Grouped search terms driving `GroupName:query` expansion in the search engine. |
@@ -128,8 +128,11 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_plugin_data(book_id=None, name=None)` | `list[dict[str, Any]]` | Third-party payloads from `books_plugin_data` (Goodreads IDs, word counts, ...). |
 | `get_conversion_profiles(book_id=None)` | `list[dict[str, Any]]` | Books with manual conversion overrides; the pickled recipe blob stays raw bytes (`data_size` gives its length). |
 | `get_dirtied_books()` | `list[int]` | Book ids queued for OPF resync in `metadata_dirtied` — i.e. what Calibre will regenerate/push at its next startup. Sorted, deduplicated; read-only (clearing the queue remains Calibre's job). |
+| `get_annotations_dirtied_books()` | `list[int]` | The annotations sibling queue (`annotations_dirtied`): ids whose highlights/bookmarks Calibre will push to devices. Same read-only contract. |
+| `get_feeds()` | `list[dict[str, Any]]` | Registered news-download recipes from the `feeds` table: `[{id, title, script}]`. |
+| `get_tag_browser_counts()` | `dict[str, list[dict[str, Any]]]` | Calibre's own browse-sidebar rollups from the `tag_browser_*` views: `{category: [{id, name, count, avg_rating, sort}]}`, custom columns rekeyed to `#label`. The `filtered_*` variants (GUI-state `books_list_filter()`) are skipped. |
 
-All five return `[]` on databases whose schema predates the tables.
+All eight return `[]`/`{}` on databases whose schema predates the tables.
 
 #### Search and virtual library resolution
 
@@ -340,6 +343,7 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 | `#<label>` | | *(per column)* | Custom columns by label |
 | `vl` | | virtual library | Cross-reference: `vl:"Wing Name"` |
 | `search` | | saved search | Cross-reference: `search:"Saved Name"` |
+| `@Name` | | user category | Books holding any member value: `@Favorites:true`; leading `.` includes subcategories, `false` inverts |
 | `all` | *(bare terms)* | | Searches title, authors, author_sort, series, publisher, tags, comments + custom text columns |
 
 Multi-valued locations additionally accept the count operator: `tags:#>3`, `identifiers:#=0`, `formats:#<5`.
@@ -378,6 +382,21 @@ People:false         # books where NO member matches
 
 Real field names always win over same-named groups, and nesting a group inside a group is a
 parse error.
+
+### User categories
+
+Calibre lets users define tag-browser pseudo-categories (`preferences.user_categories`).
+cquarry searches them with upstream's exact semantics:
+
+```
+@Favorites:true      # books holding any member value (exact match per member location)
+@Favorites:false     # the inverse
+@Favorites:.true     # include subcategories (category names starting with "Favorites.")
+```
+
+As in Calibre, any query text other than `false`/a leading `.` is ignored (the GUI always
+writes `@Name:true`); groups and real fields win over same-named categories; unknown
+`@Names` match nothing.
 
 ### Documented deviations from Calibre
 

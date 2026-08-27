@@ -33,3 +33,24 @@ Writing directly to `metadata.db` via Python's `sqlite3` driver requires extreme
 - **Trigger Hazards**: `books_update_trg` and `books_insert_trg` call custom SQLite Python UDFs like `title_sort(1)` and `uuid4(0)`. If a Python client connects and executes an `UPDATE books SET title = ...` without registering `title_sort`, SQLite will throw an `OperationalError` and abort the transaction.
 - **UDF Registration Requirement**: Writing requires registering custom Python functions (e.g. `conn.create_function("title_sort", 1, title_sort)`) and collations (`PYNOCASE`).
 - **Tag Write Sequence**: Adding a tag involves: (1) `INSERT OR IGNORE` into `tags`, (2) Selecting the new tag ID, (3) `INSERT OR IGNORE` into `books_tags_link`, and (4) Updating `books.last_modified`. Deleting tags requires cleaning the link table before the main `tags` table to satisfy `fkc_delete_on_tags`.
+
+## 6. In-Process Landmines (from the testing-facility audit, 2026-08-26)
+Objects in the schema that reference SQL functions Calibre only registers inside its own
+process — they raise `OperationalError` when read by external clients:
+- **`meta` view**: calls `sortconcat(bal.id, name)` (an aggregate) and `concat(...)`.
+  `SELECT * FROM meta` fails outside Calibre. cquarry's `get_all_books()` supersedes the
+  view; it is deliberately not read.
+- **`tag_browser_filtered_*` views**: every count/avg subquery guards on
+  `books_list_filter(book)` — the GUI's live search-restriction function. GUI state, not
+  data; cquarry skips these variants and reads the pure-SQL `tag_browser_*` views instead.
+- **`tag_browser_series` view**: sorts via `title_sort(name)`. cquarry supplies the stdlib
+  `helpers.title_sort` implementation on its connection for the duration of the
+  `get_tag_browser_counts()` read, then removes it.
+- **Column-spelling drift across the views**: entity views expose `name`, custom-column
+  views expose `value`, and the ratings view exposes `rating` — readers must fall through
+  the three spellings (cquarry's `get_tag_browser_counts()` does).
+- **`books_languages_link.item_order`** (schema ≥ user_version 23-ish): Calibre orders a
+  book's languages by it, not by link id. Pre-column schemas fall back to link-id order.
+- **`annotations_fts` / `annotations_fts_stemmed`** (FTS5): indexed derivatives of
+  `annotations.searchable_text`. cquarry reads `searchable_text` directly — identical
+  result sets for text matching, no stemming/ranking dependency on FTS tokenizer details.
