@@ -302,7 +302,15 @@ individually atomic, but a multi-book, multi-field curation pass is not.*
   (`~/docs/Calibre Library/.claude/skills/`) currently documents the raw-SQL
   pubdate workaround this setter retires, including a gotcha entry explaining
   the TEXT column convention — update its transaction guidance to use
-  `set_pubdate` / `--set-pubdate` when this ships.
+  `set_pubdate` / `--set-pubdate` when this ships. **This item is a floor,
+  not a ceiling**: any behavior-affecting discovery made while building —
+  formats, defaults, failure modes the tests surface — gets documented in the
+  affected skills in the same release, even when this phase didn't predict it.
+- [ ] **Document (or opt-in hydrate) `comments` on `get_book()` rows**: rows
+  deliberately omit comment text (it can be huge), but nothing documents that —
+  the 2026-08-27 batch read descriptions via raw SQL before noticing. Either
+  note the omission in the README/docstrings or add an opt-in
+  `include_comments` flag; silence is the only wrong answer.
 
 Non-goals: no new read APIs; no CLI work here (verbs live in CalibreQuarry per
 the frontend-only split).
