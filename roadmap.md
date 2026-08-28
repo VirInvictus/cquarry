@@ -315,6 +315,64 @@ individually atomic, but a multi-book, multi-field curation pass is not.*
 Non-goals: no new read APIs; no CLI work here (verbs live in CalibreQuarry per
 the frontend-only split).
 
+> Batch-context upstream sync: CalibreQuarry's `_run_write()` dispatcher can
+> grow a multi-verb mode over this, and the phase-3 skill's "fix it all in one
+> transaction" standard is the driving consumer (its 2026-08-27 run committed
+> ~45 mutations as 45 separate transactions).
+
+## Phase 9: Mine the frontend — composed reads & library predicates from CalibreQuarry (proposed 2026-08-28)
+
+*Context: the 2026-08-27 phase-3 batch curating 8 books surfaced logic that
+lives in the CalibreQuarry *application* but is pure database derivation —
+exactly the kind the frontend-only split says belongs here. Three seams, in
+descending order of value. Each item names its consumers; each consumer's
+implementation today is the mine site.*
+
+- [ ] **`get_book_dossier(book_id)` — the composed deep fetch.** CalibreQuarry's
+  `--book` dossier (`modes/detail.py show_book`) hand-composes ~10 read calls:
+  `get_book`, `get_cover_path`, formats via `get_format_path`, custom columns
+  via the `field()` hook, comments (through `strip_html`), `get_annotations`,
+  `get_last_read_positions`, `get_plugin_data`, and conversion overrides.
+  Hermitage and Carrel will reimplement every line of that for their detail
+  views. Move the composition here as one opt-in-heavy call — pairs with
+  Phase 8's comments-omission item (`include_comments`). The frontend keeps
+  rendering; cquarry owns the assembly.
+  - Upstream sync:
+    - [ ] *CalibreQuarry*: `show_book` becomes a renderer over the dossier dict
+      (CalibreQuarry roadmap Phase 15).
+    - [ ] *Skill sync*: phase-3-import's "read EVERY field" step names the
+      dossier call once shipped. **Floor, not ceiling** — same rule as Phase 8.
+- [ ] **Library integrity predicates.** `modes/audit.py` implements untagged,
+  unrated, coverless, and series-gap checks as frontend SQL, and
+  `scripts/validate_metadata.py` reimplements overlapping rules — while
+  `helpers.detect_series_gaps()` already lives here, proving the precedent.
+  Promote the predicates to a read-side module (e.g. `cquarry.integrity`:
+  `find_untagged()`, `find_unrated()`, `find_coverless()`, series gaps via the
+  existing helper) so every consumer shares one definition of "incomplete".
+  The taxonomy-driven opinionated layer stays in Brandon's library linter; only
+  the mechanical predicates move.
+  - Upstream sync:
+    - [ ] *CalibreQuarry*: `--audit` renders the module's results (roadmap
+      Phase 15).
+    - [ ] *Hermitage*: health/dashboard views get the same predicates for free.
+- [ ] **Analytics derivations.** `modes/analytics.py` derives reading pace
+  (books added per month from `timestamp`), per-author stats (count, ratings,
+  formats), and wing overlap (books matching multiple resolved virtual
+  libraries) from pure database data. The derivations move here
+  (`get_addition_timeline()`, `get_author_stats()`; overlap composes from the
+  existing VL resolution); the frontend keeps formatting.
+  - Upstream sync:
+    - [ ] *CalibreQuarry*: `--analytics` renders the module's results (roadmap
+      Phase 15).
+    - [ ] *Hermitage*: stats views; *Carrel*: collection-pace views.
+- [ ] **`to_isbn13()` into `helpers`**: generic ISBN-10→13 conversion currently
+  lives in `modes/librarything.py`; identifier work elsewhere (including the
+  write module's `set_identifier`) will want it.
+
+Non-goals: no network code (the LoC SRU client stays in CalibreQuarry's
+scripts); no export-format rendering (LibraryThing/CSV/AI shapes are frontend);
+no taxonomy-opinionated rules (they stay in the library linter).
+
 > **Version-sync reminder** (Phase 5 practice, applies to EVERY item above): bump
 > `VERSION` + `__init__.py` + `config.py` + `README.md` + `spec.md` together, log the
 > change in `patchnotes.md`, and mirror any behavior-affecting fix into each synced
