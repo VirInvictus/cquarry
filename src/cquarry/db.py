@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import re
@@ -21,6 +22,27 @@ from cquarry.search import (
 
 # Sentinel distinguishing "cache not populated" from a cached None result.
 _UNSET = object()
+
+# The hydrated book-row contract (spec §3.1): get_all_books() and get_book()
+# MUST select the identical column set so row shapes stay identical. They
+# drifted once — get_book() silently lacked `size` — hence the shared
+# constant; append new fields here, never to one call site.
+_BOOK_SELECT = """
+    SELECT
+        b.id, b.title, b.sort as title_sort, b.author_sort,
+        b.timestamp, b.pubdate, b.has_cover, b.last_modified,
+        b.series_index, b.path,
+        s.name as series,
+        r.rating,
+        p.name as publisher
+    FROM books b
+    LEFT JOIN books_series_link bsl ON bsl.book = b.id
+    LEFT JOIN series s ON s.id = bsl.series
+    LEFT JOIN books_ratings_link brl ON brl.book = b.id
+    LEFT JOIN ratings r ON r.id = brl.rating
+    LEFT JOIN books_publishers_link bpl ON bpl.book = b.id
+    LEFT JOIN publishers p ON p.id = bpl.publisher
+"""
 
 
 class CalibreDB:
@@ -88,12 +110,9 @@ class CalibreDB:
     def close(self):
         self.conn.close()
         if self._tmp_path:
-            for suffix in ("", "-wal", "-shm"):
-                path = self._tmp_path + suffix
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+            with contextlib.suppress(OSError):
+                for suffix in ("", "-wal", "-shm"):
+                    os.unlink(self._tmp_path + suffix)
             self._tmp_path = None
 
     def __enter__(self):
@@ -109,23 +128,7 @@ class CalibreDB:
         if self._books_cache is not None:
             return self._books_cache
         cur = self.conn.cursor()
-        cur.execute("""
-            SELECT
-                b.id, b.title, b.sort as title_sort, b.author_sort,
-                b.timestamp, b.pubdate, b.has_cover, b.last_modified,
-                b.series_index, b.path,
-                s.name as series,
-                r.rating,
-                p.name as publisher
-            FROM books b
-            LEFT JOIN books_series_link bsl ON bsl.book = b.id
-            LEFT JOIN series s ON s.id = bsl.series
-            LEFT JOIN books_ratings_link brl ON brl.book = b.id
-            LEFT JOIN ratings r ON r.id = brl.rating
-            LEFT JOIN books_publishers_link bpl ON bpl.book = b.id
-            LEFT JOIN publishers p ON p.id = bpl.publisher
-            ORDER BY b.author_sort, b.sort
-        """)
+        cur.execute(_BOOK_SELECT + " ORDER BY b.author_sort, b.sort")
         books = [dict(row) for row in cur.fetchall()]
 
         # Book UUIDs (per-book; the library-level UUID lives in library_id).
@@ -268,26 +271,7 @@ class CalibreDB:
         not exist.
         """
         cur = self.conn.cursor()
-        cur.execute(
-            """
-            SELECT
-                b.id, b.title, b.sort as title_sort, b.author_sort,
-                b.timestamp, b.pubdate, b.has_cover, b.last_modified,
-                b.series_index, b.path,
-                s.name as series,
-                r.rating,
-                p.name as publisher
-            FROM books b
-            LEFT JOIN books_series_link bsl ON bsl.book = b.id
-            LEFT JOIN series s ON s.id = bsl.series
-            LEFT JOIN books_ratings_link brl ON brl.book = b.id
-            LEFT JOIN ratings r ON r.id = brl.rating
-            LEFT JOIN books_publishers_link bpl ON bpl.book = b.id
-            LEFT JOIN publishers p ON p.id = bpl.publisher
-            WHERE b.id = ?
-            """,
-            (book_id,),
-        )
+        cur.execute(_BOOK_SELECT + " WHERE b.id = ?", (book_id,))
         row = cur.fetchone()
         if row is None:
             return None
@@ -487,10 +471,9 @@ class CalibreDB:
 
         ``count`` is how many books carry the format and ``bytes`` the total
         catalogued uncompressed size — one query for disk-usage reports
-        instead of N×:meth:`get_formats`. Formats lacking size data report
+        instead of N x :meth:`get_formats`. Formats lacking size data report
         ``bytes`` as 0. Returns ``{}`` on schemas without a ``data`` table.
         """
-        out: dict[str, dict[str, int]] = {}
         try:
             rows = self.conn.execute(
                 "SELECT upper(format) AS fmt, COUNT(*) AS count, "
@@ -499,10 +482,11 @@ class CalibreDB:
             ).fetchall()
         except sqlite3.OperationalError:
             return {}
-        for row in rows:
-            if row["fmt"]:
-                out[row["fmt"]] = {"count": row["count"], "bytes": row["bytes"]}
-        return out
+        return {
+            row["fmt"]: {"count": row["count"], "bytes": row["bytes"]}
+            for row in rows
+            if row["fmt"]
+        }
 
     def get_all_tags(self) -> list[str]:
         cur = self.conn.cursor()
@@ -655,7 +639,6 @@ class CalibreDB:
         sort_expr = "COALESCE(sort, '')" if "sort" in cols else "''"
         link_expr = "COALESCE(link, '')" if "link" in cols else "''"
         pk = "id"
-        out: list[dict[str, Any]] = []
         try:
             rows = self.conn.execute(
                 f"SELECT e.{pk} AS id, {name_expr} AS name, "
@@ -666,9 +649,7 @@ class CalibreDB:
             ).fetchall()
         except sqlite3.OperationalError:
             return []
-        for row in rows:
-            out.append(dict(row))
-        return out
+        return [dict(row) for row in rows]
 
     def load_custom_column(self, col_name: str) -> dict[int, Any]:
         """Load values for a specific custom column (by display name). Returns {book_id: value(s)}."""
@@ -715,12 +696,11 @@ class CalibreDB:
                     }
                 # Single-valued normalized column (text, enumeration): one value.
                 return {k: vals[0] for k, vals in grouped.items()}
-            else:
-                # Stored directly (int, float, bool, datetime, comments).
-                cur.execute(f"SELECT book, value FROM custom_column_{cid}")
-                for row in cur.fetchall():
-                    results[row["book"]] = row["value"]
-                return results
+            # Stored directly (int, float, bool, datetime, comments).
+            cur.execute(f"SELECT book, value FROM custom_column_{cid}")
+            for row in cur.fetchall():
+                results[row["book"]] = row["value"]
+            return results
         except sqlite3.OperationalError as e:
             print(
                 f"Warning: could not read custom column '{col_name}': {e}",
@@ -832,10 +812,8 @@ class CalibreDB:
             rec = dict(row)
             data = rec.get("annot_data")
             if isinstance(data, str):
-                try:
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
                     rec["annot_data"] = json.loads(data)
-                except json.JSONDecodeError, TypeError:
-                    pass
             out.append(rec)
         return out
 
@@ -1001,12 +979,10 @@ class CalibreDB:
         except sqlite3.OperationalError:
             return []
         label_by_id: dict[int, str] = {}
-        try:
+        with contextlib.suppress(Exception):
             label_by_id = {
                 col["id"]: col["label"] for col in self.get_custom_columns().values()
             }
-        except Exception:
-            pass
         out: dict[str, list[dict[str, Any]]] = {}
         # tag_browser_series calls title_sort() — a UDF that only exists
         # inside Calibre's process. Supply the stdlib equivalent on this

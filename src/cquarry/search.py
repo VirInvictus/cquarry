@@ -733,10 +733,11 @@ class SearchEngine:
             for name, members in raw_uc.items():
                 if not isinstance(members, list):
                     continue
-                parsed: list[tuple[str, str]] = []
-                for m in members:
-                    if isinstance(m, (list, tuple)) and len(m) >= 2:
-                        parsed.append((str(m[0]), self._canonical(str(m[1]))))
+                parsed = [
+                    (str(m[0]), self._canonical(str(m[1])))
+                    for m in members
+                    if isinstance(m, (list, tuple)) and len(m) >= 2
+                ]
                 if parsed:
                     self._user_cats[str(name).lower()] = parsed
         self.locations = (
@@ -889,6 +890,10 @@ class SearchEngine:
         return {b for b in candidates if matcher(q, self._values(b, location), kind)}
 
     def _match_numeric(self, location, datatype, query, candidates) -> set[int]:
+        if not query.strip():
+            # Upstream NumericSearch: an empty query matches nothing rather
+            # than raising on the failed number parse.
+            return set()
         pred = _num_predicate(query.lower().strip(), datatype)
         out = set()
         for b in candidates:

@@ -30,6 +30,7 @@ Example::
         wdb.set_identifier(42, "isbn", "9780123456789")
 """
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -49,10 +50,10 @@ def uuid4(_arg: Any = None) -> str:
 
 def _pynocase(lhs: str, rhs: str) -> int:
     """Case-insensitive comparison collation used by Calibre."""
-    l, r = lhs.lower(), rhs.lower()
-    if l < r:
+    left, right = lhs.lower(), rhs.lower()
+    if left < right:
         return -1
-    if l > r:
+    if left > right:
         return 1
     return 0
 
@@ -64,7 +65,7 @@ def register_udfs(conn: sqlite3.Connection) -> None:
     schema triggers invoke ``title_sort()`` and ``uuid4()`` on insert/update.
     """
     conn.create_function("title_sort", 1, title_sort)
-    conn.create_function("uuid4", 0, lambda: uuid4(), deterministic=True)
+    conn.create_function("uuid4", 0, uuid4, deterministic=True)
     conn.create_collation("PYNOCASE", _pynocase)
 
 
@@ -73,6 +74,11 @@ class WritableCalibreDB:
 
     This is intentionally a *different class* from cquarry.db.CalibreDB so no
     read-only code path can accidentally mutate a library.
+
+    Transaction control is pinned to sqlite3's legacy mode so every mutating
+    method can open ``BEGIN IMMEDIATE`` itself: take the write lock up front
+    (``busy_timeout`` applies to acquisition), commit on success, roll back
+    on any error. Nothing is written unless a method returns normally.
     """
 
     def __init__(self, db_path: str):
@@ -80,7 +86,14 @@ class WritableCalibreDB:
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Database not found: {db_path}")
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, timeout=30.0)
+        # Pinned explicitly: the write path needs `BEGIN IMMEDIATE` for
+        # take-the-write-lock-upfront semantics (busy_timeout then applies to
+        # lock acquisition). PEP 249 `autocommit=False` holds a transaction
+        # open from the first statement, which makes a raw BEGIN impossible —
+        # verified empirically (in_transaction is True on a fresh connection).
+        self.conn = sqlite3.connect(
+            db_path, timeout=30.0, autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL
+        )
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout = 30000")
         register_udfs(self.conn)
@@ -95,10 +108,8 @@ class WritableCalibreDB:
         return self
 
     def __exit__(self, *exc) -> None:
-        try:
+        with contextlib.suppress(sqlite3.Error):
             self.conn.commit()
-        except sqlite3.Error:
-            pass
         self.close()
 
     def _begin(self) -> None:
@@ -994,10 +1005,9 @@ class WritableCalibreDB:
                     )
             # Dirtied queues must not outlive their book.
             for queue in ("metadata_dirtied", "annotations_dirtied"):
-                try:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    # schema predating the queue skips the delete
                     self.conn.execute(f"DELETE FROM {queue} WHERE book = ?", (book_id,))
-                except sqlite3.OperationalError:
-                    pass  # schema predates the queue
             # The cascade trigger does the rest.
             self.conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
             # Orphan pruning AFTER the cascade: links are gone, so the

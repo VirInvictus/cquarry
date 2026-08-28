@@ -694,6 +694,28 @@ class TestSavedSearchInterpolation(unittest.TestCase):
         self.assertEqual(self.s('search:"HF" and rating:5'), {1})
 
 
+class TestEmptyLocationQuery(unittest.TestCase):
+    """A location with an empty query (e.g. 'rating:') — upstream's
+    NumericSearch returns an empty set instead of raising on the parse."""
+
+    def s(self, q):
+        return SearchEngine(_FakeProvider()).search(q)
+
+    def test_numeric_empty_query_matches_nothing(self):
+        self.assertEqual(self.s("rating:"), set())
+        self.assertEqual(self.s("size:"), set())
+        self.assertEqual(self.s("pages:"), set())
+        self.assertEqual(self.s("series_index:"), set())
+        self.assertEqual(self.s("id:"), set())
+
+    def test_whitespace_query_matches_nothing(self):
+        self.assertEqual(self.s("rating:  "), set())
+
+    def test_prefixed_numeric_query_still_works(self):
+        self.assertEqual(self.s("rating:>3"), {1, 2})
+        self.assertEqual(self.s("rating:4"), {2})
+
+
 class TestUserCategorySearch(unittest.TestCase):
     """Calibre's '@Name' user-category location (get_user_category_matches)."""
 

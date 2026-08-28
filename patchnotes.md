@@ -1,3 +1,32 @@
+## v1.6.1 (2026-08-28)
+
+### Bug sweep & hardening
+
+- **Search fix (upstream parity).** An empty numeric query — `rating:`, `size:`, `pages:`,
+  `series_index:`, `id:` with no value — now matches nothing (upstream `NumericSearch`'s
+  `if not query: return matches`) instead of raising `ParseException`. Regression-tested.
+- **Refactor: shared `_BOOK_SELECT`.** `get_all_books()` and `get_book()` now build their rows
+  from one SQL constant. They drifted once (v1.6.0's `size` finding was the second instance of
+  that class); the duplicate is what made it possible.
+- **Transaction control pinned deliberately.** `WritableCalibreDB` now sets
+  `autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL` explicitly with the rationale in code:
+  the write path's `BEGIN IMMEDIATE` (take-the-write-lock-upfront, `busy_timeout` on
+  acquisition) is impossible under PEP 249 `autocommit=False`, which holds a transaction open
+  from the first statement — verified empirically before choosing.
+- **Lint hardening.** Adopted `contextlib.suppress` (5 sites), comprehensions over
+  append-loops (3 sites), removed an unnecessary lambda wrapper, renamed an ambiguous `l`,
+  fixed an ambiguous `×` in a docstring. Swept with strict rule families
+  (F/E7/B/SIM/PERF/C4/RET/PLW/RUF) — zero functional findings beyond the fixes above.
+- **Deliberate non-change:** `os.path` is kept over `pathlib` — `Path.resolve()` resolves
+  symlinks where `os.path.abspath` doesn't, which would silently change `get_format_path()` /
+  snapshot paths for symlinked libraries.
+
+### Consumers swept
+Hermitage, CalibreQuarry and Bindery swept with the same strict rule families: no functional
+findings (global-statement caches, Pillow `with`-rebinds and script-level `subprocess.run`
+calls are deliberate patterns). The `.split(",")` contract on native list fields: zero
+violations across all three.
+
 ## v1.6.0 (2026-08-26)
 
 ### Completeness mining: every table, view, and query shape (Phase 6+)
