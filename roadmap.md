@@ -272,6 +272,36 @@ in calibre-web — and makes cquarry grow the read APIs a real web frontend need
 ### Documentation drift
 - [x] **spec.md §5 item 7 is stale:** "There is no native pages table" was true historically; upstream now treats `books_pages_link` as a managed one-to-one field. Rewrite once the fallback above ships. *(cquarry-internal; no upstream impact)* — **Done in v1.3.0**: §5 item 7 was removed and replaced with a resolution note; the `pages:` row in §4 documents native-first sourcing.
 
+## Phase 8: Phase-3 write-path completeness (proposed 2026-08-28, from the live gamut batch)
+
+*Context: the 2026-08-27 acquisition batch exercised the write module end to
+end on real books for the first time. Two gaps surfaced: there is no pubdate
+setter (the batch had to write raw SQL and got the column's TEXT convention
+wrong, costing 8 linter errors), and the phase-3 skill's "fix everything in one
+transaction" is actually N separate `BEGIN IMMEDIATE` commits — each setter is
+individually atomic, but a multi-book, multi-field curation pass is not.*
+
+- [ ] **`set_pubdate(book_id, value)`** on `WritableCalibreDB`: accept `str`
+  (`'YYYY-MM-DD'` or a full datetime), `date`, or `datetime`; normalize to
+  Calibre's stored TEXT form `'YYYY-MM-DD 00:00:00+00:00'`; route through
+  `_touch_book()` + `_mark_dirty()` like every setter. The column is TEXT in
+  metadata.db — writing a raw unix integer produces `'sentinel pubdate'` AND
+  `'unparseable pubdate'` linter errors downstream (8 errors from 4 books on
+  2026-08-27).
+  - Upstream sync:
+    - [ ] *CalibreQuarry*: `--set-pubdate ID DATE` write verb through
+      `_run_write()`. (CalibreQuarry roadmap Phase 15.)
+- [ ] **Batch-transaction context** (`with wdb.batch():` or equivalent): defer
+  commits so a multi-book, multi-field pass commits exactly once — a crash
+  mid-pass currently leaves a half-curated batch. Keep every existing method's
+  signature and per-call semantics; only the commit boundary moves.
+- [ ] **Tests**: `set_pubdate` round-trip (str / date / datetime inputs, TEXT
+  normalization); batch-context atomicity (fault-inject a failure mid-batch →
+  nothing written).
+
+Non-goals: no new read APIs; no CLI work here (verbs live in CalibreQuarry per
+the frontend-only split).
+
 > **Version-sync reminder** (Phase 5 practice, applies to EVERY item above): bump
 > `VERSION` + `__init__.py` + `config.py` + `README.md` + `spec.md` together, log the
 > change in `patchnotes.md`, and mirror any behavior-affecting fix into each synced
