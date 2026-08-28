@@ -173,7 +173,7 @@ cquarry is the shared foundation. Changes to its behavior affect all of these:
 | **CalibreQuarry** (CLI/TUI) | `CalibreDB`, `search()`, `search_books()`, `get_book()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `get_annotations()`, `get_plugin_data()`, `get_dirtied_books()`, `get_formats()`, `get_cover_path()`, `get_library_uuid()`, `get_all_series()`, `get_tag_counts()`, `get_format_path()`, `find_db()`, `format_stars()`, `strip_html()`, `tags_to_tree()`, `normalize_author_display()`, `detect_series_gaps()`, `get_image_size()`, `color()`, `write.WritableCalibreDB` |
 | **Hermitage** (GTK4 gallery) | `CalibreDB`, `search()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_saved_searches()`, `get_vl_ui_state()`, `get_annotations()`, `get_last_read_positions()`, `normalize_rating()` |
 | **Carrel-calibre-web** (web reader) | `CalibreDB`, `search()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `field()` (native `pages`), `get_annotations()`, `get_last_read_positions()`, `detect_series_gaps()` |
-| **Bindery** (EPUB repair) | `get_image_size()` (cover audit), `get_format_path()` (EPUB resolution), `get_formats()` (audited-format reporting), `write.WritableCalibreDB` (optional flag tagging) |
+| **Bindery** (EPUB repair) | `get_image_size()` (cover audit), `get_format_path()` (EPUB resolution + the `CalibreIdResolver` id map), `get_book()` (single-entity `audit --id` fetch), `get_formats()` (audited-format reporting), `write.WritableCalibreDB` (optional flag tagging) |
 
 ## 7. Out of scope (non-goals)
 
