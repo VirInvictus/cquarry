@@ -298,6 +298,11 @@ individually atomic, but a multi-book, multi-field curation pass is not.*
 - [ ] **Tests**: `set_pubdate` round-trip (str / date / datetime inputs, TEXT
   normalization); batch-context atomicity (fault-inject a failure mid-batch →
   nothing written).
+- [ ] **Skill sync**: the phase-3-import skill in Brandon's library
+  (`~/docs/Calibre Library/.claude/skills/`) currently documents the raw-SQL
+  pubdate workaround this setter retires, including a gotcha entry explaining
+  the TEXT column convention — update its transaction guidance to use
+  `set_pubdate` / `--set-pubdate` when this ships.
 
 Non-goals: no new read APIs; no CLI work here (verbs live in CalibreQuarry per
 the frontend-only split).
