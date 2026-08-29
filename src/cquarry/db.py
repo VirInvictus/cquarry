@@ -124,7 +124,11 @@ class CalibreDB:
     # --- Core queries ---
 
     def get_all_books(self) -> list[dict[str, Any]]:
-        """Fetch all books with full metadata via joins. Results are cached."""
+        """Fetch all books with full metadata via joins. Results are cached.
+
+        Rows deliberately omit comment text (it can be huge); the sanctioned
+        reads are :meth:`get_comments` and ``get_book(include_comments=True)``.
+        """
         if self._books_cache is not None:
             return self._books_cache
         cur = self.conn.cursor()
@@ -263,12 +267,16 @@ class CalibreDB:
         cur.execute("SELECT type, val FROM identifiers WHERE book = ?", (book_id,))
         return {row["type"]: row["val"] for row in cur.fetchall()}
 
-    def get_book(self, book_id: int) -> dict[str, Any] | None:
+    def get_book(
+        self, book_id: int, include_comments: bool = False
+    ) -> dict[str, Any] | None:
         """Fetch a single hydrated book record without scanning the library.
 
         Returns the same shape as one ``get_all_books()`` row — including
         ``size``, ``uuid``, and ``identifiers`` — or None when the id does
-        not exist.
+        not exist. Rows deliberately omit comment text (it can be huge);
+        pass ``include_comments=True`` to add a ``comments`` key with the
+        raw stored HTML, or use :meth:`get_comments` for bulk reads.
         """
         cur = self.conn.cursor()
         cur.execute(_BOOK_SELECT + " WHERE b.id = ?", (book_id,))
@@ -341,7 +349,32 @@ class CalibreDB:
             b["uuid"] = ""  # schema predates the uuid column
         b["identifiers"] = self.get_identifiers(book_id)
         b["pages"] = self._page_counts().get(book_id)
+        if include_comments:
+            b["comments"] = self.field(book_id, "comments")
         return b
+
+    def get_comments(self, book_id: int | None = None) -> dict[int, str]:
+        """Raw comments HTML keyed by book id.
+
+        Only books that actually have a comments row appear; pass
+        ``book_id`` to scope the read. Rows from ``get_book()`` /
+        ``get_all_books()`` deliberately omit comment text (it can be
+        huge) — this and ``get_book(include_comments=True)`` are the
+        sanctioned reads. Pass results through
+        :func:`cquarry.helpers.strip_html` before rendering.
+        """
+        try:
+            if book_id is not None:
+                row = self.conn.execute(
+                    "SELECT text FROM comments WHERE book = ?", (book_id,)
+                ).fetchone()
+                return {book_id: row["text"] or ""} if row else {}
+            return {
+                row["book"]: row["text"] or ""
+                for row in self.conn.execute("SELECT book, text FROM comments")
+            }
+        except sqlite3.OperationalError:
+            return {}  # schema predates the comments table
 
     def search_books(self, query: str) -> list[dict[str, Any]]:
         """Search with Calibre grammar and return the hydrated matching books."""

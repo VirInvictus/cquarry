@@ -281,23 +281,33 @@ wrong, costing 8 linter errors), and the phase-3 skill's "fix everything in one
 transaction" is actually N separate `BEGIN IMMEDIATE` commits — each setter is
 individually atomic, but a multi-book, multi-field curation pass is not.*
 
-- [ ] **`set_pubdate(book_id, value)`** on `WritableCalibreDB`: accept `str`
+- [x] **`set_pubdate(book_id, value)`** on `WritableCalibreDB`: accept `str`
   (`'YYYY-MM-DD'` or a full datetime), `date`, or `datetime`; normalize to
   Calibre's stored TEXT form `'YYYY-MM-DD 00:00:00+00:00'`; route through
   `_touch_book()` + `_mark_dirty()` like every setter. The column is TEXT in
   metadata.db — writing a raw unix integer produces `'sentinel pubdate'` AND
   `'unparseable pubdate'` linter errors downstream (8 errors from 4 books on
   2026-08-27).
+  - *(Shipped in v1.7.0: accepts `str | date | datetime | None`; naive datetimes
+  are taken as UTC and the value stored via `datetime.isoformat(' ')` in UTC,
+  which matches real Calibre TEXT rows byte-for-byte; `None` writes the
+  `0101-01-01 00:00:00+00:00` undefined-date sentinel, the value the search
+  engine already treats as absent; no-op honest — equal instants don't bump
+  `last_modified` or queue OPF resync.)*
   - Upstream sync:
     - [ ] *CalibreQuarry*: `--set-pubdate ID DATE` write verb through
-      `_run_write()`. (CalibreQuarry roadmap Phase 15.)
-- [ ] **Batch-transaction context** (`with wdb.batch():` or equivalent): defer
+      `run_write()`. (CalibreQuarry roadmap Phase 15.)
+- [x] **Batch-transaction context** (`with wdb.batch():` or equivalent): defer
   commits so a multi-book, multi-field pass commits exactly once — a crash
   mid-pass currently leaves a half-curated batch. Keep every existing method's
   signature and per-call semantics; only the commit boundary moves.
-- [ ] **Tests**: `set_pubdate` round-trip (str / date / datetime inputs, TEXT
+  - *(Shipped in v1.7.0: `BEGIN IMMEDIATE` at outermost entry, nested batches
+  join the one transaction, and a fault-injected mid-batch failure rolls back
+  everything including the dirtied queue; `_begin()`/`_commit()`/`_rollback()`
+  guard on `_batch_depth`, so bare calls behave exactly as they did before.)*
+- [x] **Tests**: `set_pubdate` round-trip (str / date / datetime inputs, TEXT
   normalization); batch-context atomicity (fault-inject a failure mid-batch →
-  nothing written).
+  nothing written). *(v1.7.0: 13 new tests, suite 189 → 202.)*
 - [ ] **Skill sync**: the phase-3-import skill in Brandon's library
   (`~/docs/Calibre Library/.claude/skills/`) currently documents the raw-SQL
   pubdate workaround this setter retires, including a gotcha entry explaining
@@ -306,11 +316,17 @@ individually atomic, but a multi-book, multi-field curation pass is not.*
   not a ceiling**: any behavior-affecting discovery made while building —
   formats, defaults, failure modes the tests surface — gets documented in the
   affected skills in the same release, even when this phase didn't predict it.
-- [ ] **Document (or opt-in hydrate) `comments` on `get_book()` rows**: rows
+- [x] **Document (or opt-in hydrate) `comments` on `get_book()` rows**: rows
   deliberately omit comment text (it can be huge), but nothing documents that —
   the 2026-08-27 batch read descriptions via raw SQL before noticing. Either
   note the omission in the README/docstrings or add an opt-in
   `include_comments` flag; silence is the only wrong answer.
+  - *(Shipped in v1.7.0: both halves — `get_book(include_comments=True)` adds
+  the raw HTML under a `comments` key, and the new bulk `get_comments()` gives
+  the {book: html} map Hermitage was approximating by reaching into `db.conn`;
+  the omission is documented in docstrings, CLAUDE.md, and the API reference.
+  The bulk accessor rides into Phase 9's dossier work: the same release that
+  documents the omission ships the composed read that carries comments.)*
 
 Non-goals: no new read APIs; no CLI work here (verbs live in CalibreQuarry per
 the frontend-only split).

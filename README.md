@@ -61,9 +61,15 @@ with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:
     wdb.add_tag(42, "Audited")
     wdb.set_identifier(42, "isbn", "9780123456789")
 
+# A multi-book curation pass commits exactly once:
+with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:
+    with wdb.batch():
+        wdb.set_pubdate(42, "1991-10-01")
+        wdb.add_tag(43, "Audited")
+
 # Every mutation queues an OPF regeneration; check what Calibre will resync:
 with CalibreDB("~/Calibre Library/metadata.db") as db:
-    print(db.get_dirtied_books())  # e.g. [42]
+    print(db.get_dirtied_books())  # e.g. [42, 43]
 ```
 
 ## Installation
@@ -282,6 +288,7 @@ print(cquarry.__version__)  # "1.4.0"
 | `set_rating(book_id, stars \| None)` | 0–5 stars stored as ×2; UNIQUE(rating) rows deduplicated via find-or-create. |
 | `set_languages(book_id, codes \| None)` | Replace languages; English names canonicalized to ISO 639-2 via the search engine's map. |
 | `set_comments(book_id, text \| None)` | 1:1 upsert/clear of the comments HTML row. |
+| `set_pubdate(book_id, value)` | Publication-date setter accepting `str` / `date` / `datetime` / `None` (sentinel); stored as Calibre TEXT in UTC. |
 | `set_custom_column(book_id, label, value)` | Generic custom-column writer: storage layout auto-detected (link-table vs direct), enumerations validated against `display.enum_values`, tristate bools accepted, non-editable/composite columns raise. |
 | `add_format(book_id, fmt, name, size)` / `remove_format(book_id, fmt)` | Register/drop `data` rows (the file itself is the caller's responsibility). |
 | `set_has_cover(book_id, has_cover)` | Toggle the catalogued flag. |

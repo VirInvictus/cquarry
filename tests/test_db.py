@@ -321,6 +321,47 @@ def _make_library(tmp, *, with_native_pages=True, with_custom_pages=False):
     return os.path.join(tmp, "metadata.db")
 
 
+class TestCommentsAccess(TestCalibreDB):
+    """Rows deliberately omit comment text (it can be huge).
+
+    get_book(include_comments=True) and get_comments() are the two
+    sanctioned reads; anything rendering must pass strip_html() first.
+    """
+
+    def _seed_comment(self):
+        self.conn.execute("INSERT INTO comments (book, text) VALUES (1, '<p>Hi</p>')")
+        self.conn.commit()
+
+    def test_get_book_omits_comments_by_default(self):
+        self._seed_comment()
+        db = CalibreDB(self.db_path)
+        self.assertNotIn("comments", db.get_book(1))
+        db.close()
+
+    def test_get_book_include_comments(self):
+        self._seed_comment()
+        db = CalibreDB(self.db_path)
+        book = db.get_book(1, include_comments=True)
+        self.assertEqual(book["comments"], "<p>Hi</p>")
+        db.close()
+
+    def test_get_comments_bulk_and_single(self):
+        self._seed_comment()
+        db = CalibreDB(self.db_path)
+        self.assertEqual(db.get_comments(), {1: "<p>Hi</p>"})
+        self.assertEqual(db.get_comments(1), {1: "<p>Hi</p>"})
+        self.assertEqual(db.get_comments(2), {})
+        db.close()
+
+    def test_get_comments_absent_table_degrades(self):
+        self.conn.execute("DROP TABLE comments")
+        self.conn.commit()
+        db = CalibreDB(self.db_path)
+        self.assertEqual(db.get_comments(), {})
+        self.assertEqual(db.get_comments(1), {})
+        db.close()
+
+
 class TestNativePages(unittest.TestCase):
     """Calibre manages page counts natively in books_pages_link; the custom
     column labelled 'pages' remains the fallback for older schemas."""

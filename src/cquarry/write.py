@@ -35,7 +35,8 @@ import json
 import os
 import sqlite3
 import uuid as _uuid
-from datetime import UTC, datetime
+from collections.abc import Generator
+from datetime import UTC, date, datetime
 from typing import Any, Self
 
 from cquarry.helpers import title_sort
@@ -69,6 +70,45 @@ def register_udfs(conn: sqlite3.Connection) -> None:
     conn.create_collation("PYNOCASE", _pynocase)
 
 
+# Calibre's undefined-date sentinel: what the GUI writes when a pubdate is
+# cleared, and what the search engine's date matcher treats as absent.
+_UNDEFINED_PUBDATE = "0101-01-01 00:00:00+00:00"
+
+
+def _normalize_pubdate(value: str | date | datetime | None) -> str:
+    """Normalize a pubdate input to the TEXT form Calibre stores.
+
+    The column is TEXT (``datetime.isoformat(' ')`` in UTC) — writing a raw
+    unix integer surfaces downstream as 'sentinel pubdate' / 'unparseable
+    pubdate' linter errors. Naive datetimes are taken as UTC.
+    """
+    if value is None:
+        return _UNDEFINED_PUBDATE
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.strip())
+        except ValueError:
+            raise ValueError(f"Unparseable pubdate: {value!r}") from None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return dt.astimezone(UTC).isoformat(" ")
+    return datetime(value.year, value.month, value.day, tzinfo=UTC).isoformat(" ")
+
+
+def _same_instant(current: str | None, new: str) -> bool:
+    """True when the stored TEXT parses to the same instant as ``new``.
+
+    Unparseable legacy values (and naive-vs-aware mismatches) never match,
+    so they always rewrite.
+    """
+    if not current:
+        return False
+    try:
+        return datetime.fromisoformat(current) == datetime.fromisoformat(new)
+    except ValueError, TypeError:
+        return False
+
+
 class WritableCalibreDB:
     """Explicitly opt-in read/write handle for metadata.db.
 
@@ -78,7 +118,10 @@ class WritableCalibreDB:
     Transaction control is pinned to sqlite3's legacy mode so every mutating
     method can open ``BEGIN IMMEDIATE`` itself: take the write lock up front
     (``busy_timeout`` applies to acquisition), commit on success, roll back
-    on any error. Nothing is written unless a method returns normally.
+    on any error. Nothing is written unless a method returns normally. A
+    ``batch()`` block moves the commit boundary to the end of the block so a
+    multi-book, multi-field pass commits exactly once; any failure inside
+    rolls the whole pass back.
     """
 
     def __init__(self, db_path: str):
@@ -98,6 +141,7 @@ class WritableCalibreDB:
         self.conn.execute("PRAGMA busy_timeout = 30000")
         register_udfs(self.conn)
         self._dirtied_supported: bool | None = None
+        self._batch_depth = 0
 
     # -- lifecycle --
 
@@ -109,11 +153,53 @@ class WritableCalibreDB:
 
     def __exit__(self, *exc) -> None:
         with contextlib.suppress(sqlite3.Error):
-            self.conn.commit()
+            self._commit()
         self.close()
 
     def _begin(self) -> None:
+        """BEGIN IMMEDIATE unless inside a batch() — the batch opened it."""
+        if self._batch_depth:
+            return
         self.conn.execute("BEGIN IMMEDIATE")
+
+    @contextlib.contextmanager
+    def batch(self) -> Generator[Self]:
+        """Defer commits across a multi-book, multi-field pass.
+
+        The outermost ``batch()`` takes the write lock immediately (BEGIN
+        IMMEDIATE) and commits exactly once on clean exit; any exception
+        inside rolls the whole pass back. Nesting is allowed: inner batches
+        join the outer transaction. Individual setters keep their signatures
+        and return values — only their commit boundary moves.
+        """
+        self._batch_depth += 1
+        ok = False
+        try:
+            if self._batch_depth == 1:
+                # Raw call on purpose: the batch is the transaction owner.
+                self.conn.execute("BEGIN IMMEDIATE")
+            yield self
+            ok = True
+        finally:
+            self._batch_depth -= 1
+            if self._batch_depth == 0:
+                if ok:
+                    self.conn.commit()
+                else:
+                    with contextlib.suppress(sqlite3.Error):
+                        self.conn.rollback()
+
+    def _commit(self) -> None:
+        """Commit unless inside a batch() — the batch owns that commit."""
+        if self._batch_depth:
+            return
+        self.conn.commit()
+
+    def _rollback(self) -> None:
+        """Roll back unless inside a batch() — the batch owns that rollback."""
+        if self._batch_depth:
+            return
+        self.conn.rollback()
 
     @staticmethod
     def _now() -> str:
@@ -172,9 +258,9 @@ class WritableCalibreDB:
                 (new_title, title_sort(new_title), self._now(), book_id),
             )
             self._mark_dirty(book_id)
-            self.conn.commit()
+            self._commit()
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def add_tag(self, book_id: int, tag: str) -> bool:
@@ -210,10 +296,10 @@ class WritableCalibreDB:
                 )
             if changed:
                 self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return changed
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def remove_tag(self, book_id: int, tag: str) -> bool:
@@ -228,7 +314,7 @@ class WritableCalibreDB:
         try:
             row = cur.execute("SELECT id FROM tags WHERE name = ?", (tag,)).fetchone()
             if row is None:
-                self.conn.rollback()
+                self._rollback()
                 return False
             tag_id = row["id"]
             before = self.conn.total_changes
@@ -244,10 +330,10 @@ class WritableCalibreDB:
                 cur.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
             if changed:
                 self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return changed
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def set_identifier(self, book_id: int, id_type: str, val: str | None) -> bool:
@@ -288,10 +374,10 @@ class WritableCalibreDB:
                 changed = True
             if changed:
                 self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return changed
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def set_identifiers(self, book_id: int, pairs: dict[str, str | None]) -> int:
@@ -400,7 +486,7 @@ class WritableCalibreDB:
                 and old_sort_row is not None
                 and old_sort_row["author_sort"] == new_sort
             ):
-                self.conn.rollback()
+                self._rollback()
                 return False
             self.conn.execute(
                 "DELETE FROM books_authors_link WHERE book = ?", (book_id,)
@@ -416,10 +502,10 @@ class WritableCalibreDB:
             )
             self._prune_orphans("authors")
             self._mark_dirty(book_id)
-            self.conn.commit()
+            self._commit()
             return True
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def set_series(
@@ -451,7 +537,7 @@ class WritableCalibreDB:
 
             if name is None:
                 if old is None:
-                    self.conn.rollback()
+                    self._rollback()
                     return False
                 self.conn.execute(
                     "DELETE FROM books_series_link WHERE book = ?", (book_id,)
@@ -463,7 +549,7 @@ class WritableCalibreDB:
                 )
                 self._prune_orphans("series")
                 self._mark_dirty(book_id)
-                self.conn.commit()
+                self._commit()
                 return True
 
             sid = self._resolve_or_create("series", "name", name.strip())
@@ -478,7 +564,7 @@ class WritableCalibreDB:
                 and old["series"] == sid
                 and _current_index() == new_index
             ):
-                self.conn.rollback()
+                self._rollback()
                 return False
             self.conn.execute(
                 "DELETE FROM books_series_link WHERE book = ?", (book_id,)
@@ -493,10 +579,10 @@ class WritableCalibreDB:
             )
             self._prune_orphans("series")
             self._mark_dirty(book_id)
-            self.conn.commit()
+            self._commit()
             return True
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def set_publisher(self, book_id: int, name: str | None) -> bool:
@@ -514,7 +600,7 @@ class WritableCalibreDB:
             ).fetchone()
             if name is None:
                 if old is None:
-                    self.conn.rollback()
+                    self._rollback()
                     return False
                 self.conn.execute(
                     "DELETE FROM books_publishers_link WHERE book = ?", (book_id,)
@@ -522,7 +608,7 @@ class WritableCalibreDB:
             else:
                 pid = self._resolve_or_create("publishers", "name", name.strip())
                 if old is not None and old["publisher"] == pid:
-                    self.conn.rollback()
+                    self._rollback()
                     return False
                 self.conn.execute(
                     "DELETE FROM books_publishers_link WHERE book = ?", (book_id,)
@@ -533,10 +619,10 @@ class WritableCalibreDB:
                 )
             self._prune_orphans("publishers")
             self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return True
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def set_rating(self, book_id: int, stars: float | None) -> bool:
@@ -555,7 +641,7 @@ class WritableCalibreDB:
             ).fetchone()
             if stars is None:
                 if old is None:
-                    self.conn.rollback()
+                    self._rollback()
                     return False
                 self.conn.execute(
                     "DELETE FROM books_ratings_link WHERE book = ?", (book_id,)
@@ -575,7 +661,7 @@ class WritableCalibreDB:
                     ).lastrowid
                 )
                 if old is not None and old["rating"] == rid:
-                    self.conn.rollback()
+                    self._rollback()
                     return False
                 self.conn.execute(
                     "DELETE FROM books_ratings_link WHERE book = ?", (book_id,)
@@ -586,10 +672,10 @@ class WritableCalibreDB:
                 )
             self._prune_orphans("ratings")
             self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return True
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def set_languages(self, book_id: int, codes: list[str] | str | None) -> bool:
@@ -626,7 +712,7 @@ class WritableCalibreDB:
             ]
             if not cleaned:
                 if not old_ids:
-                    self.conn.rollback()
+                    self._rollback()
                     return False
                 self.conn.execute(
                     "DELETE FROM books_languages_link WHERE book=?", (book_id,)
@@ -638,7 +724,7 @@ class WritableCalibreDB:
                     if lid not in new_ids:
                         new_ids.append(lid)
                 if new_ids == old_ids:
-                    self.conn.rollback()
+                    self._rollback()
                     return False
                 self.conn.execute(
                     "DELETE FROM books_languages_link WHERE book=?", (book_id,)
@@ -651,10 +737,10 @@ class WritableCalibreDB:
                     )
             self._prune_orphans("languages")
             self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return True
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def set_comments(self, book_id: int, text: str | None) -> bool:
@@ -673,7 +759,7 @@ class WritableCalibreDB:
             ).fetchone()
             if not clean:
                 if row is None:
-                    self.conn.rollback()
+                    self._rollback()
                     return False
                 self.conn.execute("DELETE FROM comments WHERE book = ?", (book_id,))
                 changed = True
@@ -692,10 +778,38 @@ class WritableCalibreDB:
                     )
             if changed:
                 self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return changed
         except Exception:
-            self.conn.rollback()
+            self._rollback()
+            raise
+
+    def set_pubdate(self, book_id: int, value: str | date | datetime | None) -> bool:
+        """Set the publication date. Returns True if the stored value changed.
+
+        Accepts ``'YYYY-MM-DD'``, a full ISO datetime string, :class:`date`,
+        or :class:`datetime` (naive taken as UTC); ``None`` stores Calibre's
+        undefined-date sentinel, which Calibre and the search engine both
+        treat as "no pubdate".
+        """
+        new = _normalize_pubdate(value)
+        self._begin()
+        try:
+            self._require_book(book_id)
+            row = self.conn.execute(
+                "SELECT pubdate FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            if _same_instant(row["pubdate"] if row else None, new):
+                self._commit()
+                return False
+            self.conn.execute(
+                "UPDATE books SET pubdate = ? WHERE id = ?", (new, book_id)
+            )
+            self._touch_book(book_id)
+            self._commit()
+            return True
+        except Exception:
+            self._rollback()
             raise
 
     # -- Custom-column writers --
@@ -760,10 +874,10 @@ class WritableCalibreDB:
                 changed = self._write_pattern_b(meta, value_table, book_id, value)
             if changed:
                 self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return changed
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def _clear_pattern_a(
@@ -913,10 +1027,10 @@ class WritableCalibreDB:
                 (book_id, fmt, int(size), name),
             )
             self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return True
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def remove_format(self, book_id: int, fmt: str) -> bool:
@@ -932,10 +1046,10 @@ class WritableCalibreDB:
             changed = self.conn.total_changes > before
             if changed:
                 self._touch_book(book_id)
-            self.conn.commit()
+            self._commit()
             return changed
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def set_has_cover(self, book_id: int, has_cover: bool) -> bool:
@@ -949,17 +1063,17 @@ class WritableCalibreDB:
             ).fetchone()["has_cover"]
             new = 1 if has_cover else 0
             if int(current or 0) == new:
-                self.conn.rollback()
+                self._rollback()
                 return False
             self.conn.execute(
                 "UPDATE books SET has_cover = ?, last_modified = ? WHERE id = ?",
                 (new, self._now(), book_id),
             )
             self._mark_dirty(book_id)
-            self.conn.commit()
+            self._commit()
             return True
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     # -- Book lifecycle --
@@ -1014,7 +1128,7 @@ class WritableCalibreDB:
             # fkc_delete_on_* guards are satisfied.
             for table in self._ENTITY_TABLES:
                 self._prune_orphans(table)
-            self.conn.commit()
+            self._commit()
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise

@@ -1,3 +1,36 @@
+## v1.7.0 (2026-08-28)
+
+### Phase 8: write-path completeness
+
+- **`set_pubdate(book_id, value)`.** Accepts `str` (`YYYY-MM-DD` or a full ISO
+  datetime), `date`, `datetime`, or `None`; naive datetimes are taken as UTC and
+  the value is stored as `datetime.isoformat(' ')` in UTC, which reproduces
+  Calibre's TEXT rows byte-for-byte (`'1991-10-01 07:00:00+00:00'`). `None`
+  writes the `0101-01-01 00:00:00+00:00` undefined-date sentinel, which the
+  search engine already treats as absent. No-op honest: an equal instant
+  returns `False` without bumping `last_modified` or queuing OPF resync. This
+  retires the raw-SQL pubdate workaround that put unix integers in the TEXT
+  column and cost 8 linter errors on 2026-08-27.
+- **`with wdb.batch():`** moves the commit boundary to the end of the block:
+  `BEGIN IMMEDIATE` at outermost entry (the write lock held across the pass),
+  nested batches join the one transaction, and a fault-injected mid-batch
+  failure rolls back everything, including the `metadata_dirtied` queue. Every
+  setter keeps its signature and per-call return semantics; only the commit
+  boundary moves (`_begin`/`_commit`/`_rollback` guard on `_batch_depth`).
+- **Comments read surface.** `get_book(book_id, include_comments=True)` adds
+  the raw stored HTML under a `comments` key; rows otherwise keep omitting
+  comment text (documented in docstrings at last). New bulk
+  `get_comments(book_id=None) -> {book: html}` is the sanctioned bulk read,
+  replacing consumers' reach-ins to `db.conn` (Hermitage's next sync adopts it).
+- Docs: spec §3.6 documents the setter and batch semantics; CLAUDE.md gains the
+  batch commit-boundary, pubdate-TEXT, and comments-omission contract notes;
+  README's write example shows `batch()`.
+
+### Internal
+- Test suite 189 → 202: batch atomicity/nesting/fault injection, pubdate
+  round-trips (str/date/datetime/aware-tz/sentinel/no-op/unknown-book), and
+  comments access including absent-table degradation.
+
 ## v1.6.1 (2026-08-28)
 
 ### Bug sweep & hardening

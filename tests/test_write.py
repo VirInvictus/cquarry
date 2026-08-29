@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from cquarry.write import WritableCalibreDB, register_udfs, title_sort
 
@@ -490,3 +491,119 @@ class TestWriteSideExpansion(unittest.TestCase):
             self.assertTrue(wdb.set_has_cover(1, True))
             self.assertFalse(wdb.set_has_cover(1, True))
             self.assertTrue(wdb.set_has_cover(1, False))
+
+
+class TestBatchContext(TestWriteSideExpansion):
+    """batch() defers every setter's commit: one transaction per curation pass.
+
+    The 2026-08-27 phase-3 import committed ~45 mutations as 45 separate
+    transactions; a crash mid-pass left a half-curated batch. A batch makes
+    the whole pass atomic while every setter keeps its signature.
+    """
+
+    def test_batch_commits_once_on_success(self):
+        with self._wdb() as wdb, wdb.batch():
+            wdb.add_tag(1, "Audited")
+            wdb.update_title(1, "New Name")
+        self.assertEqual(
+            self._sql2("SELECT title FROM books WHERE id=1"), [("New Name",)]
+        )
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(1,)])
+        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(1,)])
+
+    def test_batch_rolls_back_everything_on_failure(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError), wdb.batch():
+            wdb.add_tag(1, "Audited")
+            wdb.update_title(2, "Renamed")
+            wdb.add_tag(999, "Never")  # unknown book raises mid-batch
+        self.assertEqual(self._sql2("SELECT title FROM books WHERE id=2"), [("Other",)])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(0,)])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
+
+    def test_nested_batches_join_one_transaction(self):
+        with self._wdb() as wdb, wdb.batch():
+            wdb.add_tag(1, "A")
+            with wdb.batch():
+                wdb.add_tag(1, "B")
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(2,)])
+
+    def test_setter_outside_batch_unchanged(self):
+        # The commit boundary only moves inside batch(); bare calls commit
+        # per method exactly as before (update_title returns None by design).
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.add_tag(1, "Solo"))
+            wdb.update_title(1, "Solo Title")
+        self.assertEqual(
+            self._sql2("SELECT title FROM books WHERE id=1"), [("Solo Title",)]
+        )
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(1,)])
+
+
+class TestSetPubdate(TestWriteSideExpansion):
+    """set_pubdate writes Calibre's TEXT convention, never a raw integer.
+
+    The 2026-08-27 batch wrote unix integers into the TEXT column and got
+    8 'sentinel pubdate' / 'unparseable pubdate' linter errors from 4 books.
+    """
+
+    def _pubdate(self):
+        return self._sql2("SELECT pubdate FROM books WHERE id=1")[0][0]
+
+    def test_str_date_normalizes_to_utc_midnight(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_pubdate(1, "2014-03-01"))
+        self.assertEqual(self._pubdate(), "2014-03-01 00:00:00+00:00")
+
+    def test_str_datetime_and_tz_converts_to_utc(self):
+        with self._wdb() as wdb:
+            wdb.set_pubdate(1, "2014-03-01T12:30:00")
+            self.assertEqual(self._pubdate(), "2014-03-01 12:30:00+00:00")
+            wdb.set_pubdate(
+                1,
+                datetime(2014, 3, 1, 12, 30, tzinfo=timezone(timedelta(hours=-5))),
+            )
+        self.assertEqual(self._pubdate(), "2014-03-01 17:30:00+00:00")
+
+    def test_date_object_normalizes(self):
+        from datetime import date
+
+        with self._wdb() as wdb:
+            wdb.set_pubdate(1, date(1991, 10, 1))
+        self.assertEqual(self._pubdate(), "1991-10-01 00:00:00+00:00")
+
+    def test_none_writes_undefined_sentinel(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_pubdate(1, None))
+        self.assertEqual(self._pubdate(), "0101-01-01 00:00:00+00:00")
+
+    def test_same_instant_is_noop(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_pubdate(1, "1991-10-01 07:00:00+00:00"))
+            # Equivalent spelling of the same instant: no rewrite, no dirty.
+            self.assertFalse(wdb.set_pubdate(1, "1991-10-01 07:00:00+00:00"))
+            self.assertTrue(wdb.set_pubdate(1, None))  # clears to the sentinel
+            self.assertFalse(wdb.set_pubdate(1, None))  # already the sentinel
+        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(1,)])
+
+    def test_unparseable_string_raises(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.set_pubdate(1, "sentinel pubdate")
+
+    def test_unknown_book_raises(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.set_pubdate(42, "2020-01-01")
+
+    def test_change_touches_book_and_queues_opf(self):
+        with self._wdb() as wdb:
+            before = self._sql2("SELECT last_modified FROM books WHERE id=1")[0][0]
+            self.assertTrue(wdb.set_pubdate(1, "2014-03-01"))
+            after = self._sql2("SELECT last_modified FROM books WHERE id=1")[0][0]
+            self.assertNotEqual(after, before)
+        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(1,)])
+
+    def test_pubdate_failure_inside_batch_rolls_back(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError), wdb.batch():
+            wdb.set_pubdate(1, "2014-03-01")
+            wdb.set_pubdate(2, "not a date")
+        self.assertIsNone(self._pubdate())
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
