@@ -295,8 +295,12 @@ individually atomic, but a multi-book, multi-field curation pass is not.*
   engine already treats as absent; no-op honest — equal instants don't bump
   `last_modified` or queue OPF resync.)*
   - Upstream sync:
-    - [ ] *CalibreQuarry*: `--set-pubdate ID DATE` write verb through
-      `run_write()`. (CalibreQuarry roadmap Phase 15.)
+    - [x] *CalibreQuarry*: `--set-pubdate ID DATE` write verb through
+      `run_write()`. (CalibreQuarry roadmap Phase 15.) *(Shipped in
+      CalibreQuarry 3.23.0 with `--clear-pubdate`, TUI pubdate ops, and a
+      multi-verb batch mode that runs several write flags in one invocation
+      through a single `batch()` transaction — the driving consumer of this
+      item's batch context.)*
 - [x] **Batch-transaction context** (`with wdb.batch():` or equivalent): defer
   commits so a multi-book, multi-field pass commits exactly once — a crash
   mid-pass currently leaves a half-curated batch. Keep every existing method's
