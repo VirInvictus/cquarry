@@ -497,13 +497,18 @@ Upstream syncs for this expansion (each repo bumps and ticks its own roadmap):
   historical resolve().lower() normalization. The uv.lock bumps to current
   main once cquarry's 1.8.0 commits are pushed — noted in Bindery's
   patchnotes.)*
-- [ ] *Carrel-calibre-web 0.6.28*: deployment venv
+- [x] *Carrel-calibre-web 0.6.28*: deployment venv
   (`~/.local/share/carrel/venv`, currently a stale non-editable cquarry 1.1.1
   copy) reinstalled EDITABLE from this repo per Carrel spec §8.2's documented
   contract; `cps/library_cache.py`'s own-SQL UUID read becomes
   `get_library_uuid()` (its "deliberately does NOT go through cquarry" comment
   was a stale-install artifact, not architecture). Analytics adoption DEFERRED
   to Phase 7 (the fork is about to be reworked; don't patch it twice).
+  *(Shipped 2026-08-30 with one recorded deviation: the UUID read keeps its
+  one-query shape — a full CalibreDB lifecycle would regress the per-cache-hit
+  cost the module exists to keep cheap — but adopts `db_uri_ro()`'s contract,
+  fixing a latent break on `?`/`#` library paths. Companion Carrel patchnote
+  0.9.5; version leapfrogs upstream's in-flight 0.6.27b.)*
 
 Waivers/deferrals recorded at design time: no `find_orphan_custom_column_links`
 (schema-probing, deserves its own fixture work — candidate for a later pass);
