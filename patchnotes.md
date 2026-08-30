@@ -1,3 +1,19 @@
+## v1.7.1 (2026-08-30)
+
+### Bug fixes
+
+- **`WritableCalibreDB.transaction()` restored as an exact alias of
+  `batch()`.** The 2026-08-29 phase-3 import called `with db.transaction():`
+  and hit `AttributeError` — 1.7.0 had shipped the deferred-commit context as
+  `batch()` only, and the session fell back to raw `sqlite3`. The alias keeps
+  the pre-1.7 call shape working (same `BEGIN IMMEDIATE` at entry, one commit
+  at clean exit, full rollback on failure); the phase-3-import skill moved to
+  `batch()` in the same pass.
+
+### Internal
+- Test suite 207 → 209: alias commit-at-exit and mid-block rollback cases
+  mirroring the batch pair.
+
 ## v1.7.0 (2026-08-28)
 
 ### Phase 8: write-path completeness

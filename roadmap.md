@@ -505,11 +505,23 @@ design); CalibreQuarry's `scripts/db_util.py` connect-ro triplication stays
 (scripts deliberately keep raw connections outside the package contract).
 
 > **Version-sync reminder** (Phase 5 practice, applies to EVERY item above): bump
+> `VERSION` + `__init__.py` + `config.py` + `README.md` + `spec.md` together, log the
 > change in `patchnotes.md`, and mirror any behavior-affecting fix into each synced
 > consumer repo's own patchnotes before ticking its checkbox.
 
-- [ ] **Bug/API Drift (2026-08-29)**: `WritableCalibreDB` is missing the `transaction()` context manager in `cquarry 1.7.0`.
+- [x] **Bug/API Drift (2026-08-29)**: `WritableCalibreDB` is missing the `transaction()` context manager in `cquarry 1.7.0`.
   - **Context**: During a Phase 3 import, calling `with db.transaction():` (the established pattern) threw an `AttributeError: 'WritableCalibreDB' object has no attribute 'transaction'`.
   - **Cause**: The 1.7.0 patchnotes introduce a new `batch()` transaction context. It appears `transaction()` was replaced by `batch()`.
   - **Workaround used**: Bypassed `cquarry.write` entirely and fell back to raw `sqlite3` `BEGIN IMMEDIATE` for the batch.
   - **Required Fix**: Either restore `transaction()` as an alias to `batch()` in `cquarry.write.WritableCalibreDB` for backwards compatibility, or officially update the downstream `phase-3-import` skill to use `batch()` instead.
+  - *(Shipped in v1.7.1: both halves — `transaction()` is back as an exact
+  `batch()` alias with commit/rollback tests, and the phase-3-import skill's
+  "One transaction" step now teaches `batch()` + `set_pubdate` instead of raw
+  SQL.)*
+
+> **Standing note (2026-08-30, Hermitage Flatpak pin):** Hermitage's Flatpak
+> manifest sources cquarry at a pinned commit (added in Hermitage 1.6.1;
+> reproducible builds were chosen over `@main` tracking). Any item in this
+> roadmap that touches Hermitage — a new consumer-facing API, a behavior
+> fix, or a sync — must bump that pinned commit in the same release as the
+> consumer sync, or Hermitage's packaged build silently lags the ecosystem.

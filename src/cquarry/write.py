@@ -189,6 +189,16 @@ class WritableCalibreDB:
                     with contextlib.suppress(sqlite3.Error):
                         self.conn.rollback()
 
+    def transaction(self) -> contextlib.AbstractContextManager[Self]:
+        """Pre-1.7.0 name for :meth:`batch`, kept as an exact alias.
+
+        A phase-3 import on 2026-08-29 called ``with wdb.transaction():`` and
+        hit an AttributeError: 1.7.0 shipped the deferred-commit context as
+        ``batch()`` with no ``transaction()``. The alias keeps the old call
+        shape working; new code should use ``batch()``.
+        """
+        return self.batch()
+
     def _commit(self) -> None:
         """Commit unless inside a batch() — the batch owns that commit."""
         if self._batch_depth:

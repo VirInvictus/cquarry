@@ -538,6 +538,25 @@ class TestBatchContext(TestWriteSideExpansion):
         )
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(1,)])
 
+    def test_transaction_alias_commits_once_on_success(self):
+        # Pre-1.7.0 call shape (the name a 2026-08-29 phase-3 import reached
+        # for); must behave exactly like batch().
+        with self._wdb() as wdb, wdb.transaction():
+            wdb.add_tag(1, "Audited")
+            wdb.update_title(1, "New Name")
+        self.assertEqual(
+            self._sql2("SELECT title FROM books WHERE id=1"), [("New Name",)]
+        )
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(1,)])
+        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(1,)])
+
+    def test_transaction_alias_rolls_back_on_failure(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError), wdb.transaction():
+            wdb.add_tag(1, "Audited")
+            wdb.add_tag(999, "Never")  # unknown book raises mid-batch
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(0,)])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
+
 
 class TestSetPubdate(TestWriteSideExpansion):
     """set_pubdate writes Calibre's TEXT convention, never a raw integer.

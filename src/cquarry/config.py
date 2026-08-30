@@ -1,7 +1,7 @@
 import json
 import os
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 DEFAULT_DB_PATHS = [
     "metadata.db",

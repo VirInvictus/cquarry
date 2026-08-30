@@ -270,7 +270,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.4.0"
+print(cquarry.__version__)  # "1.7.1"
 ```
 
 ### Writes (`cquarry.write`) — opt-in
