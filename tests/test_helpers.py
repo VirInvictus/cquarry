@@ -14,10 +14,75 @@ from cquarry.helpers import (
     get_image_size,
     get_jpeg_size,
     get_png_size,
+    isbn_check_digit_is_valid,
+    isbn_normalize,
     normalize_rating,
     strip_html,
+    tag_rollup,
     tags_to_tree,
+    to_isbn13,
 )
+
+
+class TestTagRollup(unittest.TestCase):
+    def test_rolls_up_onto_implied_ancestors(self):
+        self.assertEqual(
+            tag_rollup({"Fic.Fantasy": 3, "Fic.Fantasy.Epic": 2}),
+            {"Fic": 5, "Fic.Fantasy": 5, "Fic.Fantasy.Epic": 2},
+        )
+
+    def test_existing_partial_counts_add_their_own(self):
+        # A node that is itself counted AND an ancestor of others keeps both.
+        self.assertEqual(
+            tag_rollup({"Fic": 1, "Fic.Fantasy": 3}),
+            {"Fic": 4, "Fic.Fantasy": 3},
+        )
+
+    def test_empty_is_empty(self):
+        self.assertEqual(tag_rollup({}), {})
+        self.assertEqual(tag_rollup(None), {})
+
+
+class TestIsbnFamily(unittest.TestCase):
+    def test_normalize_strips_separators_keeps_x(self):
+        self.assertEqual(isbn_normalize("978-0-06-085398-3"), "9780060853983")
+        self.assertEqual(isbn_normalize("0-8065-0740-4"), "0806507404")
+        self.assertEqual(isbn_normalize("0-19-852663-6"), "0198526636")
+        self.assertEqual(isbn_normalize("99921-58-10-7"), "9992158107")
+
+    def test_normalize_empty_is_empty(self):
+        self.assertEqual(isbn_normalize(""), "")
+        self.assertEqual(isbn_normalize(None), "")
+
+    def test_check_digit_validates_10_and_13(self):
+        # Valid ISBN-10s (including an X check digit) and ISBN-13s.
+        self.assertTrue(isbn_check_digit_is_valid("0-306-40615-2"))
+        self.assertTrue(isbn_check_digit_is_valid("0-19-852663-6"))
+        self.assertTrue(isbn_check_digit_is_valid("978-0-306-40615-7"))
+        # A flipped digit breaks both flavours.
+        self.assertFalse(isbn_check_digit_is_valid("0-306-40615-3"))
+        self.assertFalse(isbn_check_digit_is_valid("978-0-306-40615-8"))
+        # Wrong lengths and junk are invalid, not errors.
+        self.assertFalse(isbn_check_digit_is_valid("12345"))
+        self.assertFalse(isbn_check_digit_is_valid("not-an-isbn"))
+
+    def test_to_isbn13_converts_10(self):
+        self.assertEqual(to_isbn13("0-306-40615-2"), "9780306406157")
+
+    def test_to_isbn13_valid_13_passes_through(self):
+        self.assertEqual(to_isbn13("978-0-306-40615-7"), "9780306406157")
+
+    def test_to_isbn13_no_source_check_validation(self):
+        # The contract deliberately skips validating the SOURCE check digit
+        # (the LibraryThing exporter's rule); conversion still happens.
+        self.assertEqual(to_isbn13("0-306-40615-9"), "9780306406157")
+        # A 13-digit input passes through even when its check digit is wrong.
+        self.assertEqual(to_isbn13("978-0-306-40615-8"), "9780306406158")
+
+    def test_to_isbn13_garbage_is_none(self):
+        self.assertIsNone(to_isbn13("12345"))
+        self.assertIsNone(to_isbn13(""))
+        self.assertIsNone(to_isbn13(None))
 
 
 class TestDbUri(unittest.TestCase):

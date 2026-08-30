@@ -355,7 +355,7 @@ exactly the kind the frontend-only split says belongs here. Three seams, in
 descending order of value. Each item names its consumers; each consumer's
 implementation today is the mine site.*
 
-- [ ] **`get_book_dossier(book_id)` — the composed deep fetch.** CalibreQuarry's
+- [x] **`get_book_dossier(book_id)` — the composed deep fetch.** *(cquarry side shipped in v1.8.0: signature as frozen; `cover_path` via `get_cover_path()` defaults so the row's `has_cover` distinguishes catalogued-but-missing; custom columns keyed `#label` from the value's `label` field.)* CalibreQuarry's
   `--book` dossier (`modes/detail.py show_book`) hand-composes ~10 read calls:
   `get_book`, `get_cover_path`, formats via `get_format_path`, custom columns
   via the `field()` hook, comments (through `strip_html`), `get_annotations`,
@@ -369,7 +369,7 @@ implementation today is the mine site.*
       (CalibreQuarry roadmap Phase 15).
     - [ ] *Skill sync*: phase-3-import's "read EVERY field" step names the
       dossier call once shipped. **Floor, not ceiling** — same rule as Phase 8.
-- [ ] **Library integrity predicates.** `modes/audit.py` implements untagged,
+- [x] **Library integrity predicates.** *(cquarry side shipped in v1.8.0 as `cquarry.integrity` with the ten finders; rules match the frontend's exactly so the CSV is byte-identical.)* `modes/audit.py` implements untagged,
   unrated, coverless, and series-gap checks as frontend SQL, and
   `scripts/validate_metadata.py` reimplements overlapping rules — while
   `helpers.detect_series_gaps()` already lives here, proving the precedent.
@@ -382,7 +382,7 @@ implementation today is the mine site.*
     - [ ] *CalibreQuarry*: `--audit` renders the module's results (roadmap
       Phase 15).
     - [ ] *Hermitage*: health/dashboard views get the same predicates for free.
-- [ ] **Analytics derivations.** `modes/analytics.py` derives reading pace
+- [x] **Analytics derivations.** *(cquarry side shipped in v1.8.0 as `cquarry.analytics` — timeline/author stats/rating distribution/vl overlap.)* `modes/analytics.py` derives reading pace
   (books added per month from `timestamp`), per-author stats (count, ratings,
   formats), and wing overlap (books matching multiple resolved virtual
   libraries) from pure database data. The derivations move here
@@ -392,7 +392,7 @@ implementation today is the mine site.*
     - [ ] *CalibreQuarry*: `--analytics` renders the module's results (roadmap
       Phase 15).
     - [ ] *Hermitage*: stats views; *Carrel*: collection-pace views.
-- [ ] **`to_isbn13()` into `helpers`**: generic ISBN-10→13 conversion currently
+- [x] **`to_isbn13()` into `helpers`** *(v1.8.0, as part of the full ISBN family below.)*: generic ISBN-10→13 conversion currently
   lives in `modes/librarything.py`; identifier work elsewhere (including the
   write module's `set_identifier`) will want it.
 
@@ -409,7 +409,7 @@ and Bindery are MIT (logic may move freely); Hermitage and Carrel are GPL-3.0,
 so everything taken from them is behavioral (clean-room, rewritten against
 cquarry's caches/row shapes), never a verbatim code move.
 
-- [ ] **helpers — ISBN family** (replaces the two divergent frontend copies in
+- [x] **helpers — ISBN family** *(v1.8.0: `isbn_normalize`, `isbn_check_digit_is_valid`, `to_isbn13`; the exporter's None→"" mapping lands with CalibreQuarry 3.24.0.)* (replaces the two divergent frontend copies in
   `modes/librarything.py` and `scripts/audit_isbns.py`): `isbn_normalize(raw)
   -> str` (strip separators, uppercase, keep X); `isbn_check_digit_is_valid(
   isbn) -> bool` (validates ISBN-10 mod-11 and ISBN-13 EAN); `to_isbn13(raw)
@@ -418,27 +418,27 @@ cquarry's caches/row shapes), never a verbatim code move.
   LibraryThing exporter — callers pair it with the validity helper for
   strictness). CalibreQuarry's exporter maps None back to its current "" output
   so the CSV stays byte-identical.
-- [ ] **helpers — `tag_rollup(counts: dict[str, int]) -> dict[str, int]`**:
+- [x] **helpers — `tag_rollup(counts: dict[str, int]) -> dict[str, int]`**: *(v1.8.0. EXAMPLE CORRECTION: the frozen example showed the keyed `Fic.Fantasy` keeping its bare 3 while implied `Fic` got 5 — a mixed rule no consumer renders. The shipped rule is subtree totals (own + descendants: `Fic.Fantasy` becomes 5), which is what Hermitage's `_total_count` and Carrel's union already display, so adoption is render-identical. Flagged to Brandon in the 2026-08-30 session.)*
   leaf/partial dot-path counts in, every node including implied ancestors
   rolled up (`{"Fic.Fantasy": 3, "Fic.Fantasy.Epic": 2}` → `{"Fic": 5,
   "Fic.Fantasy": 3, "Fic.Fantasy.Epic": 2}`). Hermitage's `genres.py` and
   Carrel's `cps/categories.py` independently built this; the tree itself stays
   `tags_to_tree`.
-- [ ] **db — Bindery's gap**: `format_path_index() -> dict[str, int]` (every
+- [x] **db — Bindery's gap**: `format_path_index() -> dict[str, int]` *(v1.8.0, plus `find_book_by_path()`.)* (every
   catalogued format path → book id, built with one `data ⋈ books` query using
   exactly `get_format_path`'s construction, keys `normcase(normpath())`,
   cached) and `find_book_by_path(path) -> int | None`. Bindery's
   `CalibreIdResolver` rebuilds on this; its `(123)` regex stays as the
   documented legacy fallback.
-- [ ] **db — `get_book_dossier(book_id, *, include_comments=False) ->
-  dict | None`**: composed deep fetch. Keys: `book` (the standard row),
+- [x] **db — `get_book_dossier(book_id, *, include_comments=False) ->
+  dict | None`**: *(v1.8.0.)* composed deep fetch. Keys: `book` (the standard row),
   `cover_path` (`get_cover_path` defaults; row's `has_cover` distinguishes
   catalogued-but-missing), `formats` (`get_formats`), `custom_columns`
   (`{"#label": {name, datatype, value}}`, values exactly as `field()` yields —
   comments-typed columns are raw HTML), `annotations`, `reading_positions`,
   `plugin_data`, `conversion_overrides`, plus `comments` ({html, plain via
   strip_html}) only when flagged. Returns None for unknown books.
-- [ ] **`cquarry.integrity` module** — pure functions over the cached rows (no
+- [x] **`cquarry.integrity` module** — pure functions over the cached rows *(v1.8.0; signatures as frozen.)* (no
   SQL of their own; the two cover-file checks ride `get_cover_path` +
   `get_image_size`): `find_untagged(db)`, `find_unrated(db)`,
   `find_authorless(db)` (empty or ["Unknown"]), `find_formatless(db)`,
@@ -450,7 +450,7 @@ cquarry's caches/row shapes), never a verbatim code move.
   db) -> {(title-lower, primary-author-lower): [ids]}` (multi-member groups
   only), `find_series_gaps(db) -> {name: [missing]}` composing
   `get_all_series()` + `detect_series_gaps()`. All id lists sorted.
-- [ ] **`cquarry.analytics` module** — same shape, skipping anything existing
+- [x] **`cquarry.analytics` module** — same shape, skipping anything existing *(v1.8.0.)*
   APIs already serve (`get_format_stats`, `get_entities`, `get_tag_counts`):
   `addition_timeline(db, granularity="month") -> {"YYYY-MM": n}` ("year" also
   supported, chronological), `author_stats(db) -> [{author, book_count,
@@ -458,14 +458,14 @@ cquarry's caches/row shapes), never a verbatim code move.
   then name), `rating_distribution(db) -> {stars | "unrated": n}`,
   `vl_overlap(db, names=None) -> {(wing, ...): [ids]}` (multi-wing combos only;
   unknown wing raises via `resolve_vl`).
-- [ ] **Docs: `API.md` + README unbusy.** New `API.md` at repo root carries the
+- [x] **Docs: `API.md` + README unbusy.** *(v1.8.0: API.md carries the full reference plus every new API; README 444 → 255 lines with a dossier quick-start and a module-at-a-glance table.)* New `API.md` at repo root carries the
   full per-method reference (moved from README's Public API section) plus every
   new API above; README keeps hero, features, quick-starts (dossier + batch),
   install, a one-line-per-module "API at a glance" linking to API.md, the full
   Search Grammar section, Acknowledgements (calibre-web attribution already
   covers the GPL-sourcing rule), Support, License. Target ~444 → ~250 lines.
-- [ ] **Tests**: `test_integrity.py`, `test_analytics.py`, plus extensions to
-  test_helpers/test_db; suite should clear 220.
+- [x] **Tests**: `test_integrity.py`, `test_analytics.py`, plus extensions to
+  test_helpers/test_db; suite should clear 220. *(v1.8.0: 209 → 241 green.)*
 - [ ] **Skill sync**: phase-3-import's "read EVERY field" step names
   `get_book_dossier` once shipped. **Floor, not ceiling** — same rule as
   Phase 8.

@@ -179,6 +179,73 @@ def tags_to_tree(tags: list[str]) -> dict[str, Any]:
     return tree
 
 
+def tag_rollup(counts: dict[str, int]) -> dict[str, int]:
+    """Roll up leaf/partial dot-path counts into subtree totals.
+
+    Every node in the output carries its own count plus everything below it,
+    the subtree total sidebars display: ``{"Fic.Fantasy": 3,
+    "Fic.Fantasy.Epic": 2}`` becomes ``{"Fic": 5, "Fic.Fantasy": 5,
+    "Fic.Fantasy.Epic": 2}``. This matches Hermitage's ``_total_count`` and
+    Carrel's category union rule, so adopting the helper is render-identical
+    for both. (The Phase 9 roadmap's example showed the keyed node keeping
+    its bare 3; that example was corrected when this shipped.) The tree
+    itself stays with :func:`tags_to_tree`.
+    """
+    out: dict[str, int] = {}
+    for path, n in (counts or {}).items():
+        parts = [p for p in str(path).split(".") if p]
+        for i in range(1, len(parts) + 1):
+            key = ".".join(parts[:i])
+            out[key] = out.get(key, 0) + n
+    return out
+
+
+def isbn_normalize(raw: str | None) -> str:
+    """Strip separators and uppercase an ISBN, keeping a trailing ``X``.
+
+    Returns ``""`` for empty input. No validity judgement is made: callers
+    who want strictness pair this with :func:`isbn_check_digit_is_valid`.
+    """
+    if not raw:
+        return ""
+    return re.sub(r"[^0-9Xx]", "", str(raw)).upper()
+
+
+def isbn_check_digit_is_valid(isbn: str | None) -> bool:
+    """Validate an ISBN-10 (mod 11) or ISBN-13 (EAN) check digit.
+
+    Separators are tolerated (normalized first). Anything that is not a 10-
+    or 13-character number after normalization — or an ISBN-10 whose check
+    slot is neither a digit nor ``X`` — is invalid rather than an error.
+    """
+    s = isbn_normalize(isbn)
+    if len(s) == 10 and s[:9].isdigit() and (s[9].isdigit() or s[9] == "X"):
+        total = sum((10 - i) * (10 if c == "X" else int(c)) for i, c in enumerate(s))
+        return total % 11 == 0
+    if len(s) == 13 and s.isdigit():
+        total = sum((1 if i % 2 == 0 else 3) * int(c) for i, c in enumerate(s))
+        return total % 10 == 0
+    return False
+
+
+def to_isbn13(raw: str | None) -> str | None:
+    """Convert an ISBN-10 to ISBN-13 (978 prefix, recomputed check digit).
+
+    A 13-digit input passes through unchanged and any other length returns
+    ``None``. Deliberately NO source check-digit validation — matching the
+    LibraryThing exporter's contract this was mined from; callers who want
+    strictness pair the result with :func:`isbn_check_digit_is_valid`.
+    """
+    s = isbn_normalize(raw)
+    if len(s) == 13 and s.isdigit():
+        return s
+    if len(s) != 10 or not s[:9].isdigit():
+        return None
+    core = "978" + s[:9]
+    total = sum((1 if i % 2 == 0 else 3) * int(c) for i, c in enumerate(core))
+    return core + str((10 - total % 10) % 10)
+
+
 def format_stars(rating: float | None) -> str:
     if rating is None:
         return ""

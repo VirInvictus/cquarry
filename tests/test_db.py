@@ -922,5 +922,124 @@ class TestReadSideV16(unittest.TestCase):
             db.close()
 
 
+class TestDossierAndPathIndex(unittest.TestCase):
+    """Phase 9: get_book_dossier (the composed deep fetch) and the
+    format-path index (every catalogued format path → book id)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        con = sqlite3.connect(os.path.join(self.temp_dir, "metadata.db"))
+        con.executescript(_SCHEMA_V27)
+        # Extractor tables the dossier composes; empty ones degrade to [].
+        con.executescript(
+            """
+            CREATE TABLE annotations (id INTEGER PRIMARY KEY, book INT,
+                format TEXT, user_type TEXT, user TEXT, timestamp TEXT,
+                annot_id TEXT, annot_type TEXT, annot_data TEXT,
+                searchable_text TEXT);
+            CREATE TABLE last_read_positions (id INTEGER PRIMARY KEY, book INT,
+                format TEXT, user TEXT, device TEXT, cfi TEXT, epoch INT,
+                pos_frac REAL);
+            CREATE TABLE books_plugin_data (book INT, name TEXT, val TEXT);
+            CREATE TABLE conversion_options (book INT, format TEXT, data BLOB);
+            """
+        )
+        con.executemany(
+            "INSERT INTO books (id,title,sort,path,has_cover) VALUES (?,?,?,?,?)",
+            [(1, "Dossier Book", "Dossier Book", "Auth/Dossier Book (1)", 1)],
+        )
+        con.execute("INSERT INTO authors VALUES (1, 'Auth', 'Auth, A')")
+        con.execute("INSERT INTO books_authors_link (book, author) VALUES (1, 1)")
+        con.execute(
+            "INSERT INTO data (book, format, name, uncompressed_size)"
+            " VALUES (1, 'EPUB', 'dossier', 2048)"
+        )
+        con.execute(
+            "INSERT INTO comments (book, text) VALUES (1, '<p>Deep &amp; rich.</p>')"
+        )
+        con.execute(
+            "INSERT INTO annotations (book, format, searchable_text, annot_data)"
+            " VALUES (1, 'EPUB', 'a highlight', '{}')"
+        )
+        con.execute(
+            "INSERT INTO last_read_positions (book, format, user, device, cfi,"
+            " epoch, pos_frac) VALUES (1, 'EPUB', 'brandon', 'kobo', 'cfi/2', 7, 0.5)"
+        )
+        con.execute(
+            "INSERT INTO books_plugin_data (book, name, val) VALUES (1, 'wordcount', '99000')"
+        )
+        con.execute(
+            "INSERT INTO conversion_options (book, format, data) VALUES (1, 'EPUB', X'00')"
+        )
+        # A Pattern-B int custom column.
+        con.execute(
+            "INSERT INTO custom_columns (id, label, name, datatype, is_multiple)"
+            " VALUES (1, 'pages_orig', 'Original Pages', 'int', 0)"
+        )
+        con.execute("CREATE TABLE custom_column_1 (book INT, value INT)")
+        con.execute("INSERT INTO custom_column_1 (book, value) VALUES (1, 611)")
+        # A cover file on disk so the dossier's cover_path resolves.
+        os.makedirs(os.path.join(self.temp_dir, "Auth", "Dossier Book (1)"))
+        with open(
+            os.path.join(self.temp_dir, "Auth", "Dossier Book (1)", "cover.jpg"), "wb"
+        ) as f:
+            f.write(b"\xff\xd8fake")
+        con.commit()
+        con.close()
+        self.db = CalibreDB(os.path.join(self.temp_dir, "metadata.db"))
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_dossier_composes_everything(self):
+        d = self.db.get_book_dossier(1)
+        self.assertIsNotNone(d)
+        self.assertEqual(d["book"]["title"], "Dossier Book")
+        self.assertEqual(
+            d["cover_path"],
+            os.path.join(self.temp_dir, "Auth", "Dossier Book (1)", "cover.jpg"),
+        )
+        self.assertEqual(d["formats"]["EPUB"]["name"], "dossier")
+        self.assertEqual(
+            d["custom_columns"],
+            {
+                "#pages_orig": {
+                    "name": "Original Pages",
+                    "datatype": "int",
+                    "value": 611,
+                }
+            },
+        )
+        self.assertEqual(len(d["annotations"]), 1)
+        self.assertEqual(d["reading_positions"][0]["device"], "kobo")
+        self.assertEqual(d["plugin_data"][0]["name"], "wordcount")
+        self.assertEqual(len(d["conversion_overrides"]), 1)
+        self.assertNotIn("comments", d)
+
+    def test_dossier_comments_flag(self):
+        d = self.db.get_book_dossier(1, include_comments=True)
+        self.assertEqual(d["comments"]["html"], "<p>Deep &amp; rich.</p>")
+        self.assertEqual(d["comments"]["plain"], "Deep & rich.")
+
+    def test_dossier_unknown_book_is_none(self):
+        self.assertIsNone(self.db.get_book_dossier(999))
+
+    def test_format_path_index_and_lookup(self):
+        idx = self.db.format_path_index()
+        expected = os.path.join(
+            self.temp_dir, "Auth", "Dossier Book (1)", "dossier.epub"
+        )
+        self.assertEqual(idx[os.path.normcase(os.path.normpath(expected))], 1)
+        # Reverse lookup survives redundant separators and dot segments.
+        noisy = os.path.join(
+            self.temp_dir, "Auth", ".", "Dossier Book (1)", "", "dossier.epub"
+        )
+        self.assertEqual(self.db.find_book_by_path(noisy), 1)
+        # A relative spelling resolves against the process cwd only via
+        # abspath — a nonexistent absolute path just misses.
+        self.assertIsNone(self.db.find_book_by_path("/nowhere/thick.epub"))
+
+
 if __name__ == "__main__":
     unittest.main()

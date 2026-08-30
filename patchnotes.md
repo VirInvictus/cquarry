@@ -1,3 +1,53 @@
+## v1.8.0 (2026-08-30)
+
+### Phase 9: the approved full mine (composed reads, integrity, analytics)
+
+- **`get_book_dossier(book_id, *, include_comments=False)`.** The composed
+  deep fetch detail views hand-assembled from ~10 read calls: the standard
+  row, `cover_path`, per-format detail, `custom_columns` keyed `#label` as
+  `{name, datatype, value}` (values exactly as `field()` yields),
+  annotations, reading positions, plugin data, conversion overrides, and —
+  only when flagged — `comments` as `{html, plain}`. `None` for unknown
+  books. The frontend keeps rendering; cquarry owns the assembly.
+- **`format_path_index()` + `find_book_by_path()`.** Every catalogued
+  format path → book id in one `data ⋈ books` query, built exactly like
+  `get_format_path()` and keyed `normcase(normpath())`, cached. Bindery's
+  `CalibreIdResolver` was the seed consumer.
+- **`cquarry.integrity`.** The mechanical "incomplete" predicates promoted
+  from CalibreQuarry's `--audit` frontend: untagged, unrated, authorless,
+  formatless, coverless, missing cover files, deprecated formats (caller
+  supplies the set), low-res covers (`{id: (w, h)}`), duplicates
+  (`(title, primary author)` groups), series gaps. Pure over the cached
+  rows; every id list sorted; the two cover-file checks are the only
+  functions that touch the disk.
+- **`cquarry.analytics`.** `addition_timeline` (month/year), `author_stats`
+  (count-desc then name, star-scale averages, unrated excluded),
+  `rating_distribution` (half-step stars, `"unrated"` last), `vl_overlap`
+  (multi-wing combos only, unknown wings raise through `resolve_vl`).
+- **helpers, ISBN family.** `isbn_normalize`, `isbn_check_digit_is_valid`
+  (ISBN-10 mod-11 / ISBN-13 EAN), and `to_isbn13` (978-prefix conversion;
+  13-digit inputs pass through; deliberately NO source check-digit
+  validation, matching the LibraryThing exporter's contract this replaces).
+- **helpers, `tag_rollup(counts)`.** Subtree totals for dot-path counts:
+  every node carries its own count plus everything below it — the rule
+  Hermitage's `_total_count` and Carrel's category union already render,
+  so adopting it is output-identical. The Phase 9 roadmap's example showed
+  the keyed node keeping its bare count (`Fic.Fantasy: 3` where the
+  subtree rule gives 5); the example was inconsistent with the render
+  parity it was designed for and is corrected in the roadmap tick.
+- **Docs split: `API.md` + README unbusy.** The full per-method reference
+  moved from README's Public API section into `API.md` (with every new API
+  above); the README keeps the hero, quick-starts (a dossier example joined
+  the batch one), install, a one-line-per-module API-at-a-glance linking to
+  `API.md`, the full search-grammar section, and the back matter.
+  Spec gained §3.7 (integrity) and §3.8 (analytics); §6's consumer table
+  refreshed for the sync releases below.
+
+### Internal
+- Test suite 209 → 241: `test_integrity.py`, `test_analytics.py`, plus
+  `TestDossierAndPathIndex` and the ISBN/rollup batteries in
+  `test_helpers.py`.
+
 ## v1.7.1 (2026-08-30)
 
 ### Bug fixes

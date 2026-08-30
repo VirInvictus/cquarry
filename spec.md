@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.7.1
+**Version:** 1.8.0
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -119,6 +119,16 @@ The read side exposes the same queue for observability: `CalibreDB.get_dirtied_b
 
 **Read-side completeness (cquarry ≥ 1.6).** Every remaining table and view of the schema is surfaced: `get_feeds()` lists the news-recipe rows of `feeds`; `get_tag_browser_counts()` reads Calibre's own `tag_browser_*` views (custom columns rekeyed to `#label`, the ratings view's `rating` column aliased, and `tag_browser_series`'s `title_sort()` UDF supplied locally from `helpers` for the duration of the read, then removed) while skipping the `tag_browser_filtered_*` variants, which depend on Calibre's GUI-state `books_list_filter()` function; `get_entities()` gained a `ratings` kind (the `name` column carries the half-star integer as text); and both `get_all_books()` and `get_book()` rows now carry `uuid` and `identifiers` with identical shapes between the two (previously `size` was missing from `get_book` and both ids existed only on the internal search view). Languages honor `books_languages_link.item_order` (link-id order on schemas predating the column), matching Calibre's ordering. The `meta` view is deliberately not read: it requires Calibre's in-process `sortconcat()`/`concat()` aggregates — `get_all_books()` supersedes it.
 
+**Composed reads (cquarry ≥ 1.8).** `get_book_dossier(book_id, *, include_comments=False)` is the composed deep fetch detail views previously hand-assembled: the standard `get_book()` row, `cover_path` (via `get_cover_path()` defaults; the row's `has_cover` distinguishes catalogued-but-missing), `formats`, `custom_columns` keyed `#label` as `{name, datatype, value}` (values exactly as the engine's `field()` yields; comments-typed columns stay raw HTML), `annotations`, `reading_positions`, `plugin_data`, `conversion_overrides`, and — only when flagged — `comments` as `{html, plain}` (plain via `strip_html`). `None` for unknown books. `format_path_index()` maps every catalogued format path to its book id in one `data ⋈ books` query built exactly like `get_format_path()` (keys `normcase(normpath())`, cached); `find_book_by_path(path)` reverses it, tolerant of relative spellings and redundant separators.
+
+### 3.7 Integrity predicates (`integrity.py`, cquarry ≥ 1.8)
+
+The mechanical definitions of "incomplete" promoted from CalibreQuarry's frontend so every consumer shares one answer. Pure functions over the cached rows; no SQL of their own — the two cover-file checks ride `get_cover_path()` + `get_image_size()` because a flag cannot see the disk. Every id list is sorted: `find_untagged`, `find_unrated` (`None`/`0`), `find_authorless` (empty or `["Unknown"]`), `find_formatless`, `find_coverless` (catalogued flag), `find_missing_cover_files` (flag set, file absent; empty `books.path` skipped), `find_deprecated_formats(db, formats)` (caller supplies the deprecated set — cquarry owns only the subset-of mechanism), `find_low_res_covers(db, min_dimension=500) → {id: (w, h)}` (missing files excluded; unreadable images skipped), `find_duplicate_books` → `{(title-lower, primary-author-lower): [ids]}` (multi-member only), `find_series_gaps` composing `get_all_series()` + `detect_series_gaps()`.
+
+### 3.8 Analytics derivations (`analytics.py`, cquarry ≥ 1.8)
+
+Derivations promoted from CalibreQuarry's `--analytics` frontend; the frontend keeps formatting, cquarry owns the math. Pure over the cached rows: `addition_timeline(db, granularity="month")` (`"YYYY-MM"` buckets, chronological; `"year"` supported; timestampless books skipped), `author_stats` (per primary author `{author, book_count, avg_rating, formats}` — star-scale averages over rated books only, count-desc then name, authorless books skipped), `rating_distribution` (half-step star floats ascending, `"unrated"` last), and `vl_overlap(db, names=None)` (books in two or more virtual libraries as `{(wing, ...): [ids]}`, unknown names raising through `resolve_vl`).
+
 ## 4. Field location table
 
 Canonical locations, their datatypes, and recognized aliases. Custom columns are registered dynamically from the `custom_columns` table and use `#label` as their location token.
@@ -170,10 +180,10 @@ cquarry is the shared foundation. Changes to its behavior affect all of these:
 
 | Consumer | What it uses |
 |----------|-------------|
-| **CalibreQuarry** (CLI/TUI) | `CalibreDB`, `search()`, `search_books()`, `get_book()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `get_annotations()`, `get_plugin_data()`, `get_dirtied_books()`, `get_formats()`, `get_cover_path()`, `get_library_uuid()`, `get_all_series()`, `get_tag_counts()`, `get_format_path()`, `find_db()`, `format_stars()`, `strip_html()`, `tags_to_tree()`, `normalize_author_display()`, `detect_series_gaps()`, `get_image_size()`, `color()`, `write.WritableCalibreDB` |
-| **Hermitage** (GTK4 gallery) | `CalibreDB`, `search()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_saved_searches()`, `get_vl_ui_state()`, `get_annotations()`, `get_last_read_positions()`, `normalize_rating()` |
+| **CalibreQuarry** (CLI/TUI) | `CalibreDB`, `search()`, `search_books()`, `get_book()`, `get_book_dossier()` (the `--book` dossier renders over it), `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `get_annotations()`, `get_plugin_data()`, `get_dirtied_books()`, `get_formats()`, `get_cover_path()`, `get_library_uuid()`, `get_all_series()`, `get_tag_counts()`, `get_format_path()`, `find_db()`, `format_stars()`, `strip_html()`, `tags_to_tree()`, `normalize_author_display()`, `detect_series_gaps()`, `get_image_size()`, `color()`, `integrity` (the `--audit` predicates), `analytics` (`--analytics`/`--stats`), `helpers.isbn_normalize`/`isbn_check_digit_is_valid`/`to_isbn13` (LibraryThing exporter + ISBN audit), `write.WritableCalibreDB` |
+| **Hermitage** (GTK4 gallery) | `CalibreDB`, `search()`, `get_all_books()`, `get_custom_columns()`, `load_custom_column()`, `get_virtual_libraries()`, `get_saved_searches()`, `get_vl_ui_state()`, `get_annotations()`, `get_last_read_positions()`, `get_comments()` (bulk comments read; no more `db.conn` reach-ins), `normalize_rating()`, `integrity` + `analytics` (Insights/health views), `helpers.tag_rollup` (genre sidebar) |
 | **Carrel-calibre-web** (web reader) | `CalibreDB`, `search()`, `get_virtual_libraries()`, `get_vl_ui_state()`, `resolve_vl()`, `field()` (native `pages`), `get_annotations()`, `get_last_read_positions()`, `detect_series_gaps()` |
-| **Bindery** (EPUB repair) | `get_image_size()` (cover audit), `get_format_path()` (EPUB resolution + the `CalibreIdResolver` id map), `get_book()` (single-entity `audit --id` fetch), `get_formats()` (audited-format reporting), `write.WritableCalibreDB` (optional flag tagging) |
+| **Bindery** (EPUB repair) | `get_image_size()` (cover audit), `get_format_path()` (EPUB resolution; the `CalibreIdResolver` id map rides `format_path_index()`), `get_book()` (single-entity `audit --id` fetch), `get_formats()` (audited-format reporting), `write.WritableCalibreDB` (optional flag tagging) |
 
 ## 7. Out of scope (non-goals)
 

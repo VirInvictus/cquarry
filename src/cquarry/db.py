@@ -8,7 +8,7 @@ import sys
 import tempfile
 from typing import Any
 
-from cquarry.helpers import calibre_rating_to_stars, db_uri_ro, title_sort
+from cquarry.helpers import calibre_rating_to_stars, db_uri_ro, strip_html, title_sort
 from cquarry.search import (
     DT_BOOL,
     DT_DATE,
@@ -73,6 +73,7 @@ class CalibreDB:
         self._comments_cache: dict[int, str] | None = None
         self._pages_col_cache: Any = _UNSET
         self._pages_cache: dict[int, int] | None = None
+        self._format_path_index: dict[str, int] | None = None
         self._prefs_cache: dict[str, Any] | None = None
         self._cc_schema_cache: dict[str, bool] | None = None
         self._annotations_text_cache: dict[int, str] | None = None
@@ -483,6 +484,88 @@ class CalibreDB:
         if os.path.exists(png):
             return png
         return None
+
+    def format_path_index(self) -> dict[str, int]:
+        """Map every catalogued format file path to its book id.
+
+        One ``data ⋈ books`` query; each path is built exactly as
+        :meth:`get_format_path` builds it (library root from the original DB
+        location), with ``normcase(normpath())`` keys so the same file spelled
+        differently (case, redundant separators) collapses to one entry.
+        Cached like the row cache: the database is read-only and the
+        connection short-lived. Bindery's id resolver was the seed consumer;
+        anything reverse-looking-up a file belongs here.
+        """
+        if self._format_path_index is not None:
+            return self._format_path_index
+        root = os.path.dirname(os.path.abspath(self.db_path))
+        idx: dict[str, int] = {}
+        try:
+            rows = self.conn.execute(
+                "SELECT d.book AS book, d.format AS format, d.name AS name, "
+                "b.path AS path FROM data d JOIN books b ON b.id = d.book"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for row in rows:
+            fmt = row["format"]
+            if not fmt:
+                continue
+            p = os.path.join(root, row["path"], row["name"] + "." + fmt.lower())
+            idx[os.path.normcase(os.path.normpath(p))] = row["book"]
+        self._format_path_index = idx
+        return idx
+
+    def find_book_by_path(self, path: str) -> int | None:
+        """Reverse :meth:`format_path_index`: the book id owning this file.
+
+        Accepts relative or differently-cased spellings of the same file
+        (``normcase``/``normpath`` on the lookup side). Returns None when no
+        catalogued format resolves there.
+        """
+        key = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        return self.format_path_index().get(key)
+
+    def get_book_dossier(
+        self, book_id: int, *, include_comments: bool = False
+    ) -> dict[str, Any] | None:
+        """The composed deep fetch frontends hand-assemble today.
+
+        One call returns everything a detail view renders: ``book`` (the
+        standard :meth:`get_book` row), ``cover_path`` (:meth:`get_cover_path`
+        with defaults — the row's ``has_cover`` distinguishes catalogued-but-
+        missing from present), ``formats`` (:meth:`get_formats`),
+        ``custom_columns`` keyed by ``#label`` with ``{name, datatype, value}``
+        (values exactly as the search engine's ``field()`` yields;
+        comments-typed columns stay raw HTML), ``annotations``,
+        ``reading_positions``, ``plugin_data``, and ``conversion_overrides``.
+        ``comments`` (``{html, plain}``, plain via :func:`strip_html`) is added
+        only when ``include_comments`` is set. Returns None for unknown books.
+        """
+        book = self.get_book(book_id)
+        if book is None:
+            return None
+        dossier: dict[str, Any] = {
+            "book": book,
+            "cover_path": self.get_cover_path(book_id),
+            "formats": self.get_formats(book_id),
+            "custom_columns": {},
+            "annotations": self.get_annotations(book_id),
+            "reading_positions": self.get_last_read_positions(book_id),
+            "plugin_data": self.get_plugin_data(book_id),
+            "conversion_overrides": self.get_conversion_profiles(book_id),
+        }
+        for meta in self.get_custom_columns().values():
+            label = "#" + (meta.get("label") or "")
+            dossier["custom_columns"][label] = {
+                "name": meta.get("name", ""),
+                "datatype": meta.get("datatype", ""),
+                "value": self.field(book_id, label),
+            }
+        if include_comments:
+            html = self.get_comments(book_id).get(book_id, "")
+            dossier["comments"] = {"html": html, "plain": strip_html(html)}
+        return dossier
 
     def get_library_uuid(self) -> str | None:
         """The library's identity UUID from the ``library_id`` table.
