@@ -477,14 +477,19 @@ Upstream syncs for this expansion (each repo bumps and ticks its own roadmap):
   byte-identical); `modes/analytics.py` + `modes/stats.py` consume the
   analytics module and existing APIs (rendering only); ISBN family imported in
   `modes/librarything.py` + `scripts/audit_isbns.py`.
-- [ ] *Hermitage 1.7.0* (clean-room; GPL): `insights.py` predicates/analytics
+- [x] *Hermitage 1.7.0* (clean-room; GPL): `insights.py` predicates/analytics
   recompute through the modules (rendered output identical); `database.py`
   drops both `db.conn` reach-ins (`get_comments()` + rows' `identifiers`);
   `genres.py` via `tag_rollup`; `verify.py:33` hardcoded cover.jpg through
   `get_cover_path()`; `codex.py` `_clean_html`/star glyphs adopt cquarry's
   ONLY where a render-parity check proves identical output, else keep local
   and note why. This release also reconciles `__init__.py` 1.5.0 vs patchnotes
-  v1.6.0 drift.
+  v1.6.0 drift. *(Shipped 2026-08-30 (reconciliation landed in its 1.6.1 the
+  same day). Waivers recorded in Hermitage's roadmap: `codex` keeps local
+  under the parity gate; the Insights cover row merges cquarry's split
+  predicates and thereby adopts canonical resolution (png-only covers count
+  as covered); the identifiers row stays local — no upstream predicate.
+  Flatpak pin bumped to this release.)*
 - [x] *Bindery 0.20.0*: `CalibreIdResolver._load` over `format_path_index()`.
   WAIVED deliberately: swapping `audit.py`'s three targeted raw joins for
   whole-library hydration (the joins are cheaper and Bindery wants per-book
