@@ -505,8 +505,11 @@ design); CalibreQuarry's `scripts/db_util.py` connect-ro triplication stays
 (scripts deliberately keep raw connections outside the package contract).
 
 > **Version-sync reminder** (Phase 5 practice, applies to EVERY item above): bump
-> `VERSION` + `__init__.py` + `config.py` + `README.md` + `spec.md` together, log the
 > change in `patchnotes.md`, and mirror any behavior-affecting fix into each synced
 > consumer repo's own patchnotes before ticking its checkbox.
 
-- [2026-08-29] cquarry 1.7.0 WritableCalibreDB threw an AttributeError for `transaction()`. Reverted to raw sqlite3 for phase-3.
+- [ ] **Bug/API Drift (2026-08-29)**: `WritableCalibreDB` is missing the `transaction()` context manager in `cquarry 1.7.0`.
+  - **Context**: During a Phase 3 import, calling `with db.transaction():` (the established pattern) threw an `AttributeError: 'WritableCalibreDB' object has no attribute 'transaction'`.
+  - **Cause**: The 1.7.0 patchnotes introduce a new `batch()` transaction context. It appears `transaction()` was replaced by `batch()`.
+  - **Workaround used**: Bypassed `cquarry.write` entirely and fell back to raw `sqlite3` `BEGIN IMMEDIATE` for the batch.
+  - **Required Fix**: Either restore `transaction()` as an alias to `batch()` in `cquarry.write.WritableCalibreDB` for backwards compatibility, or officially update the downstream `phase-3-import` skill to use `batch()` instead.

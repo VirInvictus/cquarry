@@ -27,9 +27,12 @@
   README's write example shows `batch()`.
 
 ### Internal
-- Test suite 189 → 202: batch atomicity/nesting/fault injection, pubdate
-  round-trips (str/date/datetime/aware-tz/sentinel/no-op/unknown-book), and
-  comments access including absent-table degradation.
+- Test suite 163 → 207 pytest-green runs: 17 new tests (batch
+  atomicity/nesting/fault injection; pubdate round-trips
+  str/date/datetime/aware-tz/sentinel/no-op/unknown-book; comments access
+  including absent-table degradation) plus the parent cases the new fixture
+  subclasses (TestBatchContext, TestSetPubdate, TestCommentsAccess) re-run by
+  inheritance.
 
 ## v1.6.1 (2026-08-28)
 
