@@ -2,14 +2,19 @@
 
 This roadmap outlines the planned evolution of `cquarry` from a read-only metadata extractor to a full-featured Calibre ecosystem bridge, utilizing the structural discoveries documented in `database_report.md`.
 
-> **Status (v1.6.0, 2026-08-26):** Phases 1–5 are implemented and covered by tests.
+> **Status (v1.7.0, 2026-08-28):** Phases 1–5 are implemented and covered by tests.
 > Phase 6 is complete: write-path correctness + dirtied visibility (v1.2.0),
 > read-side batches 1–2 (v1.3.0/v1.4.0), the write-side expansion (v1.5.0), and the
 > v1.6.0 completeness-mining pass (user-category search, row-shape parity, language
-> `item_order`, feeds / annotations-dirtied / tag-browser views, ratings entities)
-> are shipped — every checkbox below is either ticked or explicitly waived/deferred
-> with a reason. What remains is Phase 7 (Carrel data-layer extraction), plus the
-> open conditional items noted inline (`add_book` design, Carrel reading-status toggle).
+> `item_order`, feeds / annotations-dirtied / tag-browser views, ratings entities).
+> Phase 8 shipped in v1.7.0 (set_pubdate, batch() context, comments read surface)
+> with its CalibreQuarry sync (3.23.0: --set-pubdate/--clear-pubdate, TUI pubdate
+> ops, multi-verb batch mode). Phase 9 is DESIGNED AND APPROVED but not started:
+> the full-mine scope agreed on 2026-08-28 is written into the Phase 9 section
+> below, the implementation plan lives in session memory
+> (`~/.claude/projects/-home-bdkl--gitrepos-cquarry/memory/project_phase89_extraction.md`),
+> and the next session should resume there. Phase 7 (Carrel data-layer extraction)
+> remains the follow-on project after Phase 9, with its license/attribution gate.
 
 ## Phase 1: Read-Only Enhancements (Current & Near-Term)
 *Context: Improving our query capabilities using existing read-only mechanics (ref: database_report.md Sections 1-4).*
@@ -311,7 +316,9 @@ individually atomic, but a multi-book, multi-field curation pass is not.*
   guard on `_batch_depth`, so bare calls behave exactly as they did before.)*
 - [x] **Tests**: `set_pubdate` round-trip (str / date / datetime inputs, TEXT
   normalization); batch-context atomicity (fault-inject a failure mid-batch →
-  nothing written). *(v1.7.0: 13 new tests, suite 189 → 202.)*
+  nothing written). *(v1.7.0: 17 new tests — batch/pubdate plus the comments
+  battery; suite runs 163 → 207 green, the total including parent cases the
+  new fixture subclasses re-run.)*
 - [ ] **Skill sync**: the phase-3-import skill in Brandon's library
   (`~/docs/Calibre Library/.claude/skills/`) currently documents the raw-SQL
   pubdate workaround this setter retires, including a gotcha entry explaining
@@ -393,8 +400,113 @@ Non-goals: no network code (the LoC SRU client stays in CalibreQuarry's
 scripts); no export-format rendering (LibraryThing/CSV/AI shapes are frontend);
 no taxonomy-opinionated rules (they stay in the library linter).
 
+### Approved full-mine expansion (design signed off 2026-08-28, not started)
+
+The 2026-08-28 survey of all four consumer repos approved a wider mine than the
+four items above. Everything here was designed section-by-section with Brandon;
+signatures are frozen as written. License rule for the whole phase: CalibreQuarry
+and Bindery are MIT (logic may move freely); Hermitage and Carrel are GPL-3.0,
+so everything taken from them is behavioral (clean-room, rewritten against
+cquarry's caches/row shapes), never a verbatim code move.
+
+- [ ] **helpers — ISBN family** (replaces the two divergent frontend copies in
+  `modes/librarything.py` and `scripts/audit_isbns.py`): `isbn_normalize(raw)
+  -> str` (strip separators, uppercase, keep X); `isbn_check_digit_is_valid(
+  isbn) -> bool` (validates ISBN-10 mod-11 and ISBN-13 EAN); `to_isbn13(raw)
+  -> str | None` (10→13 via 978-prefix + recomputed check digit, valid 13 passes
+  through, else None; NO source check-digit validation, documented, matching the
+  LibraryThing exporter — callers pair it with the validity helper for
+  strictness). CalibreQuarry's exporter maps None back to its current "" output
+  so the CSV stays byte-identical.
+- [ ] **helpers — `tag_rollup(counts: dict[str, int]) -> dict[str, int]`**:
+  leaf/partial dot-path counts in, every node including implied ancestors
+  rolled up (`{"Fic.Fantasy": 3, "Fic.Fantasy.Epic": 2}` → `{"Fic": 5,
+  "Fic.Fantasy": 3, "Fic.Fantasy.Epic": 2}`). Hermitage's `genres.py` and
+  Carrel's `cps/categories.py` independently built this; the tree itself stays
+  `tags_to_tree`.
+- [ ] **db — Bindery's gap**: `format_path_index() -> dict[str, int]` (every
+  catalogued format path → book id, built with one `data ⋈ books` query using
+  exactly `get_format_path`'s construction, keys `normcase(normpath())`,
+  cached) and `find_book_by_path(path) -> int | None`. Bindery's
+  `CalibreIdResolver` rebuilds on this; its `(123)` regex stays as the
+  documented legacy fallback.
+- [ ] **db — `get_book_dossier(book_id, *, include_comments=False) ->
+  dict | None`**: composed deep fetch. Keys: `book` (the standard row),
+  `cover_path` (`get_cover_path` defaults; row's `has_cover` distinguishes
+  catalogued-but-missing), `formats` (`get_formats`), `custom_columns`
+  (`{"#label": {name, datatype, value}}`, values exactly as `field()` yields —
+  comments-typed columns are raw HTML), `annotations`, `reading_positions`,
+  `plugin_data`, `conversion_overrides`, plus `comments` ({html, plain via
+  strip_html}) only when flagged. Returns None for unknown books.
+- [ ] **`cquarry.integrity` module** — pure functions over the cached rows (no
+  SQL of their own; the two cover-file checks ride `get_cover_path` +
+  `get_image_size`): `find_untagged(db)`, `find_unrated(db)`,
+  `find_authorless(db)` (empty or ["Unknown"]), `find_formatless(db)`,
+  `find_coverless(db)` (catalogued flag), `find_missing_cover_files(db)` (flag
+  set, file absent), `find_deprecated_formats(db, formats)` (caller supplies
+  the set; cquarry owns only the subset-of mechanism),
+  `find_low_res_covers(db, min_dimension=500) -> {id: (w, h)}` (missing files
+  excluded — that is find_missing_cover_files' answer), `find_duplicate_books(
+  db) -> {(title-lower, primary-author-lower): [ids]}` (multi-member groups
+  only), `find_series_gaps(db) -> {name: [missing]}` composing
+  `get_all_series()` + `detect_series_gaps()`. All id lists sorted.
+- [ ] **`cquarry.analytics` module** — same shape, skipping anything existing
+  APIs already serve (`get_format_stats`, `get_entities`, `get_tag_counts`):
+  `addition_timeline(db, granularity="month") -> {"YYYY-MM": n}` ("year" also
+  supported, chronological), `author_stats(db) -> [{author, book_count,
+  avg_rating, formats}]` (star-scale averages, unrated excluded, count-desc
+  then name), `rating_distribution(db) -> {stars | "unrated": n}`,
+  `vl_overlap(db, names=None) -> {(wing, ...): [ids]}` (multi-wing combos only;
+  unknown wing raises via `resolve_vl`).
+- [ ] **Docs: `API.md` + README unbusy.** New `API.md` at repo root carries the
+  full per-method reference (moved from README's Public API section) plus every
+  new API above; README keeps hero, features, quick-starts (dossier + batch),
+  install, a one-line-per-module "API at a glance" linking to API.md, the full
+  Search Grammar section, Acknowledgements (calibre-web attribution already
+  covers the GPL-sourcing rule), Support, License. Target ~444 → ~250 lines.
+- [ ] **Tests**: `test_integrity.py`, `test_analytics.py`, plus extensions to
+  test_helpers/test_db; suite should clear 220.
+- [ ] **Skill sync**: phase-3-import's "read EVERY field" step names
+  `get_book_dossier` once shipped. **Floor, not ceiling** — same rule as
+  Phase 8.
+
+Upstream syncs for this expansion (each repo bumps and ticks its own roadmap):
+
+- [ ] *CalibreQuarry 3.24.0*: `show_book` renders over the dossier (+ prints
+  pubdate); `modes/audit.py` predicates become integrity calls (CSV shape
+  byte-identical); `modes/analytics.py` + `modes/stats.py` consume the
+  analytics module and existing APIs (rendering only); ISBN family imported in
+  `modes/librarything.py` + `scripts/audit_isbns.py`.
+- [ ] *Hermitage 1.7.0* (clean-room; GPL): `insights.py` predicates/analytics
+  recompute through the modules (rendered output identical); `database.py`
+  drops both `db.conn` reach-ins (`get_comments()` + rows' `identifiers`);
+  `genres.py` via `tag_rollup`; `verify.py:33` hardcoded cover.jpg through
+  `get_cover_path()`; `codex.py` `_clean_html`/star glyphs adopt cquarry's
+  ONLY where a render-parity check proves identical output, else keep local
+  and note why. This release also reconciles `__init__.py` 1.5.0 vs patchnotes
+  v1.6.0 drift.
+- [ ] *Bindery 0.20.0*: `CalibreIdResolver._load` over `format_path_index()`.
+  WAIVED deliberately: swapping `audit.py`'s three targeted raw joins for
+  whole-library hydration (the joins are cheaper and Bindery wants per-book
+  maps, not row dicts).
+- [ ] *Carrel-calibre-web 0.6.28*: deployment venv
+  (`~/.local/share/carrel/venv`, currently a stale non-editable cquarry 1.1.1
+  copy) reinstalled EDITABLE from this repo per Carrel spec §8.2's documented
+  contract; `cps/library_cache.py`'s own-SQL UUID read becomes
+  `get_library_uuid()` (its "deliberately does NOT go through cquarry" comment
+  was a stale-install artifact, not architecture). Analytics adoption DEFERRED
+  to Phase 7 (the fork is about to be reworked; don't patch it twice).
+
+Waivers/deferrals recorded at design time: no `find_orphan_custom_column_links`
+(schema-probing, deserves its own fixture work — candidate for a later pass);
+no multi-verb CLI grammar beyond what 3.23.0 shipped; no LibraryCache-style
+memoization in cquarry (contradicts the documented short-lived single-threaded
+design); CalibreQuarry's `scripts/db_util.py` connect-ro triplication stays
+(scripts deliberately keep raw connections outside the package contract).
+
 > **Version-sync reminder** (Phase 5 practice, applies to EVERY item above): bump
 > `VERSION` + `__init__.py` + `config.py` + `README.md` + `spec.md` together, log the
 > change in `patchnotes.md`, and mirror any behavior-affecting fix into each synced
 > consumer repo's own patchnotes before ticking its checkbox.
 
+- [2026-08-29] cquarry 1.7.0 WritableCalibreDB threw an AttributeError for `transaction()`. Reverted to raw sqlite3 for phase-3.
