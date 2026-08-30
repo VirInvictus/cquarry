@@ -58,9 +58,11 @@ def author_stats(db: "CalibreDB") -> list[dict[str, Any]]:
     Each entry: ``author`` (primary author via
     :func:`cquarry.helpers.normalize_author_display`'s ``primary_only``
     mode), ``book_count``, ``avg_rating`` (star-scale average over rated
-    books only; ``0.0`` when the author has none), and ``formats`` (sorted
-    distinct format names across the author's books). Authorless books are
-    skipped — they have no author to roll up into.
+    books only; ``0.0`` when the author has none), ``rated_count`` (how many
+    of the author's books carry a rating — renderers need it for
+    "(N rated)" and the average alone cannot give it back), and ``formats``
+    (sorted distinct format names across the author's books). Authorless
+    books are skipped — they have no author to roll up into.
     """
     data: dict[str, dict[str, Any]] = {}
     for b in db.get_all_books():
@@ -83,6 +85,7 @@ def author_stats(db: "CalibreDB") -> list[dict[str, Any]]:
                 "author": author,
                 "book_count": ad["count"],
                 "avg_rating": sum(ratings) / len(ratings) if ratings else 0.0,
+                "rated_count": len(ratings),
                 "formats": sorted(ad["formats"]),
             }
         )

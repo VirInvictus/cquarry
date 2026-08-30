@@ -265,6 +265,6 @@ appear here.
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `addition_timeline(db, granularity="month")` | `dict[str, int]` | Books added per calendar bucket, chronological: `"YYYY-MM"` (or `"YYYY"` with `granularity="year"`). Books without a timestamp are skipped; anything but `month`/`year` raises `ValueError`. |
-| `author_stats(db)` | `list[dict]` | Per primary author: `{author, book_count, avg_rating, formats}` — star-scale average over rated books only (`0.0` when none), sorted count-descending then name; authorless books skipped. |
+| `author_stats(db)` | `list[dict]` | Per primary author: `{author, book_count, avg_rating, rated_count, formats}` — star-scale average over rated books only (`0.0` when none), sorted count-descending then name; authorless books skipped. |
 | `rating_distribution(db)` | `dict[float \| str, int]` | Books per star rating, ascending on the half-step scale, `"unrated"` last. |
 | `vl_overlap(db, names=None)` | `dict[tuple[str, ...], list[int]]` | Books shared by two or more virtual libraries, wing names sorted in each key. `names` restricts the wings (unknown names raise through `resolve_vl`); single-wing books appear nowhere. |

@@ -127,7 +127,7 @@ The mechanical definitions of "incomplete" promoted from CalibreQuarry's fronten
 
 ### 3.8 Analytics derivations (`analytics.py`, cquarry ≥ 1.8)
 
-Derivations promoted from CalibreQuarry's `--analytics` frontend; the frontend keeps formatting, cquarry owns the math. Pure over the cached rows: `addition_timeline(db, granularity="month")` (`"YYYY-MM"` buckets, chronological; `"year"` supported; timestampless books skipped), `author_stats` (per primary author `{author, book_count, avg_rating, formats}` — star-scale averages over rated books only, count-desc then name, authorless books skipped), `rating_distribution` (half-step star floats ascending, `"unrated"` last), and `vl_overlap(db, names=None)` (books in two or more virtual libraries as `{(wing, ...): [ids]}`, unknown names raising through `resolve_vl`).
+Derivations promoted from CalibreQuarry's `--analytics` frontend; the frontend keeps formatting, cquarry owns the math. Pure over the cached rows: `addition_timeline(db, granularity="month")` (`"YYYY-MM"` buckets, chronological; `"year"` supported; timestampless books skipped), `author_stats` (per primary author `{author, book_count, avg_rating, rated_count, formats}` — star-scale averages over rated books only, count-desc then name, authorless books skipped; `rated_count` is the renderer-facing additive key the average alone cannot give back), `rating_distribution` (half-step star floats ascending, `"unrated"` last), and `vl_overlap(db, names=None)` (books in two or more virtual libraries as `{(wing, ...): [ids]}`, unknown names raising through `resolve_vl`).
 
 ## 4. Field location table
 
