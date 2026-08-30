@@ -28,54 +28,54 @@ if TYPE_CHECKING:
     from cquarry.db import CalibreDB
 
 __all__ = [
-    "find_untagged",
-    "find_unrated",
     "find_authorless",
-    "find_formatless",
     "find_coverless",
-    "find_missing_cover_files",
     "find_deprecated_formats",
-    "find_low_res_covers",
     "find_duplicate_books",
+    "find_formatless",
+    "find_low_res_covers",
+    "find_missing_cover_files",
     "find_series_gaps",
+    "find_unrated",
+    "find_untagged",
 ]
 
 
-def _books(db: "CalibreDB") -> list[dict[str, Any]]:
+def _books(db: CalibreDB) -> list[dict[str, Any]]:
     return db.get_all_books()
 
 
-def find_untagged(db: "CalibreDB") -> list[int]:
+def find_untagged(db: CalibreDB) -> list[int]:
     """Books carrying no tags at all."""
     return sorted(b["id"] for b in _books(db) if not b["tags"])
 
 
-def find_unrated(db: "CalibreDB") -> list[int]:
+def find_unrated(db: CalibreDB) -> list[int]:
     """Books with no rating (``None`` and ``0`` both read as unrated)."""
     return sorted(
         b["id"] for b in _books(db) if b["rating"] is None or b["rating"] == 0
     )
 
 
-def find_authorless(db: "CalibreDB") -> list[int]:
+def find_authorless(db: CalibreDB) -> list[int]:
     """Books with no authors, or only the placeholder ``Unknown``."""
     return sorted(
         b["id"] for b in _books(db) if not b["authors"] or b["authors"] == ["Unknown"]
     )
 
 
-def find_formatless(db: "CalibreDB") -> list[int]:
+def find_formatless(db: CalibreDB) -> list[int]:
     """Books with no catalogued format rows (metadata-only entries)."""
     return sorted(b["id"] for b in _books(db) if not b["formats"])
 
 
-def find_coverless(db: "CalibreDB") -> list[int]:
+def find_coverless(db: CalibreDB) -> list[int]:
     """Books whose ``has_cover`` flag is unset (the catalogued answer — the
     file question is :func:`find_missing_cover_files`)."""
     return sorted(b["id"] for b in _books(db) if not b["has_cover"])
 
 
-def find_missing_cover_files(db: "CalibreDB") -> list[int]:
+def find_missing_cover_files(db: CalibreDB) -> list[int]:
     """Books where the flag says yes but no cover file resolves on disk.
 
     Deliberately skips books with an empty ``books.path`` — there is nowhere
@@ -92,7 +92,7 @@ def find_missing_cover_files(db: "CalibreDB") -> list[int]:
 
 
 def find_deprecated_formats(
-    db: "CalibreDB", formats: set[str] | list[str] | tuple[str, ...]
+    db: CalibreDB, formats: set[str] | list[str] | tuple[str, ...]
 ) -> list[int]:
     """Books whose entire format set is inside ``formats``.
 
@@ -112,7 +112,7 @@ def find_deprecated_formats(
 
 
 def find_low_res_covers(
-    db: "CalibreDB", min_dimension: int = 500
+    db: CalibreDB, min_dimension: int = 500
 ) -> dict[int, tuple[int, int]]:
     """``{book_id: (width, height)}`` for covers under ``min_dimension`` px.
 
@@ -138,7 +138,7 @@ def find_low_res_covers(
 
 
 def find_duplicate_books(
-    db: "CalibreDB",
+    db: CalibreDB,
 ) -> dict[tuple[str, str], list[int]]:
     """Groups of books sharing (title, primary author), lowercased.
 
@@ -159,7 +159,7 @@ def find_duplicate_books(
     return {k: sorted(v) for k, v in groups.items() if len(v) > 1}
 
 
-def find_series_gaps(db: "CalibreDB") -> dict[str, list[int]]:
+def find_series_gaps(db: CalibreDB) -> dict[str, list[int]]:
     """``{series_name: [missing_indices]}`` for every gapped series.
 
     Composes :meth:`CalibreDB.get_all_series` with

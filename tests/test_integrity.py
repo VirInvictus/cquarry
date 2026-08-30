@@ -20,8 +20,8 @@ from cquarry.integrity import (
     find_low_res_covers,
     find_missing_cover_files,
     find_series_gaps,
-    find_untagged,
     find_unrated,
+    find_untagged,
 )
 
 

@@ -30,7 +30,7 @@ __all__ = [
 ]
 
 
-def addition_timeline(db: "CalibreDB", granularity: str = "month") -> dict[str, int]:
+def addition_timeline(db: CalibreDB, granularity: str = "month") -> dict[str, int]:
     """Books added per calendar bucket, chronological.
 
     ``granularity="month"`` (the default) keys ``"YYYY-MM"``; ``"year"``
@@ -52,7 +52,7 @@ def addition_timeline(db: "CalibreDB", granularity: str = "month") -> dict[str, 
     return dict(sorted(out.items()))
 
 
-def author_stats(db: "CalibreDB") -> list[dict[str, Any]]:
+def author_stats(db: CalibreDB) -> list[dict[str, Any]]:
     """Per-primary-author rollups, count-descending then name.
 
     Each entry: ``author`` (primary author via
@@ -92,7 +92,7 @@ def author_stats(db: "CalibreDB") -> list[dict[str, Any]]:
     return out
 
 
-def rating_distribution(db: "CalibreDB") -> dict[float | str, int]:
+def rating_distribution(db: CalibreDB) -> dict[float | str, int]:
     """How many books sit at each star rating, ascending, ``"unrated"`` last.
 
     Keys are star floats on the half-step scale Calibre's 0-10 integers map
@@ -112,7 +112,7 @@ def rating_distribution(db: "CalibreDB") -> dict[float | str, int]:
 
 
 def vl_overlap(
-    db: "CalibreDB", names: list[str] | tuple[str, ...] | None = None
+    db: CalibreDB, names: list[str] | tuple[str, ...] | None = None
 ) -> dict[tuple[str, ...], list[int]]:
     """Books shared by two or more virtual libraries (wings).
 
