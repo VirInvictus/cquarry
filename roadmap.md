@@ -485,10 +485,13 @@ Upstream syncs for this expansion (each repo bumps and ticks its own roadmap):
   ONLY where a render-parity check proves identical output, else keep local
   and note why. This release also reconciles `__init__.py` 1.5.0 vs patchnotes
   v1.6.0 drift.
-- [ ] *Bindery 0.20.0*: `CalibreIdResolver._load` over `format_path_index()`.
+- [x] *Bindery 0.20.0*: `CalibreIdResolver._load` over `format_path_index()`.
   WAIVED deliberately: swapping `audit.py`'s three targeted raw joins for
   whole-library hydration (the joins are cheaper and Bindery wants per-book
-  maps, not row dicts).
+  maps, not row dicts). *(Shipped 2026-08-30; keys keep the resolver's
+  historical resolve().lower() normalization. The uv.lock bumps to current
+  main once cquarry's 1.8.0 commits are pushed — noted in Bindery's
+  patchnotes.)*
 - [ ] *Carrel-calibre-web 0.6.28*: deployment venv
   (`~/.local/share/carrel/venv`, currently a stale non-editable cquarry 1.1.1
   copy) reinstalled EDITABLE from this repo per Carrel spec §8.2's documented
