@@ -319,7 +319,7 @@ individually atomic, but a multi-book, multi-field curation pass is not.*
   nothing written). *(v1.7.0: 17 new tests — batch/pubdate plus the comments
   battery; suite runs 163 → 207 green, the total including parent cases the
   new fixture subclasses re-run.)*
-- [ ] **Skill sync**: the phase-3-import skill in Brandon's library
+- [x] **Skill sync**: the phase-3-import skill in Brandon's library
   (`~/docs/Calibre Library/.claude/skills/`) currently documents the raw-SQL
   pubdate workaround this setter retires, including a gotcha entry explaining
   the TEXT column convention — update its transaction guidance to use
@@ -327,6 +327,9 @@ individually atomic, but a multi-book, multi-field curation pass is not.*
   not a ceiling**: any behavior-affecting discovery made while building —
   formats, defaults, failure modes the tests surface — gets documented in the
   affected skills in the same release, even when this phase didn't predict it.
+  *(Done in v1.7.1's pass, 2026-08-30: step 6 teaches `batch()`, the
+  setter/verb surface is current, and both pubdate gotchas are
+  setter-first.)*
 - [x] **Document (or opt-in hydrate) `comments` on `get_book()` rows**: rows
   deliberately omit comment text (it can be huge), but nothing documents that —
   the 2026-08-27 batch read descriptions via raw SQL before noticing. Either
@@ -365,10 +368,13 @@ implementation today is the mine site.*
   Phase 8's comments-omission item (`include_comments`). The frontend keeps
   rendering; cquarry owns the assembly.
   - Upstream sync:
-    - [ ] *CalibreQuarry*: `show_book` becomes a renderer over the dossier dict
-      (CalibreQuarry roadmap Phase 15).
-    - [ ] *Skill sync*: phase-3-import's "read EVERY field" step names the
+    - [x] *CalibreQuarry*: `show_book` becomes a renderer over the dossier dict
+      (CalibreQuarry roadmap Phase 15). *(Shipped in CalibreQuarry 3.24.0;
+      --audit/--analytics/--stats also consume the integrity and analytics
+      modules, verified byte-identical on the real library.)*
+    - [x] *Skill sync*: phase-3-import's "read EVERY field" step names the
       dossier call once shipped. **Floor, not ceiling** — same rule as Phase 8.
+      *(Done 2026-08-30: the step names `get_book_dossier` + `--book`.)*
 - [x] **Library integrity predicates.** *(cquarry side shipped in v1.8.0 as `cquarry.integrity` with the ten finders; rules match the frontend's exactly so the CSV is byte-identical.)* `modes/audit.py` implements untagged,
   unrated, coverless, and series-gap checks as frontend SQL, and
   `scripts/validate_metadata.py` reimplements overlapping rules — while
@@ -466,13 +472,13 @@ cquarry's caches/row shapes), never a verbatim code move.
   covers the GPL-sourcing rule), Support, License. Target ~444 → ~250 lines.
 - [x] **Tests**: `test_integrity.py`, `test_analytics.py`, plus extensions to
   test_helpers/test_db; suite should clear 220. *(v1.8.0: 209 → 241 green.)*
-- [ ] **Skill sync**: phase-3-import's "read EVERY field" step names
+- [x] **Skill sync**: phase-3-import's "read EVERY field" step names
   `get_book_dossier` once shipped. **Floor, not ceiling** — same rule as
-  Phase 8.
+  Phase 8. *(Done 2026-08-30.)*
 
 Upstream syncs for this expansion (each repo bumps and ticks its own roadmap):
 
-- [ ] *CalibreQuarry 3.24.0*: `show_book` renders over the dossier (+ prints
+- [x] *CalibreQuarry 3.24.0*: `show_book` renders over the dossier (+ prints
   pubdate); `modes/audit.py` predicates become integrity calls (CSV shape
   byte-identical); `modes/analytics.py` + `modes/stats.py` consume the
   analytics module and existing APIs (rendering only); ISBN family imported in
