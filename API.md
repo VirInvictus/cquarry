@@ -32,6 +32,8 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_book(book_id, include_comments=False)` | `dict[str, Any] \| None` | Fetch one hydrated record (same shape as a `get_all_books()` row, including `size`, `uuid`, and `identifiers`) without scanning the library. |
 | `get_comments(book_id=None)` | `dict[int, str]` | Raw comments HTML keyed by book id. Pass `book_id` to scope the read, otherwise returns all catalogued comments. |
 | `get_format_stats()` | `dict[str, dict[str, int]]` | Per-format aggregates: `{fmt: {"count": int, "bytes": int}}`. `count` is the number of books with the format, `bytes` is the total uncompressed size. |
+| `get_comments(book_id=None)` | `dict[int, str]` | Raw comments HTML keyed by book id. Pass `book_id` to scope the read, otherwise returns all catalogued comments. |
+| `get_format_stats()` | `dict[str, dict[str, int]]` | Per-format aggregates: `{fmt: {"count": int, "bytes": int}}`. `count` is the number of books with the format, `bytes` is the total uncompressed size. |
 | `search_books(query)` | `list[dict[str, Any]]` | Evaluate a search expression and return the hydrated matching books. |
 | `get_format_path(book_id, fmt, verify=True)` | `str` | Absolute filesystem path for a book's format file, built from the original DB location. Raises `ValueError` for unknown book/format, `FileNotFoundError` when `verify` is set and the file is missing. |
 | `get_formats(book_id)` | `dict[str, dict[str, Any]]` | Per-format detail: `{fmt: {path, size_bytes, name}}` (path unverified; size from the catalogued uncompressed size). `{}` for unknown books. |
@@ -41,13 +43,13 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_preference(key, default=None)` | `Any` | Typed read of any Calibre preference from the `preferences` table (JSON decoded where it parses). |
 | `get_field_metadata()` | `dict[str, Any]` | The rich `field_metadata` preference: per-custom-column GUI metadata keyed by label. |
 | `get_grouped_search_terms()` | `dict[str, list[str]]` | Grouped search terms driving `GroupName:query` expansion in the search engine. |
-| `get_user_categories()` | `dict[str, list[dict]]` | User-defined tag-browser categories (name -> member descriptors). |
+| `get_user_categories()` | `dict[str, list[dict[str, Any]]]` | User-defined tag-browser categories (name -> member descriptors). |
 | `get_tag_browser_state()` | `dict[str, Any]` | `{"order": [...], "hidden": [...]}` from the `tag_browser_*` preferences; mirror Calibre's browse-sidebar layout. |
 | `get_identifiers(book_id)` | `dict[str, str]` | All identifiers for a book (e.g. `isbn`, `amazon`, `lcc`), keyed by type. |
 | `get_all_tags()` | `list[str]` | Every distinct tag name, sorted alphabetically. |
 | `get_tag_counts()` | `list[tuple[str, int]]` | `(tag_name, book_count)` pairs, sorted by tag name. |
 | `get_all_series()` | `list[dict[str, Any]]` | Per-series rollups: `name`, `book_count`, `indices` (comma-separated), `max_index`, `titles` (comma-separated, sorted by index). |
-| `get_custom_columns()` | `dict[str, dict[str, Any]]` | Metadata for all user-defined custom columns, keyed by display name. Each value contains `id`, `label`, `name`, `datatype`, and `is_multiple`. |
+| `get_custom_columns()` | `dict[str, dict[str, Any]]` | Metadata for all user-defined custom columns, keyed by display name. Each value contains `id`, `label`, `name`, `datatype`, `is_multiple`, `editable`, `normalized`, and `display` (a decoded JSON config dict). |
 | `load_custom_column(col_name)` | `dict[int, Any]` | Values for a specific custom column (by display name), returned as `{book_id: value}`. Normalized columns (text, enumeration, series) are read via their link table; direct columns (int, float, bool, datetime, comments) are read from the value table. Multi-valued columns return comma-separated strings. Raises `ValueError` if the column does not exist. |
 | `get_virtual_libraries()` | `dict[str, str]` | Virtual library names mapped to their Calibre search expressions, read from the `preferences` table. Cached after the first call. |
 | `get_saved_searches()` | `dict[str, str]` | Saved-search names mapped to their expressions (the source for `search:"Name"` interpolation). |
@@ -74,7 +76,6 @@ All eight return `[]`/`{}` on databases whose schema predates the tables.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `search(query)` | `set[int]` | Parse and evaluate a Calibre search expression, returning matching book IDs. An empty query returns all IDs. Raises `ParseException` for unknown virtual libraries or saved searches. |
-| `search_books(query)` | `list[dict[str, Any]]` | `search()` + hydration: the matching books as full records. |
 | `resolve_vl(vl_name)` | `set[int]` | Resolve a virtual library by name to its set of book IDs. Case-insensitive; raises `ValueError` if the name is not found. |
 | `resolve_saved_search(name)` | `set[int]` | Resolve a saved-search name to its set of book IDs. Case-insensitive; raises `ValueError` if the name is not found. |
 
@@ -106,6 +107,8 @@ Any object implementing these methods can serve as a search backend:
 | `field(book_id, location)` | `-> Any` | Return a book's value for a canonical location. See datatype contract below. |
 | `vl_expression(name)` | `-> str \| None` | Return a virtual library's search expression, or `None` if unknown. |
 | `saved_search(name)` | `-> str \| None` | Return a saved search's expression, or `None` if unknown. |
+| `grouped_search_terms()` | `-> dict[str, list[str]]` | Return grouped search terms. |
+| `user_categories()` | `-> dict[str, list]` | Return user categories for `@Name` searches. |
 | `custom_locations()` | `-> dict[str, str]` | Return `{location_token: datatype}` for custom columns (e.g. `{"#read": "bool"}`). |
 
 **`field()` return contract by datatype:**
@@ -146,6 +149,7 @@ Utility functions used across the ecosystem. All are importable from `cquarry.he
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `find_db(explicit=None)` | `-> str` | Locate `metadata.db` through a resolution chain: explicit argument, saved config (`~/.config/cquarry/config.json`), default paths (`./metadata.db`, `~/Calibre Library/metadata.db`, `~/calibre/metadata.db`), then an interactive TTY prompt. Raises `FileNotFoundError` if nothing is found. |
+| `title_sort(title)` | `-> str` | Generate Calibre's title sort key by moving leading articles ('The ', 'A ', 'An ') to the end of the string. |
 | `db_uri_ro(path)` | `-> str` | Build a percent-encoded read-only SQLite `file:` URI. Handles paths containing `?` or `#` that would otherwise be parsed as URI syntax. |
 
 #### Rating and display
@@ -160,7 +164,7 @@ Utility functions used across the ecosystem. All are importable from `cquarry.he
 | `isbn_normalize(raw)` | `-> str` | Strip separators, uppercase, keep a trailing `X`. No validity judgement. |
 | `isbn_check_digit_is_valid(isbn)` | `-> bool` | Validate an ISBN-10 (mod 11) or ISBN-13 (EAN) check digit; wrong lengths are invalid, not errors. |
 | `to_isbn13(raw)` | `-> str \| None` | ISBN-10 → 13 via the 978 prefix with a recomputed check digit; a 13-digit input passes through; anything else `None`. Deliberately no source check-digit validation (the LibraryThing exporter's contract); pair with `isbn_check_digit_is_valid` for strictness. |
-| `normalize_author_display(authors, primary_only=False)` | `-> str` | Format a comma-separated author string for display. With `primary_only`, returns only the first author. Returns `"Unknown Author"` for empty input. |
+| `normalize_author_display(authors, primary_only=False)` | `-> str` | Format an author string (comma-separated or `list[str]`) for display. With `primary_only`, returns only the first author. Returns `"Unknown Author"` for empty input. |
 | `author_sort_key(author_sort, primary_only=False)` | `-> str` | Generate a lowercase sort key from `author_sort`. With `primary_only`, splits on `&` and uses the first segment. |
 
 #### Series analysis
@@ -208,26 +212,30 @@ print(cquarry.__version__)  # "1.8.0"
 
 ### Writes (`cquarry.write`); opt-in
 
-| Member | Description |
-|--------|-------------|
-| `WritableCalibreDB(db_path)` | Read/write handle. Registers Calibre's trigger dependencies (`title_sort()`, `uuid4()`, `PYNOCASE`) before any statement; context-manager supported. |
-| `register_udfs(conn)` | Register the trigger-required SQL functions/collations on any read-write connection. |
-| `batch()` | Defer commits across a multi-book, multi-field pass. Explicit context manager that batches writes into one transaction. |
-| `transaction()` | Alias for `batch()`, kept for backwards compatibility. |
-| `update_title(book_id, new_title)` | Rename with refreshed sort key and `last_modified`. |
-| `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` | Idempotent tag mutation following Calibre's link-table sequence; returns whether state changed. |
-| `set_identifier(book_id, type, val)` / `set_identifiers(book_id, pairs)` | EAV upserts honoring `UNIQUE(book, type)`; `None` deletes. |
-| `set_authors(book_id, names)` | Replace the author list; recomputes `books.author_sort` from per-author sort keys (" & "-joined); prunes orphans. |
-| `set_series(book_id, name \| None, index=None)` | Assign/clear series + `series_index` (defaults 1.0 fresh, preserves on reassign). |
-| `set_publisher(book_id, name \| None)` | Replace/clear publisher; case-insensitive match; orphans pruned. |
-| `set_rating(book_id, stars \| None)` | 0–5 stars stored as ×2; UNIQUE(rating) rows deduplicated via find-or-create. |
-| `set_languages(book_id, codes \| None)` | Replace languages; English names canonicalized to ISO 639-2 via the search engine's map. |
-| `set_comments(book_id, text \| None)` | 1:1 upsert/clear of the comments HTML row. |
-| `set_pubdate(book_id, value)` | Publication-date setter accepting `str` / `date` / `datetime` / `None` (sentinel); stored as Calibre TEXT in UTC. |
-| `set_custom_column(book_id, label, value)` | Generic custom-column writer: storage layout auto-detected (link-table vs direct), enumerations validated against `display.enum_values`, tristate bools accepted, non-editable/composite columns raise. |
-| `add_format(book_id, fmt, name, size)` / `remove_format(book_id, fmt)` | Register/drop `data` rows (the file itself is the caller's responsibility). |
-| `set_has_cover(book_id, has_cover)` | Toggle the catalogued flag. |
-| `remove_book(book_id)` | Full book removal: custom columns (both patterns) + dirtied queues cleaned, cascade trigger fires, orphaned entities pruned. Irreversible. |
+| Member | Returns | Description |
+|--------|---------|-------------|
+| `WritableCalibreDB(db_path)` | `Handle` | Read/write handle. Registers Calibre's trigger dependencies (`title_sort()`, `uuid4()`, `PYNOCASE`) before any statement; context-manager supported. |
+| `close()` | `None` | Close the database connection and context. |
+| `register_udfs(conn)` | `None` | Register the trigger-required SQL functions/collations on any read-write connection. |
+| `uuid4([_arg])` | `str` | SQL-callable UUID generator matching Calibre's `uuid4()` UDF. |
+| `title_sort(title)` | `str` | Re-exported from `cquarry.helpers`. |
+| `update_title(book_id, new_title)` | `None` | Rename with refreshed sort key and `last_modified`. |
+| `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` | `bool` | Idempotent tag mutation following Calibre's link-table sequence; returns whether state changed. |
+| `set_identifier(book_id, id_type, val)` | `bool` | EAV upsert honoring `UNIQUE(book, type)`; `None` deletes. Returns `True` if state changed. |
+| `set_identifiers(book_id, pairs)` | `int` | Batch upsert identifiers. Returns count of changed entries. |
+| `set_authors(book_id, names)` | `bool` | Replace the author list; recomputes `books.author_sort` from per-author sort keys (" & "-joined); prunes orphans. |
+| `set_series(book_id, name, index=None)` | `bool` | Assign/clear series + `series_index` (defaults 1.0 fresh, preserves on reassign). |
+| `set_publisher(book_id, name)` | `bool` | Replace/clear publisher; case-insensitive match; orphans pruned. |
+| `set_rating(book_id, stars)` | `bool` | 0-5 stars stored as x2; UNIQUE(rating) rows deduplicated via find-or-create. |
+| `set_languages(book_id, codes)` | `bool` | Replace languages (supports `list[str]` or comma-separated `str`); English names canonicalized to ISO 639-2 via the search engine's map. |
+| `set_comments(book_id, text)` | `bool` | 1:1 upsert/clear of the comments HTML row. |
+| `set_pubdate(book_id, value)` | `bool` | Publication-date setter accepting `str` / `date` / `datetime` / `None` (sentinel); stored as Calibre TEXT in UTC. |
+| `set_custom_column(book_id, label, value)` | `bool` | Generic custom-column writer: storage layout auto-detected (link-table vs direct), enumerations validated against `display.enum_values`, tristate bools accepted, non-editable/composite columns raise. |
+| `add_format(book_id, fmt, name, size)` / `remove_format(book_id, fmt)` | `bool` | Register/drop `data` rows (the file itself is the caller's responsibility). |
+| `set_has_cover(book_id, has_cover)` | `bool` | Toggle the catalogued flag. |
+| `remove_book(book_id)` | `None` | Full book removal: custom columns (both patterns) + dirtied queues cleaned, cascade trigger fires, orphaned entities pruned. Irreversible. |
+| `batch()` | `ContextManager` | Defer commits across a multi-book, multi-field pass. Explicit context manager that batches writes into one transaction. |
+| `transaction()` | `ContextManager` | Alias for `batch()`, kept for backwards compatibility. |
 
 Every state-changing mutation also inserts the book id into `metadata_dirtied` (`INSERT OR IGNORE`; the table's `UNIQUE(book)` keeps it one row per book), which is what tells Calibre to regenerate that book's sidecar `.opf` and re-push metadata to wireless readers on its next startup. No-op mutations queue nothing, and databases predating the table keep working (the insert is guarded by a cached existence check).
 
@@ -235,7 +243,7 @@ Every state-changing mutation also inserts the book id into `metadata_dirtied` (
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `get_book_dossier(book_id, *, include_comments=False)` | `dict \| None` | The composed deep fetch detail views hand-assembled before this existed: `book` (standard row), `cover_path` (`get_cover_path()` defaults; the row's `has_cover` distinguishes catalogued-but-missing), `formats`, `custom_columns` keyed `#label` as `{name, datatype, value}` (values exactly as `field()` yields; comments-typed columns stay raw HTML), `annotations`, `reading_positions`, `plugin_data`, `conversion_overrides`, and `comments` (`{html, plain}`) only when flagged. `None` for unknown books. |
+| `get_book_dossier(book_id, *, include_comments=False)` | `dict[str, Any] \| None` | The composed deep fetch detail views hand-assembled before this existed: `book` (standard row), `cover_path` (`get_cover_path()` defaults; the row's `has_cover` distinguishes catalogued-but-missing), `formats`, `custom_columns` keyed `#label` as `{name, datatype, value}` (values exactly as `field()` yields; comments-typed columns stay raw HTML), `annotations`, `reading_positions`, `plugin_data`, `conversion_overrides`, and `comments` (`{html, plain}`) only when flagged. `None` for unknown books. |
 | `format_path_index()` | `dict[str, int]` | Every catalogued format file path → book id, one `data ⋈ books` query, paths built exactly as `get_format_path()` builds them, `normcase(normpath())` keys, cached. |
 | `find_book_by_path(path)` | `int \| None` | Reverse the index: the book owning this file, tolerant of relative spellings and redundant separators. `None` when nothing catalogued resolves there. |
 
@@ -269,7 +277,7 @@ appear here.
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `addition_timeline(db, granularity="month")` | `dict[str, int]` | Books added per calendar bucket, chronological: `"YYYY-MM"` (or `"YYYY"` with `granularity="year"`). Books without a timestamp are skipped; anything but `month`/`year` raises `ValueError`. |
-| `author_stats(db)` | `list[dict]` | Per primary author: `{author, book_count, avg_rating, rated_count, formats}`; star-scale average over rated books only (`0.0` when none), sorted count-descending then name; authorless books skipped. |
+| `author_stats(db)` | `list[dict[str, Any]]` | Per primary author: `{author, book_count, avg_rating, rated_count, formats}`; star-scale average over rated books only (`0.0` when none), sorted count-descending then name; authorless books skipped. |
 | `rating_distribution(db)` | `dict[float \| str, int]` | Books per star rating, ascending on the half-step scale, `"unrated"` last. |
 | `vl_overlap(db, names=None)` | `dict[tuple[str, ...], list[int]]` | Books shared by two or more virtual libraries, wing names sorted in each key. `names` restricts the wings (unknown names raise through `resolve_vl`); single-wing books appear nowhere. |
 

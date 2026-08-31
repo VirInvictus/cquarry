@@ -52,8 +52,7 @@ with CalibreDB("~/Calibre Library/metadata.db") as db:
     wordcounts = db.get_plugin_data(name="wordcount")
 ```
 
-The composed deep fetch (what detail views used to hand-assemble from ten
-read calls):
+The composed deep fetch combines metadata, formats, custom columns, and annotations:
 
 ```python
     dossier = db.get_book_dossier(42, include_comments=True)
@@ -93,11 +92,11 @@ The full per-method reference lives in [API.md](API.md). One line per module:
 
 | Module | What it is |
 |--------|------------|
-| `cquarry.db.CalibreDB` | The read-only database layer: hydrated rows, single-entity fetches, format/cover path resolution, custom columns, preferences, annotations and progress extractors, VL/saved-search resolution, and the composed `get_book_dossier()` deep fetch. |
+| `cquarry.db` | The read-only database layer (`CalibreDB`): hydrated rows, single-entity fetches, format/cover path resolution, custom columns, preferences, annotations and progress extractors, VL/saved-search resolution, and the composed `get_book_dossier()` deep fetch. |
 | `cquarry.search` | The lexer/parser/evaluator porting Calibre's search grammar; usable standalone behind the `MetadataProvider` protocol. |
 | `cquarry.helpers` | Domain utilities: rating conversion, comment sanitization, author display, series gaps, image dimension sniffing, the ISBN family (`isbn_normalize`, `isbn_check_digit_is_valid`, `to_isbn13`), and `tag_rollup`. |
 | `cquarry.integrity` | The shared library-integrity predicates: untagged, unrated, authorless, formatless, coverless, missing cover files, deprecated formats, low-res covers, duplicates, series gaps. |
-| `cquarry.analytics` | Shared derivations: addition timeline, per-author stats, rating distribution, wing overlap. |
+| `cquarry.analytics` | Shared derivations: addition timeline, per-author stats, rating distribution, virtual library (wing) overlap. |
 | `cquarry.write` | The opt-in mutation path (`WritableCalibreDB`): trigger-safe setters, `batch()` transactions, `remove_book`. Every mutation queues OPF resync. |
 | `cquarry.config` | Saved database-path configuration (`~/.config/cquarry/config.json`). |
 
@@ -110,7 +109,7 @@ python -m pytest tests/ -v        # verbose
 
 Run with `PYTHONPATH=src` to exercise this checkout rather than any installed copy.
 
-Four test modules: `test_db.py` (CalibreDB against fixture databases), `test_helpers.py` (utility functions), `test_search.py` (parser, matcher, and integration tests), `test_write.py` (opt-in write module with trigger-hazard fixtures).
+Six test modules: `test_db.py` (CalibreDB against fixture databases), `test_helpers.py` (utility functions), `test_search.py` (parser, matcher, and integration tests), `test_write.py` (opt-in write module with trigger-hazard fixtures), `test_integrity.py` (library integrity predicates), and `test_analytics.py` (analytics derivations).
 
 See [spec.md](spec.md) for the full contract and [roadmap.md](roadmap.md) for planned work.
 
@@ -123,7 +122,7 @@ calibre-web's original authors deserve the credit for the web experience that fo
 
 ## Support
 
-If cquarry's useful to you and you'd like to chip in:
+If cquarry is useful to you and you'd like to chip in:
 
 - liberapay · [liberapay.com/bdkl](https://liberapay.com/bdkl/)
 - bitcoin

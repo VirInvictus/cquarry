@@ -764,7 +764,7 @@ class CalibreDB:
                 f"GROUP BY e.{pk} ORDER BY {order_expr} COLLATE NOCASE"
             ).fetchall()
         except sqlite3.OperationalError:
-            return []
+            return {}
         return [dict(row) for row in rows]
 
     def load_custom_column(self, col_name: str) -> dict[int, Any]:
@@ -922,7 +922,7 @@ class CalibreDB:
         try:
             cur.execute(sql, params)
         except sqlite3.OperationalError:
-            return []
+            return {}
         out: list[dict[str, Any]] = []
         for row in cur.fetchall():
             rec = dict(row)
@@ -957,7 +957,7 @@ class CalibreDB:
         try:
             cur.execute(sql, params)
         except sqlite3.OperationalError:
-            return []
+            return {}
         return [dict(row) for row in cur.fetchall()]
 
     def get_plugin_data(
@@ -984,7 +984,7 @@ class CalibreDB:
         try:
             cur.execute(sql, tuple(params))
         except sqlite3.OperationalError:
-            return []
+            return {}
         return [dict(row) for row in cur.fetchall()]
 
     def get_conversion_profiles(
@@ -1007,7 +1007,7 @@ class CalibreDB:
         try:
             cur.execute(sql, params)
         except sqlite3.OperationalError:
-            return []
+            return {}
         out: list[dict[str, Any]] = []
         for row in cur.fetchall():
             rec = dict(row)
@@ -1030,7 +1030,7 @@ class CalibreDB:
         try:
             cur.execute("SELECT DISTINCT book FROM metadata_dirtied ORDER BY book")
         except sqlite3.OperationalError:
-            return []
+            return {}
         return [row["book"] for row in cur.fetchall()]
 
     def get_annotations_dirtied_books(self) -> list[int]:
@@ -1045,7 +1045,7 @@ class CalibreDB:
         try:
             cur.execute("SELECT DISTINCT book FROM annotations_dirtied ORDER BY book")
         except sqlite3.OperationalError:
-            return []
+            return {}
         return [row["book"] for row in cur.fetchall()]
 
     def get_feeds(self) -> list[dict[str, Any]]:
@@ -1061,7 +1061,7 @@ class CalibreDB:
             )
             return [dict(row) for row in cur.fetchall()]
         except sqlite3.OperationalError:
-            return []
+            return {}
 
     def get_tag_browser_counts(self) -> dict[str, list[dict[str, Any]]]:
         """Calibre's own tag-browser rollups from the ``tag_browser_*`` views.
@@ -1093,7 +1093,7 @@ class CalibreDB:
                 )
             ]
         except sqlite3.OperationalError:
-            return []
+            return {}
         label_by_id: dict[int, str] = {}
         with contextlib.suppress(Exception):
             label_by_id = {
