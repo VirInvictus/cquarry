@@ -24,6 +24,12 @@ with CalibreDB("/path/to/metadata.db") as db:
     ...  # db.close() called automatically on exit
 ```
 
+
+#### Properties
+
+- `db.db_path` (`str`): The normalized absolute path to `metadata.db`.
+- `db.conn` (`sqlite3.Connection`): The active SQLite connection object.
+
 #### Core queries
 
 | Method | Returns | Description |
@@ -32,8 +38,13 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_book(book_id, include_comments=False)` | `dict[str, Any] \| None` | Fetch one hydrated record (same shape as a `get_all_books()` row, including `size`, `uuid`, and `identifiers`) without scanning the library. |
 | `get_comments(book_id=None)` | `dict[int, str]` | Raw comments HTML keyed by book id. Pass `book_id` to scope the read, otherwise returns all catalogued comments. |
 | `get_format_stats()` | `dict[str, dict[str, int]]` | Per-format aggregates: `{fmt: {"count": int, "bytes": int}}`. `count` is the number of books with the format, `bytes` is the total uncompressed size. |
-| `get_comments(book_id=None)` | `dict[int, str]` | Raw comments HTML keyed by book id. Pass `book_id` to scope the read, otherwise returns all catalogued comments. |
-| `get_format_stats()` | `dict[str, dict[str, int]]` | Per-format aggregates: `{fmt: {"count": int, "bytes": int}}`. `count` is the number of books with the format, `bytes` is the total uncompressed size. |
+| `field(book_id, location)` | `Any` | Return a book's value for a canonical location. |
+| `all_ids()` | `set[int]` | Return the full set of all book IDs in the library. |
+| `vl_expression(name)` | `str \| None` | Case-insensitive lookup of a virtual library search expression. |
+| `saved_search(name)` | `str \| None` | Case-insensitive lookup of a saved search expression. |
+| `custom_locations()` | `dict[str, str]` | Return `{location_token: datatype}` for all user custom columns. |
+| `grouped_search_terms()` | `dict[str, list[str]]` | Return grouped search terms. |
+| `user_categories()` | `dict[str, list]` | Return user categories for `@Name` searches. |
 | `search_books(query)` | `list[dict[str, Any]]` | Evaluate a search expression and return the hydrated matching books. |
 | `get_format_path(book_id, fmt, verify=True)` | `str` | Absolute filesystem path for a book's format file, built from the original DB location. Raises `ValueError` for unknown book/format, `FileNotFoundError` when `verify` is set and the file is missing. |
 | `get_formats(book_id)` | `dict[str, dict[str, Any]]` | Per-format detail: `{fmt: {path, size_bytes, name}}` (path unverified; size from the catalogued uncompressed size). `{}` for unknown books. |
@@ -103,13 +114,13 @@ Any object implementing these methods can serve as a search backend:
 
 | Method | Signature | Contract |
 |--------|-----------|----------|
-| `all_ids()` | `-> set[int]` | Return every book ID in the collection. |
-| `field(book_id, location)` | `-> Any` | Return a book's value for a canonical location. See datatype contract below. |
-| `vl_expression(name)` | `-> str \| None` | Return a virtual library's search expression, or `None` if unknown. |
-| `saved_search(name)` | `-> str \| None` | Return a saved search's expression, or `None` if unknown. |
-| `grouped_search_terms()` | `-> dict[str, list[str]]` | Return grouped search terms. |
-| `user_categories()` | `-> dict[str, list]` | Return user categories for `@Name` searches. |
-| `custom_locations()` | `-> dict[str, str]` | Return `{location_token: datatype}` for custom columns (e.g. `{"#read": "bool"}`). |
+| `all_ids()` | `set[int]` | Return every book ID in the collection. |
+| `field(book_id, location)` | `Any` | Return a book's value for a canonical location. See datatype contract below. |
+| `vl_expression(name)` | `str \| None` | Return a virtual library's search expression, or `None` if unknown. |
+| `saved_search(name)` | `str \| None` | Return a saved search's expression, or `None` if unknown. |
+| `grouped_search_terms()` | `dict[str, list[str]]` | Return grouped search terms. |
+| `user_categories()` | `dict[str, list]` | Return user categories for `@Name` searches. |
+| `custom_locations()` | `dict[str, str]` | Return `{location_token: datatype}` for custom columns (e.g. `{"#read": "bool"}`). |
 
 **`field()` return contract by datatype:**
 
@@ -146,61 +157,71 @@ Utility functions used across the ecosystem. All are importable from `cquarry.he
 
 #### Database discovery
 
-| Function | Signature | Description |
+| Function | Returns | Description |
 |----------|-----------|-------------|
-| `find_db(explicit=None)` | `-> str` | Locate `metadata.db` through a resolution chain: explicit argument, saved config (`~/.config/cquarry/config.json`), default paths (`./metadata.db`, `~/Calibre Library/metadata.db`, `~/calibre/metadata.db`), then an interactive TTY prompt. Raises `FileNotFoundError` if nothing is found. |
-| `title_sort(title)` | `-> str` | Generate Calibre's title sort key by moving leading articles ('The ', 'A ', 'An ') to the end of the string. |
-| `db_uri_ro(path)` | `-> str` | Build a percent-encoded read-only SQLite `file:` URI. Handles paths containing `?` or `#` that would otherwise be parsed as URI syntax. |
+| `find_db(explicit=None)` | `str` | Locate `metadata.db` through a resolution chain: explicit argument, saved config (`~/.config/cquarry/config.json`), default paths (`./metadata.db`, `~/Calibre Library/metadata.db`, `~/calibre/metadata.db`), then an interactive TTY prompt. Raises `FileNotFoundError` if nothing is found. |
+| `title_sort(title)` | `str` | Generate Calibre's title sort key by moving leading articles ('The ', 'A ', 'An ') to the end of the string. |
+| `db_uri_ro(path)` | `str` | Build a percent-encoded read-only SQLite `file:` URI. Handles paths containing `?` or `#` that would otherwise be parsed as URI syntax. |
+
+#### Constants
+
+| Name | Returns | Description |
+|------|---------|-------------|
+| `C_HEADER` | `str` | ANSI bold yellow. |
+| `C_TITLE` | `str` | ANSI bold cyan. |
+| `C_ERR` | `str` | ANSI bold red. |
+| `C_WARN` | `str` | ANSI bold magenta. |
+| `C_DIM` | `str` | ANSI dim. |
 
 #### Rating and display
 
-| Function | Signature | Description |
+| Function | Returns | Description |
 |----------|-----------|-------------|
-| `normalize_rating(rating)` | `-> float \| None` | Canonical name for the conversion; identical to `calibre_rating_to_stars` (kept as an alias). Converts Calibre's internal 0-10 scale to 0.0-5.0 stars; returns `None` for unrated (0 or `None`). |
-| `format_stars(rating)` | `-> str` | Render a 0.0-5.0 rating as Unicode star glyphs (★★★½☆☆) with a numeric suffix. Half-stars use U+00BD. Returns an empty string for `None`. |
-| `strip_html(html)` | `-> str` | Reduce comments HTML payloads to safe plain text (tags stripped, entities unescaped, whitespace collapsed). Run any raw HTML through this before terminal or GTK rendering. |
-| `tags_to_tree(tags)` | `-> dict[str, Any]` | Build a nested tree from dot-delimited hierarchical tags (`["Fic.Scifi"]` → `{"Fic": {"Scifi": {}}}`). |
-| `tag_rollup(counts)` | `-> dict[str, int]` | Roll up leaf/partial dot-path counts into subtree totals: every node carries its own count plus everything below it (render-identical with Hermitage's `_total_count` and Carrel's category union). |
-| `isbn_normalize(raw)` | `-> str` | Strip separators, uppercase, keep a trailing `X`. No validity judgement. |
-| `isbn_check_digit_is_valid(isbn)` | `-> bool` | Validate an ISBN-10 (mod 11) or ISBN-13 (EAN) check digit; wrong lengths are invalid, not errors. |
-| `to_isbn13(raw)` | `-> str \| None` | ISBN-10 → 13 via the 978 prefix with a recomputed check digit; a 13-digit input passes through; anything else `None`. Deliberately no source check-digit validation (the LibraryThing exporter's contract); pair with `isbn_check_digit_is_valid` for strictness. |
-| `normalize_author_display(authors, primary_only=False)` | `-> str` | Format an author string (comma-separated or `list[str]`) for display. With `primary_only`, returns only the first author. Returns `"Unknown Author"` for empty input. |
-| `author_sort_key(author_sort, primary_only=False)` | `-> str` | Generate a lowercase sort key from `author_sort`. With `primary_only`, splits on `&` and uses the first segment. |
+| `normalize_rating(rating)` | `float \| None` | Canonical name for the conversion; identical to `calibre_rating_to_stars` (kept as an alias). Converts Calibre's internal 0-10 scale to 0.0-5.0 stars; returns `None` for unrated (0 or `None`). |
+| `format_stars(rating)` | `str` | Render a 0.0-5.0 rating as Unicode star glyphs (★★★½☆☆) with a numeric suffix. Half-stars use U+00BD. Returns an empty string for `None`. |
+| `strip_html(html)` | `str` | Reduce comments HTML payloads to safe plain text (tags stripped, entities unescaped, whitespace collapsed). Run any raw HTML through this before terminal or GTK rendering. |
+| `tags_to_tree(tags)` | `dict[str, Any]` | Build a nested tree from dot-delimited hierarchical tags (`["Fic.Scifi"]` → `{"Fic": {"Scifi": {}}}`). |
+| `tag_rollup(counts)` | `dict[str, int]` | Roll up leaf/partial dot-path counts into subtree totals: every node carries its own count plus everything below it (render-identical with Hermitage's `_total_count` and Carrel's category union). |
+| `isbn_normalize(raw)` | `str` | Strip separators, uppercase, keep a trailing `X`. No validity judgement. |
+| `isbn_check_digit_is_valid(isbn)` | `bool` | Validate an ISBN-10 (mod 11) or ISBN-13 (EAN) check digit; wrong lengths are invalid, not errors. |
+| `to_isbn13(raw)` | `str \| None` | ISBN-10 → 13 via the 978 prefix with a recomputed check digit; a 13-digit input passes through; anything else `None`. Deliberately no source check-digit validation (the LibraryThing exporter's contract); pair with `isbn_check_digit_is_valid` for strictness. |
+| `normalize_author_display(authors, primary_only=False)` | `str` | Format an author string (comma-separated or `list[str]`) for display. With `primary_only`, returns only the first author. Returns `"Unknown Author"` for empty input. |
+| `author_sort_key(author_sort, primary_only=False)` | `str` | Generate a lowercase sort key from `author_sort`. With `primary_only`, splits on `&` and uses the first segment. |
 
 #### Series analysis
 
-| Function | Signature | Description |
+| Function | Returns | Description |
 |----------|-----------|-------------|
-| `detect_series_gaps(indices_str, max_index)` | `-> list[int]` | Given a comma-separated string of series indices and the maximum index, return the sorted list of missing integer entries (e.g. indices `"1,3,5"` with max 5 returns `[2, 4]`). |
+| `detect_series_gaps(indices_str, max_index)` | `list[int]` | Given a comma-separated string of series indices and the maximum index, return the sorted list of missing integer entries (e.g. indices `"1,3,5"` with max 5 returns `[2, 4]`). |
 
 #### Image dimensions
 
-| Function | Signature | Description |
+| Function | Returns | Description |
 |----------|-----------|-------------|
-| `get_image_size(filepath)` | `-> tuple[int, int] \| None` | Return `(width, height)` for a JPEG or PNG by sniffing the file signature. Returns `None` for unrecognized formats or read errors. |
-| `get_jpeg_size(filepath)` | `-> tuple[int, int] \| None` | Seek through JPEG segment markers to find the SOF frame dimensions. Handles large EXIF/ICC blocks that a fixed header read would miss. |
-| `get_png_size(filepath)` | `-> tuple[int, int] \| None` | Read the IHDR chunk of a PNG for its dimensions. |
+| `get_image_size(filepath)` | `tuple[int, int] \| None` | Return `(width, height)` for a JPEG or PNG by sniffing the file signature. Returns `None` for unrecognized formats or read errors. |
+| `get_jpeg_size(filepath)` | `tuple[int, int] \| None` | Seek through JPEG segment markers to find the SOF frame dimensions. Handles large EXIF/ICC blocks that a fixed header read would miss. |
+| `get_png_size(filepath)` | `tuple[int, int] \| None` | Read the IHDR chunk of a PNG for its dimensions. |
 
 #### Terminal output
 
-| Function | Signature | Description |
+| Function | Returns | Description |
 |----------|-----------|-------------|
-| `color(text, code)` | `-> str` | Wrap text in ANSI escape codes if stdout is a TTY; return the text unchanged otherwise. Predefined codes: `C_HEADER` (bold yellow), `C_TITLE` (bold cyan), `C_ERR` (bold red), `C_WARN` (bold magenta), `C_DIM` (dim). |
+| `color(text, code)` | `str` | Wrap text in ANSI escape codes if stdout is a TTY; return the text unchanged otherwise. Predefined codes: `C_HEADER` (bold yellow), `C_TITLE` (bold cyan), `C_ERR` (bold red), `C_WARN` (bold magenta), `C_DIM` (dim). |
 
 ### Config (from `cquarry.config`)
 
 Persistent configuration for database path discovery.
 
-| Name | Type | Description |
+| Name | Returns | Description |
 |------|------|-------------|
 | `VERSION` | `str` | Package version string. |
 | `CALIBRE_RATING_SCALE` | `int` | The divisor for Calibre's internal rating (2, since Calibre stores 5 stars as 10). |
 | `DEFAULT_DB_PATHS` | `list[str]` | Paths checked during auto-discovery: `./metadata.db`, `~/Calibre Library/metadata.db`, `~/calibre/metadata.db`. |
 | `CONFIG_FILE` | `str` | Location of the saved config: `~/.config/cquarry/config.json`. |
-| `load_config()` | `-> dict` | Load the config file. Returns `{}` on missing or corrupt files. |
-| `save_config(config)` | `-> None` | Write the config dict to disk, creating parent directories as needed. |
-| `get_db_path()` | `-> str \| None` | Read the saved `db_path` from config. |
-| `set_db_path(path)` | `-> None` | Save an absolute, expanded `db_path` to config. |
+| `load_config()` | `dict` | Load the config file. Returns `{}` on missing or corrupt files. |
+| `save_config(config)` | `None` | Write the config dict to disk, creating parent directories as needed. |
+| `get_db_path()` | `str \| None` | Read the saved `db_path` from config. |
+| `set_db_path(path)` | `None` | Save an absolute, expanded `db_path` to config. |
 
 ### Package metadata
 
@@ -210,11 +231,19 @@ import cquarry
 print(cquarry.__version__)  # "1.8.0"
 ```
 
-### Writes (`cquarry.write`); opt-in
+### Writes (from `cquarry.write`)
+
+
+#### Properties
+
+- `wdb.db_path` (`str`): The normalized absolute path to `metadata.db`.
+- `wdb.conn` (`sqlite3.Connection`): The active read/write SQLite connection object.
 
 | Member | Returns | Description |
 |--------|---------|-------------|
 | `WritableCalibreDB(db_path)` | `Handle` | Read/write handle. Registers Calibre's trigger dependencies (`title_sort()`, `uuid4()`, `PYNOCASE`) before any statement; context-manager supported. |
+| `__enter__()` | `Self` | Context manager entry. |
+| `__exit__(*exc)` | `None` | Context manager exit (closes connection). |
 | `close()` | `None` | Close the database connection and context. |
 | `register_udfs(conn)` | `None` | Register the trigger-required SQL functions/collations on any read-write connection. |
 | `uuid4([_arg])` | `str` | SQL-callable UUID generator matching Calibre's `uuid4()` UDF. |
@@ -239,18 +268,11 @@ print(cquarry.__version__)  # "1.8.0"
 
 Every state-changing mutation also inserts the book id into `metadata_dirtied` (`INSERT OR IGNORE`; the table's `UNIQUE(book)` keeps it one row per book), which is what tells Calibre to regenerate that book's sidecar `.opf` and re-push metadata to wireless readers on its next startup. No-op mutations queue nothing, and databases predating the table keep working (the insert is guarded by a cached existence check).
 
-### Composed reads (from `cquarry.db`)
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `get_book_dossier(book_id, *, include_comments=False)` | `dict[str, Any] \| None` | The composed deep fetch detail views hand-assembled before this existed: `book` (standard row), `cover_path` (`get_cover_path()` defaults; the row's `has_cover` distinguishes catalogued-but-missing), `formats`, `custom_columns` keyed `#label` as `{name, datatype, value}` (values exactly as `field()` yields; comments-typed columns stay raw HTML), `annotations`, `reading_positions`, `plugin_data`, `conversion_overrides`, and `comments` (`{html, plain}`) only when flagged. `None` for unknown books. |
-| `format_path_index()` | `dict[str, int]` | Every catalogued format file path → book id, one `data ⋈ books` query, paths built exactly as `get_format_path()` builds them, `normcase(normpath())` keys, cached. |
-| `find_book_by_path(path)` | `int \| None` | Reverse the index: the book owning this file, tolerant of relative spellings and redundant separators. `None` when nothing catalogued resolves there. |
 
 ### Integrity (from `cquarry.integrity`)
 
 Pure predicates over the cached rows; the one shared definition of "incomplete"
-( mined from CalibreQuarry's `--audit` frontend). No SQL of their own; the two
+(mined from CalibreQuarry's `--audit` frontend). No SQL of their own; the two
 cover-file checks ride `get_cover_path()` + `get_image_size()`. Every id list is
 sorted.
 
@@ -301,9 +323,14 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 |--------|---------|
 | *(none)* | Substring match (case- and accent-folded) |
 | `=` | Exact match (case- and accent-folded) |
+| `=.` | Subtree match on hierarchical fields |
+| `=..` | Component exact match on hierarchical fields |
 | `~` | Regular expression (stdlib `re`, case-insensitive) |
 | `^` | Accent-folded substring |
 | `\` | Escape the next character (treat literally) |
+
+*(Note: Tristate keywords `true`/`false`, `checked`/`unchecked`, `blank`/`empty`, and `_`-prefixed variants are supported for presence/absence on numeric and rating fields. Empty numeric queries match nothing. Dates accept both `-` and `/` separators.)*
+
 
 ### Field locations
 
