@@ -29,18 +29,20 @@ with CalibreDB("/path/to/metadata.db") as db:
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `get_all_books()` | `list[dict[str, Any]]` | Every book in the library, pre-hydrated with `authors`, `author_sorts`, `author_links` (parallel arrays), `tags`, `series`, `rating`, `publisher`, `languages`, `formats`, `title_sort`, `author_sort`, `timestamp`, `pubdate`, `last_modified`, `has_cover`, `series_index`, `size`, `pages`, `uuid`, `identifiers`, and `path`. `authors`, `tags`, `languages`, and `formats` are exposed natively as `list[str]` arrays. Results are cached after the first call. |
-| `get_book(book_id)` | `dict[str, Any] \| None` | Fetch one hydrated record (same shape as a `get_all_books()` row, including `size`, `uuid`, and `identifiers`) without scanning the library. |
+| `get_book(book_id, include_comments=False)` | `dict[str, Any] \| None` | Fetch one hydrated record (same shape as a `get_all_books()` row, including `size`, `uuid`, and `identifiers`) without scanning the library. |
+| `get_comments(book_id=None)` | `dict[int, str]` | Raw comments HTML keyed by book id. Pass `book_id` to scope the read, otherwise returns all catalogued comments. |
+| `get_format_stats()` | `dict[str, dict[str, int]]` | Per-format aggregates: `{fmt: {"count": int, "bytes": int}}`. `count` is the number of books with the format, `bytes` is the total uncompressed size. |
 | `search_books(query)` | `list[dict[str, Any]]` | Evaluate a search expression and return the hydrated matching books. |
 | `get_format_path(book_id, fmt, verify=True)` | `str` | Absolute filesystem path for a book's format file, built from the original DB location. Raises `ValueError` for unknown book/format, `FileNotFoundError` when `verify` is set and the file is missing. |
 | `get_formats(book_id)` | `dict[str, dict[str, Any]]` | Per-format detail: `{fmt: {path, size_bytes, name}}` (path unverified; size from the catalogued uncompressed size). `{}` for unknown books. |
 | `get_cover_path(book_id, verify=True)` | `str \| None` | Resolved cover image path (`cover.jpg`, falling back to `cover.png`) from the original DB location. With `verify` (default) returns None when no file exists on disk; without it returns the `.jpg` path unconditionally. Raises `ValueError` for unknown books. |
-| `get_library_uuid()` | `str \| None` | The library's identity UUID (`library_id` table) — stable across moves/restores, unlike per-book uuids; the right cache key for per-library state. None on very old schemas. |
+| `get_library_uuid()` | `str \| None` | The library's identity UUID (`library_id` table); stable across moves/restores, unlike per-book uuids; the right cache key for per-library state. None on very old schemas. |
 | `get_entities(kind)` | `list[dict[str, Any]]` | Entity rows for `authors` / `series` / `publishers` / `tags` / `languages` / `ratings`: `{id, name, sort, link, count}`, name-sorted (ratings carry the half-star integer as `name`). Raises `ValueError` for unknown kinds. |
 | `get_preference(key, default=None)` | `Any` | Typed read of any Calibre preference from the `preferences` table (JSON decoded where it parses). |
 | `get_field_metadata()` | `dict[str, Any]` | The rich `field_metadata` preference: per-custom-column GUI metadata keyed by label. |
 | `get_grouped_search_terms()` | `dict[str, list[str]]` | Grouped search terms driving `GroupName:query` expansion in the search engine. |
 | `get_user_categories()` | `dict[str, list[dict]]` | User-defined tag-browser categories (name -> member descriptors). |
-| `get_tag_browser_state()` | `dict[str, Any]` | `{"order": [...], "hidden": [...]}` from the `tag_browser_*` preferences — mirror Calibre's browse-sidebar layout. |
+| `get_tag_browser_state()` | `dict[str, Any]` | `{"order": [...], "hidden": [...]}` from the `tag_browser_*` preferences; mirror Calibre's browse-sidebar layout. |
 | `get_identifiers(book_id)` | `dict[str, str]` | All identifiers for a book (e.g. `isbn`, `amazon`, `lcc`), keyed by type. |
 | `get_all_tags()` | `list[str]` | Every distinct tag name, sorted alphabetically. |
 | `get_tag_counts()` | `list[tuple[str, int]]` | `(tag_name, book_count)` pairs, sorted by tag name. |
@@ -60,7 +62,7 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_last_read_positions(book_id=None)` | `list[dict[str, Any]]` | Per-device reading progress (`device`, `cfi`, `pos_frac` 0.0–1.0, `epoch`). |
 | `get_plugin_data(book_id=None, name=None)` | `list[dict[str, Any]]` | Third-party payloads from `books_plugin_data` (Goodreads IDs, word counts, ...). |
 | `get_conversion_profiles(book_id=None)` | `list[dict[str, Any]]` | Books with manual conversion overrides; the pickled recipe blob stays raw bytes (`data_size` gives its length). |
-| `get_dirtied_books()` | `list[int]` | Book ids queued for OPF resync in `metadata_dirtied` — i.e. what Calibre will regenerate/push at its next startup. Sorted, deduplicated; read-only (clearing the queue remains Calibre's job). |
+| `get_dirtied_books()` | `list[int]` | Book ids queued for OPF resync in `metadata_dirtied`; i.e. what Calibre will regenerate/push at its next startup. Sorted, deduplicated; read-only (clearing the queue remains Calibre's job). |
 | `get_annotations_dirtied_books()` | `list[int]` | The annotations sibling queue (`annotations_dirtied`): ids whose highlights/bookmarks Calibre will push to devices. Same read-only contract. |
 | `get_feeds()` | `list[dict[str, Any]]` | Registered news-download recipes from the `feeds` table: `[{id, title, script}]`. |
 | `get_tag_browser_counts()` | `dict[str, list[dict[str, Any]]]` | Calibre's own browse-sidebar rollups from the `tag_browser_*` views: `{category: [{id, name, count, avg_rating, sort}]}`, custom columns rekeyed to `#label`. The `filtered_*` variants (GUI-state `books_list_filter()`) are skipped. |
@@ -204,12 +206,14 @@ import cquarry
 print(cquarry.__version__)  # "1.8.0"
 ```
 
-### Writes (`cquarry.write`) — opt-in
+### Writes (`cquarry.write`); opt-in
 
 | Member | Description |
 |--------|-------------|
 | `WritableCalibreDB(db_path)` | Read/write handle. Registers Calibre's trigger dependencies (`title_sort()`, `uuid4()`, `PYNOCASE`) before any statement; context-manager supported. |
 | `register_udfs(conn)` | Register the trigger-required SQL functions/collations on any read-write connection. |
+| `batch()` | Defer commits across a multi-book, multi-field pass. Explicit context manager that batches writes into one transaction. |
+| `transaction()` | Alias for `batch()`, kept for backwards compatibility. |
 | `update_title(book_id, new_title)` | Rename with refreshed sort key and `last_modified`. |
 | `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` | Idempotent tag mutation following Calibre's link-table sequence; returns whether state changed. |
 | `set_identifier(book_id, type, val)` / `set_identifiers(book_id, pairs)` | EAV upserts honoring `UNIQUE(book, type)`; `None` deletes. |
@@ -237,7 +241,7 @@ Every state-changing mutation also inserts the book id into `metadata_dirtied` (
 
 ### Integrity (from `cquarry.integrity`)
 
-Pure predicates over the cached rows — the one shared definition of "incomplete"
+Pure predicates over the cached rows; the one shared definition of "incomplete"
 ( mined from CalibreQuarry's `--audit` frontend). No SQL of their own; the two
 cover-file checks ride `get_cover_path()` + `get_image_size()`. Every id list is
 sorted.
@@ -249,7 +253,7 @@ sorted.
 | `find_authorless(db)` | `list[int]` | Books with no authors, or only the `Unknown` placeholder. |
 | `find_formatless(db)` | `list[int]` | Books with no catalogued format rows. |
 | `find_coverless(db)` | `list[int]` | Books whose `has_cover` flag is unset (the catalogued answer). |
-| `find_missing_cover_files(db)` | `list[int]` | Flag set but no cover file resolves on disk (empty `books.path` skipped — nowhere to look). |
+| `find_missing_cover_files(db)` | `list[int]` | Flag set but no cover file resolves on disk (empty `books.path` skipped; nowhere to look). |
 | `find_deprecated_formats(db, formats)` | `list[int]` | Books whose whole format set sits inside the caller's deprecated set (case-insensitive). cquarry owns the subset mechanism; what counts as deprecated is a curation opinion. Formatless books excluded. |
 | `find_low_res_covers(db, min_dimension=500)` | `dict[int, tuple[int, int]]` | `{id: (w, h)}` for resolvable, parseable covers under the dimension floor. Missing files are `find_missing_cover_files`' answer; unreadable images are skipped. |
 | `find_duplicate_books(db)` | `dict[tuple[str, str], list[int]]` | `(title.lower(), primary_author.lower())` groups with more than one member. |
@@ -265,6 +269,126 @@ appear here.
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `addition_timeline(db, granularity="month")` | `dict[str, int]` | Books added per calendar bucket, chronological: `"YYYY-MM"` (or `"YYYY"` with `granularity="year"`). Books without a timestamp are skipped; anything but `month`/`year` raises `ValueError`. |
-| `author_stats(db)` | `list[dict]` | Per primary author: `{author, book_count, avg_rating, rated_count, formats}` — star-scale average over rated books only (`0.0` when none), sorted count-descending then name; authorless books skipped. |
+| `author_stats(db)` | `list[dict]` | Per primary author: `{author, book_count, avg_rating, rated_count, formats}`; star-scale average over rated books only (`0.0` when none), sorted count-descending then name; authorless books skipped. |
 | `rating_distribution(db)` | `dict[float \| str, int]` | Books per star rating, ascending on the half-step scale, `"unrated"` last. |
 | `vl_overlap(db, names=None)` | `dict[tuple[str, ...], list[int]]` | Books shared by two or more virtual libraries, wing names sorted in each key. `names` restricts the wings (unknown names raise through `resolve_vl`); single-wing books appear nowhere. |
+
+
+## Search Grammar
+
+cquarry implements a three-stage pipeline (lexer, recursive-descent parser, candidate-set evaluator) ported from Calibre's `search_query_parser.py` and `calibre/db/search.py`.
+
+### Operators
+
+| Syntax | Meaning |
+|--------|---------|
+| `and` | Logical AND (also implicit: `title:foo author:bar` is `title:foo and author:bar`) |
+| `or` | Logical OR |
+| `not` | Logical NOT |
+| `( )` | Grouping |
+
+### Match prefixes
+
+| Prefix | Meaning |
+|--------|---------|
+| *(none)* | Substring match (case- and accent-folded) |
+| `=` | Exact match (case- and accent-folded) |
+| `~` | Regular expression (stdlib `re`, case-insensitive) |
+| `^` | Accent-folded substring |
+| `\` | Escape the next character (treat literally) |
+
+### Field locations
+
+| Location | Aliases | Datatype | Notes |
+|----------|---------|----------|-------|
+| `title` | | text | |
+| `title_sort` | | text | |
+| `authors` | `author` | text_multi | |
+| `author_sort` | | text | |
+| `series` | | text | |
+| `series_sort` | | text | `"Series [index]"` |
+| `publisher` | | text | |
+| `tags` | `tag` | hierarchical | Anchored prefix: `Foo` matches `Foo` and `Foo.*` |
+| `comments` | `comment` | text | |
+| `annotations` | | text | Book's concatenated annotation text; `true`/`false` test presence |
+| `rating` | | rating | Numeric; `true`/`false` for presence |
+| `series_index` | | float | |
+| `formats` | `format` | text_multi | |
+| `languages` | `language`, `lang` | text_multi | English names canonicalized to ISO codes |
+| `size` | | float (bytes) | Total across formats; `k`/`m`/`g` suffixes |
+| `pages` | | int | Native `books_pages_link` first; `#pages` custom column fallback |
+| `pubdate` | | date | |
+| `timestamp` | `date` | date | |
+| `last_modified` | | date | |
+| `identifiers` | `identifier`, `ids` | identifiers | Keypair search; see below |
+| `isbn` | | identifiers | Shorthand for `identifiers:=isbn:<value>` |
+| `cover` | | bool | |
+| `id` | | int | |
+| `uuid` | | text | |
+| `#<label>` | | *(per column)* | Custom columns by label |
+| `vl` | | virtual library | Cross-reference: `vl:"Wing Name"` |
+| `search` | | saved search | Cross-reference: `search:"Saved Name"` |
+| `@Name` | | user category | Books holding any member value: `@Favorites:true`; leading `.` includes subcategories, `false` inverts |
+| `all` | *(bare terms)* | | Searches title, authors, author_sort, series, publisher, tags, comments + custom text columns |
+
+Multi-valued locations additionally accept the count operator: `tags:#>3`, `identifiers:#=0`, `formats:#<5`.
+
+### Date queries
+
+```
+pubdate:>30daysago
+timestamp:<2024-06
+last_modified:=today
+pubdate:>=yesterday
+timestamp:thismonth
+pubdate:2024          # matches any date in 2024
+pubdate:2024-06       # matches any date in June 2024
+pubdate:2024-06-15    # matches that exact day
+```
+
+### Identifier queries
+
+```
+identifiers:isbn:true          # has any ISBN
+identifiers:amazon:B0...       # specific Amazon ASIN
+isbn:9780123456789             # shorthand for identifiers:=isbn:9780123456789
+identifiers:true               # has any identifier at all
+```
+
+### Grouped search terms
+
+Calibre lets users define groups (`preferences.grouped_search_terms`: group name -> member
+locations). cquarry resolves them with upstream's semantics:
+
+```
+People:leckie        # union over the group's member locations
+People:false         # books where NO member matches
+```
+
+Real field names always win over same-named groups, and nesting a group inside a group is a
+parse error.
+
+### User categories
+
+Calibre lets users define tag-browser pseudo-categories (`preferences.user_categories`).
+cquarry searches them with upstream's exact semantics:
+
+```
+@Favorites:true      # books holding any member value (exact match per member location)
+@Favorites:false     # the inverse
+@Favorites:.true     # include subcategories (category names starting with "Favorites.")
+```
+
+As in Calibre, any query text other than `false`/a leading `.` is ignored (the GUI always
+writes `@Name:true`); groups and real fields win over same-named categories; unknown
+`@Names` match nothing.
+
+### Documented deviations from Calibre
+
+- **Regex engine.** `~` uses stdlib `re`, not Calibre's third-party `regex` module (`VERSION1`/`\X` are unavailable; otherwise compatible).
+- **Accent folding.** Uses `unicodedata` NFKD decomposition rather than ICU collation, so punctuation-insensitivity is not reproduced.
+- **GPM templates.** `@...:` template expressions tokenize for parse parity but are not evaluated.
+- **GUI-state locations.** `marked`, `ondevice`, and `in_tag_browser` exist only inside Calibre's own UI session and are not implemented.
+- **Hierarchical tag matching.** `tags:` uses cquarry's anchored match (`Foo` matches `Foo` and `Foo.*`) rather than Calibre's raw substring default. This is a long-standing project invariant.
+- **`annotations:` matching.** Calibre searches annotations through its FTS tables (with stemming and rank ordering); cquarry matches the concatenated `searchable_text` with ordinary text semantics; same result set for typical queries, no stemming or ranking.
+- **`series_sort` format.** Computed as `"Series [index]"`.
