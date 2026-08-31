@@ -30,7 +30,7 @@ with CalibreDB("~/Calibre Library/metadata.db") as db:
 
     # Search using Calibre's native grammar
     sci_fi = db.search("tags:Fic.SciFi and rating:>=4")
-    print(f"Found {len(sci_fi)} highly rated Sci-Fi books.")
+print(f"Found {len(sci_fi)} highly rated Sci-Fi books.")
 
     # Resolve a virtual library to a set of book IDs
     wing = db.resolve_vl("To Read")
@@ -55,9 +55,9 @@ with CalibreDB("~/Calibre Library/metadata.db") as db:
 The composed deep fetch combines metadata, formats, custom columns, and annotations:
 
 ```python
-    dossier = db.get_book_dossier(42, include_comments=True)
-    print(dossier["formats"], dossier["custom_columns"])
-    print(dossier["comments"]["plain"])  # comments HTML, already stripped
+dossier = db.get_book_dossier(42, include_comments=True)
+print(dossier["formats"], dossier["custom_columns"])
+print(dossier["comments"]["plain"])  # comments HTML, already stripped
 ```
 
 Writes live behind an explicit opt-in import:
@@ -77,7 +77,7 @@ with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:
 
 # Every mutation queues an OPF regeneration; check what Calibre will resync:
 with CalibreDB("~/Calibre Library/metadata.db") as db:
-    print(db.get_dirtied_books())  # e.g. [42, 43]
+print(db.get_dirtied_books())  # e.g. [42, 43]
 ```
 
 ## Installation

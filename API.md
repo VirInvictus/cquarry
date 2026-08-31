@@ -43,8 +43,8 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `vl_expression(name)` | `str \| None` | Case-insensitive lookup of a virtual library search expression. |
 | `saved_search(name)` | `str \| None` | Case-insensitive lookup of a saved search expression. |
 | `custom_locations()` | `dict[str, str]` | Return `{location_token: datatype}` for all user custom columns. |
-| `grouped_search_terms()` | `dict[str, list[str]]` | Return grouped search terms. |
-| `user_categories()` | `dict[str, list]` | Return user categories for `@Name` searches. |
+| `grouped_search_terms()` | `dict[str, list[str]]` | Return grouped search terms *(optional hook)*. |
+| `user_categories()` | `dict[str, list]` | Return user categories for `@Name` searches *(optional hook)*. |
 | `search_books(query)` | `list[dict[str, Any]]` | Evaluate a search expression and return the hydrated matching books. |
 | `get_format_path(book_id, fmt, verify=True)` | `str` | Absolute filesystem path for a book's format file, built from the original DB location. Raises `ValueError` for unknown book/format, `FileNotFoundError` when `verify` is set and the file is missing. |
 | `get_formats(book_id)` | `dict[str, dict[str, Any]]` | Per-format detail: `{fmt: {path, size_bytes, name}}` (path unverified; size from the catalogued uncompressed size). `{}` for unknown books. |
@@ -97,7 +97,32 @@ All eight return `[]`/`{}` on databases whose schema predates the tables.
 | `close()` | Close the database connection and remove any temporary snapshot files. |
 | `__enter__()` / `__exit__()` | Context manager support. Calls `close()` on exit. |
 
+#### Composed reads
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `get_book_dossier(book_id, *, include_comments=False)` | `dict[str, Any] \| None` | The composed deep fetch detail views hand-assembled before this existed: `book` (standard row), `cover_path` (`get_cover_path()` defaults; the row's `has_cover` distinguishes catalogued-but-missing), `formats`, `custom_columns` keyed `#label` as `{name, datatype, value}` (values exactly as `field()` yields; comments-typed columns stay raw HTML), `annotations`, `reading_positions`, `plugin_data`, `conversion_overrides`, and `comments` (`{html, plain}`) only when flagged. `None` for unknown books. |
+| `format_path_index()` | `dict[str, int]` | Every catalogued format file path → book id, one `data ⋈ books` query, paths built exactly as `get_format_path()` builds them, `normcase(normpath())` keys, cached. |
+| `find_book_by_path(path)` | `int \| None` | Reverse the index: the book owning this file, tolerant of relative spellings and redundant separators. `None` when nothing catalogued resolves there. |
+
 ### `SearchEngine` (from `cquarry.search`)
+
+
+#### Constants
+
+| Name | Returns | Description |
+|------|---------|-------------|
+| `CONTAINS` | `int` | Match kind 0. |
+| `EQUALS` | `int` | Match kind 1. |
+| `REGEXP` | `int` | Match kind 2. |
+| `ACCENT` | `int` | Match kind 3. |
+| `DT_TEXT` ... `DT_VL` | `str` | Datatype constants. |
+
+#### Helpers
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `canonical_language(name)` | `str` | Canonicalize one language name to its ISO 639-2 code (e.g. `English` -> `eng`). Unknown tokens pass through untouched. |
 
 The search engine can be used standalone by implementing the `MetadataProvider` protocol. `CalibreDB` implements this protocol, so most consumers never touch `SearchEngine` directly.
 
@@ -109,13 +134,6 @@ results = engine.search("tags:Fiction and rating:>3")
 ```
 
 
-#### Composed reads
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `get_book_dossier(book_id, *, include_comments=False)` | `dict[str, Any] \| None` | The composed deep fetch detail views hand-assembled before this existed: `book` (standard row), `cover_path` (`get_cover_path()` defaults; the row's `has_cover` distinguishes catalogued-but-missing), `formats`, `custom_columns` keyed `#label` as `{name, datatype, value}` (values exactly as `field()` yields; comments-typed columns stay raw HTML), `annotations`, `reading_positions`, `plugin_data`, `conversion_overrides`, and `comments` (`{html, plain}`) only when flagged. `None` for unknown books. |
-| `format_path_index()` | `dict[str, int]` | Every catalogued format file path → book id, one `data ⋈ books` query, paths built exactly as `get_format_path()` builds them, `normcase(normpath())` keys, cached. |
-| `find_book_by_path(path)` | `int \| None` | Reverse the index: the book owning this file, tolerant of relative spellings and redundant separators. `None` when nothing catalogued resolves there. |
 
 #### `MetadataProvider` protocol
 
@@ -127,8 +145,8 @@ Any object implementing these methods can serve as a search backend:
 | `field(book_id, location)` | `Any` | Return a book's value for a canonical location. See datatype contract below. |
 | `vl_expression(name)` | `str \| None` | Return a virtual library's search expression, or `None` if unknown. |
 | `saved_search(name)` | `str \| None` | Return a saved search's expression, or `None` if unknown. |
-| `grouped_search_terms()` | `dict[str, list[str]]` | Return grouped search terms. |
-| `user_categories()` | `dict[str, list]` | Return user categories for `@Name` searches. |
+| `grouped_search_terms()` | `dict[str, list[str]]` | Return grouped search terms *(optional hook)*. |
+| `user_categories()` | `dict[str, list]` | Return user categories for `@Name` searches *(optional hook)*. |
 | `custom_locations()` | `dict[str, str]` | Return `{location_token: datatype}` for custom columns (e.g. `{"#read": "bool"}`). |
 
 **`field()` return contract by datatype:**
@@ -332,13 +350,13 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 |--------|---------|
 | *(none)* | Substring match (case- and accent-folded) |
 | `=` | Exact match (case- and accent-folded) |
-| `=.` | Subtree match on hierarchical fields |
-| `=..` | Component exact match on hierarchical fields |
+| `=.` | Subtree match on all text fields |
+| `=..` | Component exact match on all text fields |
 | `~` | Regular expression (stdlib `re`, case-insensitive) |
 | `^` | Accent-folded substring |
 | `\` | Escape the next character (treat literally) |
 
-*(Note: Tristate keywords `true`/`false`, `checked`/`unchecked`, `blank`/`empty`, and `_`-prefixed variants are supported for presence/absence on numeric and rating fields. Empty numeric queries match nothing. Dates accept both `-` and `/` separators.)*
+*(Note: Tristate keywords `true`/`false`, `checked`/`unchecked`, `blank`/`empty`, and `_`-prefixed variants are supported for presence/absence on numeric and rating fields. Empty numeric queries match nothing. Dates accept both `-` and `/` separators, and undefined date sentinels (`0101-01-01`, `0100-01-01`) evaluate as `None`. Multi-token queries in `languages:` split on commas and canonicalize each independently.)*
 
 
 ### Field locations
