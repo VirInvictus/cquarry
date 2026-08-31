@@ -108,11 +108,20 @@ engine = SearchEngine(provider)  # provider implements MetadataProvider
 results = engine.search("tags:Fiction and rating:>3")
 ```
 
+
+#### Composed reads
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `get_book_dossier(book_id, *, include_comments=False)` | `dict[str, Any] \| None` | The composed deep fetch detail views hand-assembled before this existed: `book` (standard row), `cover_path` (`get_cover_path()` defaults; the row's `has_cover` distinguishes catalogued-but-missing), `formats`, `custom_columns` keyed `#label` as `{name, datatype, value}` (values exactly as `field()` yields; comments-typed columns stay raw HTML), `annotations`, `reading_positions`, `plugin_data`, `conversion_overrides`, and `comments` (`{html, plain}`) only when flagged. `None` for unknown books. |
+| `format_path_index()` | `dict[str, int]` | Every catalogued format file path → book id, one `data ⋈ books` query, paths built exactly as `get_format_path()` builds them, `normcase(normpath())` keys, cached. |
+| `find_book_by_path(path)` | `int \| None` | Reverse the index: the book owning this file, tolerant of relative spellings and redundant separators. `None` when nothing catalogued resolves there. |
+
 #### `MetadataProvider` protocol
 
 Any object implementing these methods can serve as a search backend:
 
-| Method | Signature | Contract |
+| Method | Returns | Description |
 |--------|-----------|----------|
 | `all_ids()` | `set[int]` | Return every book ID in the collection. |
 | `field(book_id, location)` | `Any` | Return a book's value for a canonical location. See datatype contract below. |
