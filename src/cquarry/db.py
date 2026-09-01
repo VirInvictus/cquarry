@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Self
 
 from cquarry.helpers import calibre_rating_to_stars, db_uri_ro, strip_html, title_sort
 from cquarry.search import (
@@ -116,7 +116,7 @@ class CalibreDB:
                     os.unlink(self._tmp_path + suffix)
             self._tmp_path = None
 
-    def __enter__(self) -> 'Self':
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc) -> None:
