@@ -546,3 +546,7 @@ design); CalibreQuarry's `scripts/db_util.py` connect-ro triplication stays
 > consumer sync, or Hermitage's packaged build silently lags the ecosystem.
 
 - [ ] **Search/API (cquarry 1.9.0 candidate)**: Normalize custom column lookups. `db.load_custom_column()` currently expects the exact *Display Name* (e.g., `Translator(s)`), which propagates to `CalibreQuarry`'s `--show-custom` flag and the `#` search grammar. This creates a UX asymmetry, as Calibre's native search and `cquarry`'s own `WritableCalibreDB.set_custom_column` use the internal `#label` (e.g., `#translators`). `load_custom_column` and `get_custom_columns` should resolve columns via the `#label` (or gracefully fallback to display name) to unify the API. **Upon completion, update the `phase-3-import` skill to remove the Custom Column gotcha so the next session is in the loop.**
+  - [ ] *CalibreQuarry*: Update `README.md` and `METADATA` to remove the warning about the display name asymmetry. Bump `cquarry` dependency.
+  - [ ] *Hermitage*: Verify `database.py` (which currently passes `col.name` to `load_custom_column`) still works with the dual-resolution patch. Bump Flatpak pinned commit.
+  - [ ] *Bindery*: Unaffected by CLI parsing, but bump uv.lock `cquarry` dependency.
+  - [ ] *Carrel-calibre-web*: Unaffected (custom column resolution is handled via Carrel's own DB objects), but bump `cquarry` dependency in deployment venv.
