@@ -84,7 +84,7 @@ print(db.get_dirtied_books())  # e.g. [42, 43]
 ## Installation
 
 ```sh
-pip install git+https://github.com/VirInvictus/cquarry.git
+pip install cquarry
 ```
 
 ## API at a glance
