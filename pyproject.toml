@@ -7,6 +7,24 @@ name = "cquarry"
 version = "1.9.0"
 description = "A pure Python Calibre database layer and search grammar engine."
 readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+keywords = ["calibre", "ebooks", "sqlite", "search", "metadata"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/VirInvictus/cquarry"
+
+[tool.ruff.lint]
+ignore = ["S110", "BLE001", "RUF012", "DTZ011", "PIE810", "FURB162"]
+
 keywords = ["calibre", "database", "sqlite", "search", "parser"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -15,5 +33,3 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Database",
 ]
-requires-python = ">=3.14"
-license = "MIT"
