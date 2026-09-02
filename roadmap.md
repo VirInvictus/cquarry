@@ -546,7 +546,10 @@ design); CalibreQuarry's `scripts/db_util.py` connect-ro triplication stays
 > consumer sync, or Hermitage's packaged build silently lags the ecosystem.
 
 - [ ] **Search/API (cquarry 1.9.0 candidate)**: Normalize custom column lookups. `db.load_custom_column()` currently expects the exact *Display Name* (e.g., `Translator(s)`), which propagates to `CalibreQuarry`'s `--show-custom` flag and the `#` search grammar. This creates a UX asymmetry, as Calibre's native search and `cquarry`'s own `WritableCalibreDB.set_custom_column` use the internal `#label` (e.g., `#translators`). `load_custom_column` and `get_custom_columns` should resolve columns via the `#label` (or gracefully fallback to display name) to unify the API. **Upon completion, update the `phase-3-import` skill to remove the Custom Column gotcha so the next session is in the loop.**
-  - [ ] *CalibreQuarry*: Update `README.md` and `METADATA` to remove the warning about the display name asymmetry. Bump `cquarry` dependency.
   - [ ] *Hermitage*: Verify `database.py` (which currently passes `col.name` to `load_custom_column`) still works with the dual-resolution patch. Bump Flatpak pinned commit.
   - [ ] *Bindery*: Unaffected by CLI parsing, but bump uv.lock `cquarry` dependency.
   - [ ] *Carrel-calibre-web*: Unaffected (custom column resolution is handled via Carrel's own DB objects), but bump `cquarry` dependency in deployment venv.
+- [ ] **API/Write (cquarry 1.9.0 candidate)**: Add `clear_identifier(book_id, type)` to `WritableCalibreDB`.
+  - **Context**: During a Phase 3 import (2026-09-02), cleaning up invalid `mobi-asin` UUIDs or migrating `amazon` ISBN-10s required dropping into raw SQL (`wdb.conn.execute("DELETE FROM identifiers...")`) because `WritableCalibreDB` lacks a `clear_identifier` helper, though it has `set_identifier` and `clear_column`.
+  - **Required Fix**: Implement `clear_identifier(book_id, type)` that executes the delete and automatically queues the book for OPF regeneration (`metadata_dirtied`), matching the behavior of the other `clear_*` methods.
+  - **Skill sync**: Upon completion, update the `phase-3-import` skill in Brandon's library to remove the raw SQL workaround and teach `clear_identifier`.
