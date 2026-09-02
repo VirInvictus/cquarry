@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "cquarry"
 version = "1.9.0"
-description = "Canonical Calibre DB and Search Grammar Library"
+description = "A pure Python Calibre database layer and search grammar engine."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -24,3 +24,12 @@ Homepage = "https://github.com/VirInvictus/cquarry"
 
 [tool.ruff.lint]
 ignore = ["S110", "BLE001", "RUF012", "DTZ011", "PIE810", "FURB162"]
+
+keywords = ["calibre", "database", "sqlite", "search", "parser"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+]
