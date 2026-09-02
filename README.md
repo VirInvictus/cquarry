@@ -38,9 +38,9 @@ print(f"Found {len(sci_fi)} highly rated Sci-Fi books.")
     # Interpolate a saved search straight from Calibre's preferences
     award_winners = db.search('search:"Award Winners"')
 
-    # Inspect custom columns
+    # Inspect custom columns (#label, bare label, or display name all work)
     cols = db.get_custom_columns()
-    status = db.load_custom_column("Reading Status")
+    status = db.load_custom_column("#reading_status")
 
     # Single-entity helpers (no whole-library scan)
     book = db.get_book(42)
@@ -68,6 +68,7 @@ from cquarry.write import WritableCalibreDB
 with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:
     wdb.add_tag(42, "Audited")
     wdb.set_identifier(42, "isbn", "9780123456789")
+    wdb.clear_identifier(42, "mobi-asin")  # honest no-op when absent
 
 # A multi-book curation pass commits exactly once:
 with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:

@@ -628,6 +628,42 @@ class TestReadSideV14(unittest.TestCase):
         self.assertEqual(status["display"]["enum_values"], ["Read", "Reading"])
         self.assertEqual(status["display"]["enum_colors"], {"Read": "#00ff00"})
 
+    def test_custom_column_dual_resolution(self):
+        # #label, bare label, and display name all reach the same record and
+        # load the same values (the write module has taken #label all along).
+        by_name = self.db.load_custom_column("Status")
+        self.assertEqual(by_name, {1: "Read"})
+        self.assertEqual(self.db.load_custom_column("#status"), by_name)
+        self.assertEqual(self.db.load_custom_column("status"), by_name)
+        # find_custom_column returns the record itself; the label side is
+        # case-insensitive and #-prefixed keys never fall through to names.
+        rec = self.db.find_custom_column("#STATUS")
+        self.assertEqual(rec["label"], "status")
+        self.assertIsNone(self.db.find_custom_column("#nope"))
+        with self.assertRaises(ValueError):
+            self.db.load_custom_column("#nope")
+
+    def test_custom_column_display_name_wins_over_label(self):
+        # A bare key matching both a display name and a *different* column's
+        # label resolves to the display name: the historical key keeps
+        # precedence for backward compatibility.
+        con = sqlite3.connect(os.path.join(self.temp_dir, "metadata.db"))
+        try:
+            # The existing column is label='status', name='Status'; add one
+            # whose display name is 'status' so the bare key is ambiguous.
+            # Only custom_columns matters: find_custom_column reads metadata.
+            con.execute(
+                "INSERT INTO custom_columns VALUES "
+                "(2,'other','status','text',1,'{}',0,0)"
+            )
+            con.commit()
+        finally:
+            con.close()
+        rec = self.db.find_custom_column("status")
+        self.assertEqual(rec["label"], "other")
+        # The #-prefixed form still reaches the original column unambiguously.
+        self.assertEqual(self.db.find_custom_column("#status")["label"], "status")
+
     def test_preferences_accessor(self):
         self.assertEqual(self.db.get_preference("plain_note"), "just a string")
         self.assertEqual(

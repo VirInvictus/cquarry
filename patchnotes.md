@@ -1,3 +1,40 @@
+## v1.9.0 (2026-09-02)
+
+### Custom-column lookup parity (the read side catches up to the write side)
+
+- **Columns are addressable three ways.** `load_custom_column()` accepted only
+  the exact *Display Name* (e.g. `Translator(s)`), while Calibre's native
+  search, `WritableCalibreDB.set_custom_column`, and the `#` search grammar all
+  speak the internal `#label` (`#translators`) — a UX asymmetry the 2026-09-02
+  import batch kept paying for. New `find_custom_column(key)` resolves one
+  record by `#label`, bare label, or display name: a leading `#` matches the
+  label only (labels are unique, never ambiguous); otherwise an exact
+  display-name match wins (the historical key, so every existing caller keeps
+  working) and a bare label is the graceful fallback; the label side is
+  case-insensitive, mirroring the write module's `_custom_column_meta`.
+  `load_custom_column()` routes through it, and its not-found error now lists
+  both the name and the `#label` of every column. `get_custom_columns()` stays
+  keyed by display name (consumers iterate it; rekeying would break them).
+- **Consumer note**: Hermitage passes display names into `load_custom_column`
+  and keeps working unchanged (display names still resolve); CalibreQuarry's
+  `--show-custom` likewise. Bindery and Carrel-calibre-web do not read custom
+  columns through this path.
+
+### clear_identifier
+
+- **`WritableCalibreDB.clear_identifier(book_id, id_type)`** deletes one pair
+  from the EAV `identifiers` table and queues the book for OPF regeneration
+  (`_touch_book()`), matching every other mutation. The type is normalized
+  exactly like `set_identifier` (stripped, lowercased; empty raises); a pair
+  that is already absent is an honest no-op returning False; unknown books
+  raise like every other setter. Motivated by the 2026-09-02 phase-3 import:
+  cleaning invalid `mobi-asin` UUIDs and migrating `amazon` ISBN-10s required
+  dropping to raw SQL because the explicit helper did not exist
+  (`set_identifier(b, t, None)` always worked but was not discoverable).
+- Tests: suite grows 241 → 245 (dual-resolution matrix with a display-name/
+  label ambiguity case, clear round-trip, normalization, no-op, dirtied-queue,
+  unknown-book raise).
+
 ## v1.8.0 (2026-08-30)
 
 ### Phase 9: the approved full mine (composed reads, integrity, analytics)

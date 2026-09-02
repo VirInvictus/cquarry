@@ -553,11 +553,30 @@ design); CalibreQuarry's `scripts/db_util.py` connect-ro triplication stays
 > fix, or a sync; must bump that pinned commit in the same release as the
 > consumer sync, or Hermitage's packaged build silently lags the ecosystem.
 
-- [ ] **Search/API (cquarry 1.9.0 candidate)**: Normalize custom column lookups. `db.load_custom_column()` currently expects the exact *Display Name* (e.g., `Translator(s)`), which propagates to `CalibreQuarry`'s `--show-custom` flag and the `#` search grammar. This creates a UX asymmetry, as Calibre's native search and `cquarry`'s own `WritableCalibreDB.set_custom_column` use the internal `#label` (e.g., `#translators`). `load_custom_column` and `get_custom_columns` should resolve columns via the `#label` (or gracefully fallback to display name) to unify the API. **Upon completion, update the `phase-3-import` skill to remove the Custom Column gotcha so the next session is in the loop.**
-  - [ ] *Hermitage*: Verify `database.py` (which currently passes `col.name` to `load_custom_column`) still works with the dual-resolution patch. Bump Flatpak pinned commit.
-  - [ ] *Bindery*: Unaffected by CLI parsing, but bump uv.lock `cquarry` dependency.
-  - [ ] *Carrel-calibre-web*: Unaffected (custom column resolution is handled via Carrel's own DB objects), but bump `cquarry` dependency in deployment venv.
-- [ ] **API/Write (cquarry 1.9.0 candidate)**: Add `clear_identifier(book_id, type)` to `WritableCalibreDB`.
+- [x] **Search/API (cquarry 1.9.0 candidate)**: Normalize custom column lookups. `db.load_custom_column()` currently expects the exact *Display Name* (e.g., `Translator(s)`), which propagates to `CalibreQuarry`'s `--show-custom` flag and the `#` search grammar. This creates a UX asymmetry, as Calibre's native search and `cquarry`'s own `WritableCalibreDB.set_custom_column` use the internal `#label` (e.g., `#translators`). `load_custom_column` and `get_custom_columns` should resolve columns via the `#label` (or gracefully fallback to display name) to unify the API. **Upon completion, update the `phase-3-import` skill to remove the Custom Column gotcha so the next session is in the loop.**
+  - *(Shipped in v1.9.0: new `find_custom_column(key)` resolves one record by
+  `#label`, bare label, or display name — a leading `#` matches the label only
+  (labels are unique, never ambiguous); otherwise an exact display-name match
+  wins (the historical key, so every existing caller keeps working) and a bare
+  label is the graceful fallback; the label side is case-insensitive, mirroring
+  the write module's `_custom_column_meta`. `load_custom_column` routes through
+  it; its not-found error lists name and `#label` per column.
+  `get_custom_columns` STAYS keyed by display name — rekeying would break every
+  consumer's iteration; the unification lives in the shared resolver. Suite
+  241 → 245.)*
+  - [x] *Hermitage*: Verify `database.py` (which currently passes `col.name` to `load_custom_column`) still works with the dual-resolution patch. Bump Flatpak pinned commit. *(Verified 2026-09-02: display-name call sites keep resolving unchanged; Hermitage suite green. Flatpak pin bumped to the pushed 1.9.0 commit in Hermitage 1.7.1.)*
+  - [x] *Bindery*: Unaffected by CLI parsing, but bump uv.lock `cquarry` dependency. *(The uv.lock refresh is deferred to Bindery's next release (NEW-AUDIT Stage 3, Phase 11's 0.24.0) rather than shipping alone; recorded here so the sync is not forgotten.)*
+  - [x] *Carrel-calibre-web*: Unaffected (custom column resolution is handled via Carrel's own DB objects), but bump `cquarry` dependency in deployment venv. *(The venv installs cquarry EDITABLE from this repo, so 1.9.0 is live there once the repo moved; verified `import cquarry` reports 1.9.0 from the venv. Nothing observable changes — the fork does not parse custom columns through cquarry; no companion Carrel patchnote.)*
+  - [x] *CalibreQuarry*: *(adoption deferred to its 3.26.0 (NEW-AUDIT Stage 2): any `--show-custom` label handling rides that release. Nothing ships now — display names keep resolving unchanged, so 3.25.0 is not broken by this release.)*
+- [x] **API/Write (cquarry 1.9.0 candidate)**: Add `clear_identifier(book_id, type)` to `WritableCalibreDB`.
   - **Context**: During a Phase 3 import (2026-09-02), cleaning up invalid `mobi-asin` UUIDs or migrating `amazon` ISBN-10s required dropping into raw SQL (`wdb.conn.execute("DELETE FROM identifiers...")`) because `WritableCalibreDB` lacks a `clear_identifier` helper, though it has `set_identifier` and `clear_column`.
   - **Required Fix**: Implement `clear_identifier(book_id, type)` that executes the delete and automatically queues the book for OPF regeneration (`metadata_dirtied`), matching the behavior of the other `clear_*` methods.
   - **Skill sync**: Upon completion, update the `phase-3-import` skill in Brandon's library to remove the raw SQL workaround and teach `clear_identifier`.
+  - *(Shipped in v1.9.0: `clear_identifier(book_id, id_type)` deletes the pair
+  and queues OPF resync via `_touch_book()`; type normalization matches
+  `set_identifier` exactly (stripped, lowercased; empty raises); an absent
+  pair is an honest no-op returning False; unknown books raise. Suite
+  241 → 245. Skill sync done 2026-09-02: the phase-3 skill's raw-SQL
+  workaround now teaches `clear_identifier`; both import skills swept.)*
+  - [x] *CalibreQuarry*: *(the `--clear-identifier` verb rides 3.26.0 (NEW-AUDIT Stage 2); the phase-3 skill teaches the Python API directly, so no earlier release is needed.)*
+  - *Hermitage / Carrel-calibre-web*: unaffected (no identifier write surface; read-only by contract). *Bindery*: unaffected (tags are its only write); the uv.lock deferral note above covers its dependency bump.

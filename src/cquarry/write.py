@@ -398,6 +398,36 @@ class WritableCalibreDB:
                 changed += 1
         return changed
 
+    def clear_identifier(self, book_id: int, id_type: str) -> bool:
+        """Delete one entry from the EAV ``identifiers`` table.
+
+        The type is normalized exactly like :meth:`set_identifier` (stripped,
+        lowercased; empty raises). Returns True when a row was deleted; a
+        pair that is already absent is an honest no-op (False). Deletion
+        queues the book for OPF regeneration via ``_touch_book()``.
+        """
+        id_type = id_type.strip().lower()
+        if not id_type:
+            raise ValueError("Identifier type must not be empty")
+        cur = self.conn.cursor()
+        self._begin()
+        try:
+            self._require_book(book_id)
+            row = cur.execute(
+                "SELECT id FROM identifiers WHERE book = ? AND type = ?",
+                (book_id, id_type),
+            ).fetchone()
+            changed = False
+            if row is not None:
+                cur.execute("DELETE FROM identifiers WHERE id = ?", (row["id"],))
+                self._touch_book(book_id)
+                changed = True
+            self._commit()
+            return changed
+        except Exception:
+            self._rollback()
+            raise
+
     # -- Entity setters (Phase 6: write-side expansion) --
 
     _ENTITY_TABLES = {

@@ -685,6 +685,10 @@ class CalibreDB:
         decoded JSON blob holding ``enum_values``/``enum_colors``/
         ``composite_template`` etc. Schemas predating a column get the
         documented defaults (editable=True, normalized=False, display={}).
+
+        The mapping stays keyed by display name (the historical key); column
+        lookup that accepts ``#label`` or a bare label goes through
+        :meth:`find_custom_column` / :meth:`load_custom_column`.
         """
         cur = self.conn.cursor()
         schema = self._custom_columns_schema()
@@ -767,15 +771,39 @@ class CalibreDB:
             return []
         return [dict(row) for row in rows]
 
-    def load_custom_column(self, col_name: str) -> dict[int, Any]:
-        """Load values for a specific custom column (by display name). Returns {book_id: value(s)}."""
+    def find_custom_column(self, key: str) -> dict[str, Any] | None:
+        """One custom-columns record by ``#label``, bare label, or display name.
+
+        A leading ``#`` matches the ``label`` only (labels are unique, so that
+        is never ambiguous). Otherwise an exact display-name match wins — the
+        historical key, so existing callers keep working — and a bare label is
+        the graceful fallback. Label matching is case-insensitive, mirroring
+        the write module's ``_custom_column_meta``. Returns None when nothing
+        matches.
+        """
         cols = self.get_custom_columns()
-        if col_name not in cols:
+        key = key.strip()
+        if key.startswith("#"):
+            want = key[1:].lower()
+            return next((c for c in cols.values() if c["label"].lower() == want), None)
+        if key in cols:
+            return cols[key]
+        return next(
+            (c for c in cols.values() if c["label"].lower() == key.lower()), None
+        )
+
+    def load_custom_column(self, col_name: str) -> dict[int, Any]:
+        """Load values for one custom column, addressed by ``#label``, bare
+        label, or display name (see :meth:`find_custom_column`). Returns
+        {book_id: value(s)}."""
+        col = self.find_custom_column(col_name)
+        if col is None:
+            cols = self.get_custom_columns()
             raise ValueError(
-                f"Custom column '{col_name}' not found. Available: {', '.join(cols.keys())}"
+                f"Custom column '{col_name}' not found. Available (name → #label): "
+                + ", ".join(f"{c['name']} (#{c['label']})" for c in cols.values())
             )
 
-        col = cols[col_name]
         cid = col["id"]
         cur = self.conn.cursor()
 

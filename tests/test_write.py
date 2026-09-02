@@ -169,6 +169,25 @@ class TestWritableCalibreDB(unittest.TestCase):
         finally:
             check.close()
 
+    def test_clear_identifier(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self._seed_books(wdb, 1)
+            self.assertTrue(wdb.set_identifier(1, "isbn", "9780000000000"))
+            self.assertTrue(wdb.set_identifier(1, "mobi-asin", "B000123456"))
+            # The type normalizes exactly like set_identifier.
+            self.assertTrue(wdb.clear_identifier(1, " MOBI-ASIN "))
+            # Clearing a pair that is already gone is an honest no-op.
+            self.assertFalse(wdb.clear_identifier(1, "mobi-asin"))
+            # Unknown books raise like every other setter.
+            with self.assertRaises(ValueError):
+                wdb.clear_identifier(999, "isbn")
+        check = self._open_raw()
+        try:
+            pairs = dict(check.execute("SELECT type, val FROM identifiers").fetchall())
+            self.assertEqual(pairs, {"isbn": "9780000000000"})
+        finally:
+            check.close()
+
 
 class TestMetadataDirtied(unittest.TestCase):
     """Every mutation must queue OPF regeneration via ``metadata_dirtied``.
@@ -250,6 +269,15 @@ class TestMetadataDirtied(unittest.TestCase):
         with WritableCalibreDB(self.db_path) as wdb:
             self._seed_books(wdb, 3)
             wdb.set_identifiers(3, {"isbn": "9780000000000", "goodreads": None})
+        self.assertEqual(self._dirtied(), [3])
+
+    def test_clear_identifier_marks_dirty(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self._seed_books(wdb, 3)
+            wdb.set_identifier(3, "mobi-asin", "B000123456")
+            wdb.clear_identifier(3, "mobi-asin")
+            # An honest no-op clear queues nothing new.
+            self.assertFalse(wdb.clear_identifier(3, "mobi-asin"))
         self.assertEqual(self._dirtied(), [3])
 
     def test_repeated_mutations_do_not_duplicate_rows(self):
