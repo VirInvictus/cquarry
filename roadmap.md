@@ -385,9 +385,13 @@ implementation today is the mine site.*
   The taxonomy-driven opinionated layer stays in Brandon's library linter; only
   the mechanical predicates move.
   - Upstream sync:
-    - [ ] *CalibreQuarry*: `--audit` renders the module's results (roadmap
-      Phase 15).
-    - [ ] *Hermitage*: health/dashboard views get the same predicates for free.
+    - [x] *CalibreQuarry*: `--audit` renders the module's results (roadmap
+      Phase 15). *(Shipped in CalibreQuarry 3.24.0; this box was a stale
+      duplicate left unticked — the approved-expansion sync below records the
+      same delivery. Tick added in the 2026-09-02 NEW-AUDIT Stage 0 pass.)*
+    - [x] *Hermitage*: health/dashboard views get the same predicates for free.
+      *(Shipped in Hermitage 1.7.0: `insights.py` predicates run through
+      `cquarry.integrity`. Same stale duplicate.)*
 - [x] **Analytics derivations.** *(cquarry side shipped in v1.8.0 as `cquarry.analytics`; timeline/author stats/rating distribution/vl overlap.)* `modes/analytics.py` derives reading pace
   (books added per month from `timestamp`), per-author stats (count, ratings,
   formats), and wing overlap (books matching multiple resolved virtual
@@ -395,9 +399,13 @@ implementation today is the mine site.*
   (`get_addition_timeline()`, `get_author_stats()`; overlap composes from the
   existing VL resolution); the frontend keeps formatting.
   - Upstream sync:
-    - [ ] *CalibreQuarry*: `--analytics` renders the module's results (roadmap
-      Phase 15).
-    - [ ] *Hermitage*: stats views; *Carrel*: collection-pace views.
+    - [x] *CalibreQuarry*: `--analytics` renders the module's results (roadmap
+      Phase 15). *(Shipped in CalibreQuarry 3.24.0; stale duplicate, ticked in
+      the 2026-09-02 NEW-AUDIT Stage 0 pass.)*
+    - [x] *Hermitage*: stats views *(shipped in Hermitage 1.7.0)*;
+      *Carrel*: collection-pace views *(deferred to Phase 7 with the rest of
+      the fork's analytics adoption, per the 0.6.28 patchnote's recorded
+      deferral — do not patch the fork twice)*.
 - [x] **`to_isbn13()` into `helpers`** *(v1.8.0, as part of the full ISBN family below.)*: generic ISBN-10→13 conversion currently
   lives in `modes/librarything.py`; identifier work elsewhere (including the
   write module's `set_identifier`) will want it.
