@@ -8,6 +8,15 @@ version = "1.9.0"
 description = "Canonical Calibre DB and Search Grammar Library"
 readme = "README.md"
 requires-python = ">=3.14"
+license = "MIT"
+keywords = ["calibre", "ebooks", "sqlite", "search", "metadata"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
 dependencies = []
 
 [project.urls]
