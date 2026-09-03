@@ -127,6 +127,16 @@ class TestListBooks(unittest.TestCase):
         )
         self.assertEqual([r["id"] for r in rows], [1, 2, 3])
 
+    def test_sort_key_actually_sorts_against_insertion_order(self):
+        # Regression (v1.11.1): the public "sort" key maps to the row's
+        # title_sort field; when it silently missed, the sort no-oped and
+        # the test only passed because the cache arrives title-sorted.
+        # Here the INSERTION order (1, 2, 3) differs from the title order.
+        rows = self.db.list_books(sort="title")
+        self.assertEqual([r["id"] for r in rows], [2, 1, 3])
+        rows = self.db.list_books(sort="sort", descending=True)
+        self.assertEqual([r["id"] for r in rows], [1, 2, 3])
+
     def test_unknown_key_in_sequence_raises(self):
         with self.assertRaises(ValueError):
             self.db.list_books(sort=("sort", "nope"))

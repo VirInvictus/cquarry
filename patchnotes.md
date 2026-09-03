@@ -1,4 +1,21 @@
 ## v1.9.0 (2026-09-02)
+## v1.11.1 (2026-09-03)
+
+### Fixed: the "sort" key was a silent no-op
+
+- **`list_books(sort="sort")` never sorted.** The hydrated rows store
+  Calibre's title-sort under `title_sort`, so the public `sort` key
+  resolved to a missing field, every comparator result was "equal", and
+  the listing came back in cache order — which happens to BE title-sort
+  order (the SELECT's `ORDER BY b.author_sort, b.sort`), so nothing
+  looked wrong and the 1.10.0 tests passed by that coincidence. Found by
+  the first real consumer: Carrel's descending search sort returned
+  ascending results. The public key now maps to the row field
+  (`_ROW_KEY_ALIASES`), and a regression test inserts books whose
+  insertion order differs from their title order so a no-op sort can
+  never pass again.
+- Suite 254 → 255.
+
 ## v1.11.0 (2026-09-03)
 
 ### list_books: multi-key sorts (the search-page sort-header shape)

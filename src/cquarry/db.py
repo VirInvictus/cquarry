@@ -635,6 +635,9 @@ class CalibreDB:
         "id",
     )
 
+    # Public API key -> hydrated-row field, where the two differ.
+    _ROW_KEY_ALIASES = {"sort": "title_sort"}
+
     def list_books(
         self,
         *,
@@ -679,12 +682,17 @@ class CalibreDB:
 
         # Multi-key with one direction flag, None-valued keys last regardless
         # of direction; numbers (rating, series_index) and ISO-ish strings
-        # both compare naturally within their type.
-        specs = [(key, descending) for key in keys]
+        # both compare naturally within their type. The public ``sort`` key
+        # names Calibre's title-sort, stored on the row as ``title_sort``
+        # (v1.11.1: an absent row key used to make the sort a silent no-op
+        # that only looked right because the cache arrives title-sorted).
+        specs = []
+        for key in keys:
+            specs.append((self._ROW_KEY_ALIASES.get(key, key), descending))
 
         def _cmp(ra: dict[str, Any], rb: dict[str, Any]) -> int:
-            for key, desc in specs:
-                a, b = ra.get(key), rb.get(key)
+            for row_key, desc in specs:
+                a, b = ra.get(row_key), rb.get(row_key)
                 if a is None and b is None:
                     continue
                 if a is None:
