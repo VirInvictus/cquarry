@@ -238,7 +238,27 @@ in calibre-web; and makes cquarry grow the read APIs a real web frontend needs.*
 >   research over verbatim code moves; if code must move, move it with its license notice and
 >   decide the project-wide licensing story first.
 
-- [ ] **Audit & boundary map:** enumerate every `cps/db.py` / `config_sql.py` call site and classify: replace-with-existing-cquarry-API, needs-new-cquarry-API, or calibre-web-domain-only (session/user/shelf logic stays).
+- [x] **Audit & boundary map:** enumerate every `cps/db.py` / `config_sql.py` call site and classify: replace-with-existing-cquarry-API, needs-new-cquarry-API, or calibre-web-domain-only (session/user/shelf logic stays).
+  *(Map completed 2026-09-03 (NEW-AUDIT Stage 6). Inventory: **cps/db.py**
+  (1,204 lines) = ORM models + CalibreDB session lifecycle + query builders
+  (`common_filters` 38 external call sites, `fill_indexpage` 31,
+  `get_cc_columns` 26, `speaking_language` 11, `generate_linked_query` 7,
+  `order_authors` 7, the get_book* family ~24); **config_sql.py** (588) =
+  ConfigSQL settings, domain-only, stays. Classification: (a) SEALED-DOMAIN,
+  no migration — editbooks, shelf, kobo/kobo_auth, tasks/convert,
+  tasks/metadata_backup, remotelogin (404'd or config-gated by the fork's
+  Phases 2/7; their ORM usage dies at rebrand). (b) LIVE READERS — web.py
+  (171 ORM refs, the monolith), opds.py (64), search.py (52, results-page
+  assembly), helper.py, basic.py, about.py (4, trivial). (c) CARREL MODULE
+  RESIDUALS — wings/saved_searches page over cquarry id sets through
+  `fill_indexpage` (the hybrid pattern); categories/series_info run one
+  session query each; stats/reading_shelf are raw SQL via session only.
+  (d) NEEDS-NEW-API, recorded not built — series indices keyed by series ID
+  (get_all_series() is name-keyed; interim = compose get_entities("series")
+  with get_all_series()), paginated sorted listing over id sets (the
+  fill_indexpage equivalent; prerequisite for unwinding the hybrid),
+  typeahead prefix queries. Licensing: README Acknowledgements verified
+  current; all pulls behavioral/clean-room.)*
 - [ ] **Fill the API gaps the audit finds** in cquarry (likely: paginated/sorted book listing, browse facets, shelf-equivalent reads), each flowing through the Cross-Repo Implementation Rule (upstream research for CalibreQuarry, Bindery, Hermitage).
 - [ ] **Route `cps/cover.py` through `get_cover_path()`** (deferred from Phase 6's cover-helpers item).
 - [ ] **Swap the data layer:** replace `db.py` internals module-by-module behind its existing interface until metadata.db access happens only through cquarry; delete dead code.
