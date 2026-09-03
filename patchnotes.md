@@ -1,4 +1,25 @@
 ## v1.9.0 (2026-09-02)
+## v1.10.0 (2026-09-03)
+
+### list_books: the paginated, sorted listing (Phase 7's needs-new-API gap)
+
+- **`CalibreDB.list_books(*, ids, sort, descending, offset, limit)`** pages
+  the cached rows for frontends that resolve a book-id set through the
+  search engine and then paginate it — the read-side answer that lets
+  Carrel unwind its hybrid (cquarry id sets paged through the fork's stock
+  ORM `fill_indexpage`). Pure over the cache, no SQL of its own; the
+  sort keys are `sort` (Calibre's title-sort), `title`, `timestamp`,
+  `pubdate`, `rating`, `series_index`, `id`; None-valued keys sort last
+  regardless of direction; unknown keys raise ValueError.
+- **Consumer postures (the §2.3 wave):** Carrel-calibre-web adopts in
+  0.6.31 (the wings/saved_searches/categories hybrid unwinds onto it).
+  CalibreQuarry, Hermitage, and Bindery waived: CalibreQuarry's CLI has no
+  pager surface (its verbs cover the need), Hermitage's grid is
+  client-side over the full load, and Bindery has no listing surface at
+  all.
+- Tests: suite grows 245 → 251 (ids filtering, every sort key both
+  directions, None-last semantics, offset/limit slices, error paths).
+
 
 ### Custom-column lookup parity (the read side catches up to the write side)
 

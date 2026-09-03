@@ -621,6 +621,64 @@ class CalibreDB:
         """)
         return [(row["name"], row["count"]) for row in cur.fetchall()]
 
+    _LIST_BOOKS_SORT_KEYS = (
+        "sort",
+        "title",
+        "timestamp",
+        "pubdate",
+        "rating",
+        "series_index",
+        "id",
+    )
+
+    def list_books(
+        self,
+        *,
+        ids: list[int] | None = None,
+        sort: str = "sort",
+        descending: bool = False,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Paginated, sorted book listing over the cached rows (cquarry 1.10).
+
+        The read-side answer to "page me this slice of the library": web
+        frontends resolve a book-id set through the search engine, then page
+        it. Pure over get_all_books()'s cache — no SQL of its own.
+
+        ``ids`` restricts the listing (None = whole library; the listing's
+        order comes from ``sort``, never from the id order). ``sort`` is one
+        of ``sort`` (Calibre's title-sort), ``title``, ``timestamp``,
+        ``pubdate``, ``rating``, ``series_index``, ``id``; None values sort
+        last regardless of direction. ``offset``/``limit`` slice after
+        sorting; ``limit=None`` runs to the end. Unknown keys raise
+        ValueError.
+        """
+        if sort not in self._LIST_BOOKS_SORT_KEYS:
+            raise ValueError(
+                f"Unknown sort key {sort!r}. Available: "
+                + ", ".join(self._LIST_BOOKS_SORT_KEYS)
+            )
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be >= 0")
+
+        wanted = set(ids) if ids is not None else None
+        rows = [r for r in self.get_all_books() if wanted is None or r["id"] in wanted]
+
+        # None-valued keys sort last regardless of direction, so the sort
+        # runs on the populated rows and the absent ones are appended.
+        # Numbers (rating, series_index) and ISO-ish strings both compare
+        # naturally within their type.
+        present = [r for r in rows if r.get(sort) is not None]
+        absent = [r for r in rows if r.get(sort) is None]
+        present.sort(key=lambda r: r[sort], reverse=descending)
+        rows = present + absent
+
+        end = offset + limit if limit is not None else None
+        return rows[offset:end]
+
     def get_all_series(self) -> list[dict[str, Any]]:
         """Return per-series rollups, computed in Python from get_all_books().
 

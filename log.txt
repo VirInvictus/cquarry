@@ -1,0 +1,344 @@
+﻿2026-09-02T22:42:59.3286443Z Current runner version: '2.337.0'
+2026-09-02T22:42:59.3311766Z ##[group]Runner Image Provisioner
+2026-09-02T22:42:59.3312669Z Hosted Compute Agent
+2026-09-02T22:42:59.3313359Z Version: 20260819.586
+2026-09-02T22:42:59.3314015Z Commit: 3cc4a88dfa507ef76119ad1bb3eccc6378bb2b76
+2026-09-02T22:42:59.3314988Z Build Date: 2026-08-18T23:20:18Z
+2026-09-02T22:42:59.3315812Z Worker ID: {b5a15ce5-5213-427f-b3ae-251b6722a7a9}
+2026-09-02T22:42:59.3316532Z Azure Region: westus
+2026-09-02T22:42:59.3317126Z ##[endgroup]
+2026-09-02T22:42:59.3318792Z ##[group]Operating System
+2026-09-02T22:42:59.3319443Z Ubuntu
+2026-09-02T22:42:59.3320136Z 24.04.4
+2026-09-02T22:42:59.3320643Z LTS
+2026-09-02T22:42:59.3321176Z ##[endgroup]
+2026-09-02T22:42:59.3321739Z ##[group]Runner Image
+2026-09-02T22:42:59.3322342Z Image: ubuntu-24.04
+2026-09-02T22:42:59.3322981Z Version: 20260823.283.1
+2026-09-02T22:42:59.3324640Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260823.283/images/ubuntu/Ubuntu2404-Readme.md
+2026-09-02T22:42:59.3326339Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283
+2026-09-02T22:42:59.3327317Z ##[endgroup]
+2026-09-02T22:42:59.3328521Z ##[group]GITHUB_TOKEN Permissions
+2026-09-02T22:42:59.3330741Z Contents: read
+2026-09-02T22:42:59.3331988Z Metadata: read
+2026-09-02T22:42:59.3332589Z ##[endgroup]
+2026-09-02T22:42:59.3335130Z Secret source: Actions
+2026-09-02T22:42:59.3336578Z Prepare workflow directory
+2026-09-02T22:42:59.3682867Z Prepare all required actions
+2026-09-02T22:42:59.3732870Z Getting action download info
+2026-09-02T22:42:59.7218005Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+2026-09-02T22:42:59.8681336Z Download action repository 'actions/setup-python@v5' (SHA:a26af69be951a213d495a4c3e4e4022e16d87065)
+2026-09-02T22:43:00.0473529Z Complete job name: test
+2026-09-02T22:43:00.1240005Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-02T22:43:00.1248883Z ##[group]Run actions/checkout@v4
+2026-09-02T22:43:00.1249718Z with:
+2026-09-02T22:43:00.1250169Z   repository: VirInvictus/cquarry
+2026-09-02T22:43:00.1254098Z   token: ***
+2026-09-02T22:43:00.1254736Z   ssh-strict: true
+2026-09-02T22:43:00.1255163Z   ssh-user: git
+2026-09-02T22:43:00.1255601Z   persist-credentials: true
+2026-09-02T22:43:00.1256091Z   clean: true
+2026-09-02T22:43:00.1256528Z   sparse-checkout-cone-mode: true
+2026-09-02T22:43:00.1257043Z   fetch-depth: 1
+2026-09-02T22:43:00.1257469Z   fetch-tags: false
+2026-09-02T22:43:00.1257902Z   show-progress: true
+2026-09-02T22:43:00.1258336Z   lfs: false
+2026-09-02T22:43:00.1258776Z   submodules: false
+2026-09-02T22:43:00.1259217Z   set-safe-directory: true
+2026-09-02T22:43:00.1259712Z   allow-unsafe-pr-checkout: false
+2026-09-02T22:43:00.1260491Z ##[endgroup]
+2026-09-02T22:43:00.2246455Z Syncing repository: VirInvictus/cquarry
+2026-09-02T22:43:00.2249314Z ##[group]Getting Git version info
+2026-09-02T22:43:00.2250634Z Working directory is '/home/runner/work/cquarry/cquarry'
+2026-09-02T22:43:00.2252494Z [command]/usr/bin/git version
+2026-09-02T22:43:00.2367851Z git version 2.55.0
+2026-09-02T22:43:00.2393633Z ##[endgroup]
+2026-09-02T22:43:00.2408193Z Temporarily overriding HOME='/home/runner/work/_temp/4b2c96fb-fc8a-44b9-9870-719a818c2811' before making global git config changes
+2026-09-02T22:43:00.2410621Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-02T22:43:00.2413937Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/cquarry/cquarry
+2026-09-02T22:43:00.2470989Z Deleting the contents of '/home/runner/work/cquarry/cquarry'
+2026-09-02T22:43:00.2476490Z ##[group]Initializing the repository
+2026-09-02T22:43:00.2482007Z [command]/usr/bin/git init /home/runner/work/cquarry/cquarry
+2026-09-02T22:43:00.2592673Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-09-02T22:43:00.2594585Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-09-02T22:43:00.2596999Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-09-02T22:43:00.2598220Z hint: call:
+2026-09-02T22:43:00.2598850Z hint:
+2026-09-02T22:43:00.2599659Z hint: 	git config --global init.defaultBranch <name>
+2026-09-02T22:43:00.2600640Z hint:
+2026-09-02T22:43:00.2601558Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-09-02T22:43:00.2603060Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-09-02T22:43:00.2604494Z hint:
+2026-09-02T22:43:00.2605155Z hint: 	git branch -m <name>
+2026-09-02T22:43:00.2605901Z hint:
+2026-09-02T22:43:00.2606929Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-09-02T22:43:00.2608519Z Initialized empty Git repository in /home/runner/work/cquarry/cquarry/.git/
+2026-09-02T22:43:00.2611143Z [command]/usr/bin/git remote add origin https://github.com/VirInvictus/cquarry
+2026-09-02T22:43:00.2678544Z ##[endgroup]
+2026-09-02T22:43:00.2679781Z ##[group]Disabling automatic garbage collection
+2026-09-02T22:43:00.2680867Z [command]/usr/bin/git config --local gc.auto 0
+2026-09-02T22:43:00.2704406Z ##[endgroup]
+2026-09-02T22:43:00.2706237Z ##[group]Setting up auth
+2026-09-02T22:43:00.2713390Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-02T22:43:00.2751321Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-02T22:43:00.3124744Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-02T22:43:00.3162405Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-02T22:43:00.3401226Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-02T22:43:00.3437880Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-02T22:43:00.3666189Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-09-02T22:43:00.3706365Z ##[endgroup]
+2026-09-02T22:43:00.3707857Z ##[group]Fetching the repository
+2026-09-02T22:43:00.3718230Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +5a46d7bf20357bdb50a3d22bedac3c7f186136ab:refs/remotes/origin/main
+2026-09-02T22:43:00.8035086Z From https://github.com/VirInvictus/cquarry
+2026-09-02T22:43:00.8036730Z  * [new ref]         5a46d7bf20357bdb50a3d22bedac3c7f186136ab -> origin/main
+2026-09-02T22:43:00.8040836Z ##[endgroup]
+2026-09-02T22:43:00.8042337Z ##[group]Determining the checkout info
+2026-09-02T22:43:00.8044439Z ##[endgroup]
+2026-09-02T22:43:00.8050753Z [command]/usr/bin/git sparse-checkout disable
+2026-09-02T22:43:00.8102689Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-09-02T22:43:00.8134031Z ##[group]Checking out the ref
+2026-09-02T22:43:00.8140554Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-09-02T22:43:00.8234681Z Switched to a new branch 'main'
+2026-09-02T22:43:00.8239686Z branch 'main' set up to track 'origin/main'.
+2026-09-02T22:43:00.8281809Z ##[endgroup]
+2026-09-02T22:43:00.8285603Z [command]/usr/bin/git log -1 --format=%H
+2026-09-02T22:43:00.8316565Z 5a46d7bf20357bdb50a3d22bedac3c7f186136ab
+2026-09-02T22:43:00.8600645Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-02T22:43:00.8603487Z ##[group]Run actions/setup-python@v5
+2026-09-02T22:43:00.8604021Z with:
+2026-09-02T22:43:00.8604756Z   python-version: 3.14
+2026-09-02T22:43:00.8605231Z   check-latest: false
+2026-09-02T22:43:00.8608962Z   token: ***
+2026-09-02T22:43:00.8609396Z   update-environment: true
+2026-09-02T22:43:00.8609888Z   allow-prereleases: false
+2026-09-02T22:43:00.8610385Z   freethreaded: false
+2026-09-02T22:43:00.8610822Z ##[endgroup]
+2026-09-02T22:43:01.0001410Z ##[group]Installed versions
+2026-09-02T22:43:01.0087103Z (node:2247) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-09-02T22:43:01.0089235Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-09-02T22:43:01.0090556Z Successfully set up CPython (3.14.7)
+2026-09-02T22:43:01.0092017Z ##[endgroup]
+2026-09-02T22:43:01.0377309Z ##[group]Run pip install .
+2026-09-02T22:43:01.0378450Z [36;1mpip install .[0m
+2026-09-02T22:43:01.0449345Z shell: /usr/bin/bash -e {0}
+2026-09-02T22:43:01.0450322Z env:
+2026-09-02T22:43:01.0451249Z   pythonLocation: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:01.0452870Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.14.7/x64/lib/pkgconfig
+2026-09-02T22:43:01.0454743Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:01.0456183Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:01.0457427Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:01.0458527Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.14.7/x64/lib
+2026-09-02T22:43:01.0459457Z ##[endgroup]
+2026-09-02T22:43:03.6919988Z Processing ./.
+2026-09-02T22:43:03.6934348Z   Installing build dependencies: started
+2026-09-02T22:43:04.8411303Z   Installing build dependencies: finished with status 'done'
+2026-09-02T22:43:04.8418238Z   Getting requirements to build wheel: started
+2026-09-02T22:43:05.0330072Z   Getting requirements to build wheel: finished with status 'done'
+2026-09-02T22:43:05.0339596Z   Preparing metadata (pyproject.toml): started
+2026-09-02T22:43:05.2915335Z   Preparing metadata (pyproject.toml): finished with status 'done'
+2026-09-02T22:43:05.2941884Z Building wheels for collected packages: cquarry
+2026-09-02T22:43:05.2950281Z   Building wheel for cquarry (pyproject.toml): started
+2026-09-02T22:43:05.3485529Z   Building wheel for cquarry (pyproject.toml): finished with status 'done'
+2026-09-02T22:43:05.3496324Z   Created wheel for cquarry: filename=cquarry-1.9.0-py3-none-any.whl size=53888 sha256=831254555ffbc9575bfe5f7b73b89d88b46ae9258ab874ea9637cc1dd1a3b453
+2026-09-02T22:43:05.3500067Z   Stored in directory: /tmp/pip-ephem-wheel-cache-jvr8mszg/wheels/aa/c3/c0/cf1cdaddfd6ad8d009d14961e3ae93b6be7a9d4e254019a603
+2026-09-02T22:43:05.3517747Z Successfully built cquarry
+2026-09-02T22:43:05.3673139Z Installing collected packages: cquarry
+2026-09-02T22:43:05.4195282Z Successfully installed cquarry-1.9.0
+2026-09-02T22:43:05.4866589Z ##[group]Run pip install ruff
+2026-09-02T22:43:05.4866944Z [36;1mpip install ruff[0m
+2026-09-02T22:43:05.4906162Z shell: /usr/bin/bash -e {0}
+2026-09-02T22:43:05.4906426Z env:
+2026-09-02T22:43:05.4906703Z   pythonLocation: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:05.4907155Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.14.7/x64/lib/pkgconfig
+2026-09-02T22:43:05.4907598Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:05.4907985Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:05.4908388Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:05.4908782Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.14.7/x64/lib
+2026-09-02T22:43:05.4909104Z ##[endgroup]
+2026-09-02T22:43:06.2519153Z Collecting ruff
+2026-09-02T22:43:06.2964459Z   Downloading ruff-0.16.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (26 kB)
+2026-09-02T22:43:06.3114685Z Downloading ruff-0.16.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (10.3 MB)
+2026-09-02T22:43:06.3743766Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.3/10.3 MB 230.3 MB/s  0:00:00
+2026-09-02T22:43:06.4064921Z Installing collected packages: ruff
+2026-09-02T22:43:06.5168915Z Successfully installed ruff-0.16.5
+2026-09-02T22:43:06.5819317Z ##[group]Run ruff check .
+2026-09-02T22:43:06.5819620Z [36;1mruff check .[0m
+2026-09-02T22:43:06.5857148Z shell: /usr/bin/bash -e {0}
+2026-09-02T22:43:06.5857408Z env:
+2026-09-02T22:43:06.5857674Z   pythonLocation: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:06.5858117Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.14.7/x64/lib/pkgconfig
+2026-09-02T22:43:06.5858562Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:06.5858959Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:06.5859359Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T22:43:06.5859773Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.14.7/x64/lib
+2026-09-02T22:43:06.5860117Z ##[endgroup]
+2026-09-02T22:43:06.6039423Z S110 `try`-`except`-`pass` detected, consider logging the exception
+2026-09-02T22:43:06.6040422Z   --> src/cquarry/config.py:22:9
+2026-09-02T22:43:06.6040845Z    |
+2026-09-02T22:43:06.6041387Z 20 |               with open(CONFIG_FILE, encoding="utf-8") as f:
+2026-09-02T22:43:06.6041978Z 21 |                   return json.load(f)
+2026-09-02T22:43:06.6042452Z 22 | /         except Exception:
+2026-09-02T22:43:06.6042866Z 23 | |             pass
+2026-09-02T22:43:06.6043231Z    | |________________^
+2026-09-02T22:43:06.6043611Z 24 |       return {}
+2026-09-02T22:43:06.6043945Z    |
+2026-09-02T22:43:06.6044120Z 
+2026-09-02T22:43:06.6044574Z BLE001 Do not catch blind exception: `Exception`
+2026-09-02T22:43:06.6045048Z   --> src/cquarry/config.py:22:16
+2026-09-02T22:43:06.6045307Z    |
+2026-09-02T22:43:06.6045594Z 20 |             with open(CONFIG_FILE, encoding="utf-8") as f:
+2026-09-02T22:43:06.6046088Z 21 |                 return json.load(f)
+2026-09-02T22:43:06.6046787Z 22 |         except Exception:
+2026-09-02T22:43:06.6047196Z    |                ^^^^^^^^^
+2026-09-02T22:43:06.6047581Z 23 |             pass
+2026-09-02T22:43:06.6047925Z 24 |     return {}
+2026-09-02T22:43:06.6048170Z    |
+2026-09-02T22:43:06.6048284Z 
+2026-09-02T22:43:06.6048421Z RUF012 Mutable default value for class attribute
+2026-09-02T22:43:06.6048747Z     --> src/cquarry/db.py:1461:22
+2026-09-02T22:43:06.6048990Z      |
+2026-09-02T22:43:06.6049279Z 1460 |       # Calibre custom-column datatype -> search-engine datatype.
+2026-09-02T22:43:06.6049651Z 1461 |       _CUSTOM_DT_MAP = {
+2026-09-02T22:43:06.6049892Z      |  ______________________^
+2026-09-02T22:43:06.6050217Z 1462 | |         "text": DT_TEXT,  # promoted to DT_TEXT_MULTI when is_multiple
+2026-09-02T22:43:06.6050581Z 1463 | |         "comments": DT_TEXT,
+2026-09-02T22:43:06.6050852Z 1464 | |         "enumeration": DT_TEXT,
+2026-09-02T22:43:06.6051125Z 1465 | |         "series": DT_TEXT,
+2026-09-02T22:43:06.6051369Z 1466 | |         "int": DT_INT,
+2026-09-02T22:43:06.6051610Z 1467 | |         "float": DT_FLOAT,
+2026-09-02T22:43:06.6051859Z 1468 | |         "rating": DT_RATING,
+2026-09-02T22:43:06.6052111Z 1469 | |         "bool": DT_BOOL,
+2026-09-02T22:43:06.6052357Z 1470 | |         "datetime": DT_DATE,
+2026-09-02T22:43:06.6052597Z 1471 | |     }
+2026-09-02T22:43:06.6052783Z      | |_____^
+2026-09-02T22:43:06.6052969Z 1472 |
+2026-09-02T22:43:06.6053224Z 1473 |       def _build_custom_locations(self) -> dict[str, str]:
+2026-09-02T22:43:06.6053545Z      |
+2026-09-02T22:43:06.6053868Z help: Consider initializing in `__init__` or annotating with `typing.ClassVar`
+2026-09-02T22:43:06.6054438Z 
+2026-09-02T22:43:06.6054601Z BLE001 Do not catch blind exception: `Exception`
+2026-09-02T22:43:06.6054937Z    --> src/cquarry/helpers.py:99:12
+2026-09-02T22:43:06.6055194Z     |
+2026-09-02T22:43:06.6055410Z  97 |                     return width, height
+2026-09-02T22:43:06.6055929Z  98 |                 f.seek(length - 2, os.SEEK_CUR)
+2026-09-02T22:43:06.6056227Z  99 |     except Exception:
+2026-09-02T22:43:06.6056458Z     |            ^^^^^^^^^
+2026-09-02T22:43:06.6056682Z 100 |         return None
+2026-09-02T22:43:06.6056895Z     |
+2026-09-02T22:43:06.6057005Z 
+2026-09-02T22:43:06.6057312Z BLE001 Do not catch blind exception: `Exception`
+2026-09-02T22:43:06.6057631Z    --> src/cquarry/helpers.py:117:12
+2026-09-02T22:43:06.6057883Z     |
+2026-09-02T22:43:06.6058127Z 115 |             width, height = struct.unpack(">II", wh)
+2026-09-02T22:43:06.6058486Z 116 |             return width, height
+2026-09-02T22:43:06.6058757Z 117 |     except Exception:
+2026-09-02T22:43:06.6058984Z     |            ^^^^^^^^^
+2026-09-02T22:43:06.6059201Z 118 |         return None
+2026-09-02T22:43:06.6059415Z     |
+2026-09-02T22:43:06.6059513Z 
+2026-09-02T22:43:06.6059632Z PIE810 Call `endswith` once with a `tuple`
+2026-09-02T22:43:06.6059921Z    --> src/cquarry/search.py:368:17
+2026-09-02T22:43:06.6060173Z     |
+2026-09-02T22:43:06.6060367Z 366 |             suffix = ":".join(words)
+2026-09-02T22:43:06.6060678Z 367 |             if self._ttype() == self.QUOTED_WORD and (
+2026-09-02T22:43:06.6061089Z 368 |                 not suffix or suffix.endswith("=") or suffix.endswith(":")
+2026-09-02T22:43:06.6061492Z     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-09-02T22:43:06.6061791Z 369 |             ):
+2026-09-02T22:43:06.6062042Z 370 |                 suffix += self._token(advance=True)
+2026-09-02T22:43:06.6062338Z     |
+2026-09-02T22:43:06.6062544Z help: Merge into a single `endswith` call
+2026-09-02T22:43:06.6062737Z 
+2026-09-02T22:43:06.6062848Z DTZ011 `datetime.date.today()` used
+2026-09-02T22:43:06.6063123Z    --> src/cquarry/search.py:591:17
+2026-09-02T22:43:06.6063367Z     |
+2026-09-02T22:43:06.6063556Z 589 |     @staticmethod
+2026-09-02T22:43:06.6063823Z 590 |     def _parse_target(q: str) -> tuple[date, int]:
+2026-09-02T22:43:06.6064138Z 591 |         today = date.today()
+2026-09-02T22:43:06.6064745Z     |                 ^^^^^^^^^^^^
+2026-09-02T22:43:06.6065002Z 592 |         ql = q.lower()
+2026-09-02T22:43:06.6065257Z 593 |         if ql in ("today", "_today"):
+2026-09-02T22:43:06.6065519Z     |
+2026-09-02T22:43:06.6065765Z help: Use `datetime.datetime.now(tz=...).date()` instead
+2026-09-02T22:43:06.6066003Z 
+2026-09-02T22:43:06.6066127Z PIE810 Call `startswith` once with a `tuple`
+2026-09-02T22:43:06.6066425Z    --> src/cquarry/search.py:669:8
+2026-09-02T22:43:06.6066668Z     |
+2026-09-02T22:43:06.6066862Z 667 |     s = str(raw).strip()
+2026-09-02T22:43:06.6067146Z 668 |     # Calibre's undefined-date sentinel
+2026-09-02T22:43:06.6067503Z 669 |     if s.startswith("0101-01-01") or s.startswith("0100-01-01"):
+2026-09-02T22:43:06.6067871Z     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-09-02T22:43:06.6068167Z 670 |         return None
+2026-09-02T22:43:06.6068389Z 671 |     try:
+2026-09-02T22:43:06.6068575Z     |
+2026-09-02T22:43:06.6068799Z help: Merge into a single `startswith` call
+2026-09-02T22:43:06.6068995Z 
+2026-09-02T22:43:06.6069154Z FURB162 Unnecessary timezone replacement with zero offset
+2026-09-02T22:43:06.6069497Z    --> src/cquarry/search.py:672:39
+2026-09-02T22:43:06.6069749Z     |
+2026-09-02T22:43:06.6069932Z 670 |         return None
+2026-09-02T22:43:06.6070150Z 671 |     try:
+2026-09-02T22:43:06.6070440Z 672 |         return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+2026-09-02T22:43:06.6070828Z     |                                       ^^^^^^^^^^^^^^^^^^^^^^^^
+2026-09-02T22:43:06.6071122Z 673 |     except ValueError:
+2026-09-02T22:43:06.6071361Z 674 |         pass
+2026-09-02T22:43:06.6071553Z     |
+2026-09-02T22:43:06.6071746Z help: Remove `.replace()` call
+2026-09-02T22:43:06.6071905Z 
+2026-09-02T22:43:06.6072032Z RUF012 Mutable default value for class attribute
+2026-09-02T22:43:06.6072337Z    --> src/cquarry/write.py:433:22
+2026-09-02T22:43:06.6072577Z     |
+2026-09-02T22:43:06.6072830Z 431 |       # -- Entity setters (Phase 6: write-side expansion) --
+2026-09-02T22:43:06.6073299Z 432 |
+2026-09-02T22:43:06.6073483Z 433 |       _ENTITY_TABLES = {
+2026-09-02T22:43:06.6073715Z     |  ______________________^
+2026-09-02T22:43:06.6073983Z 434 | |         "authors": ("books_authors_link", "author"),
+2026-09-02T22:43:06.6074792Z 435 | |         "series": ("books_series_link", "series"),
+2026-09-02T22:43:06.6075183Z 436 | |         "publishers": ("books_publishers_link", "publisher"),
+2026-09-02T22:43:06.6075539Z 437 | |         "tags": ("books_tags_link", "tag"),
+2026-09-02T22:43:06.6075880Z 438 | |         "languages": ("books_languages_link", "lang_code"),
+2026-09-02T22:43:06.6076242Z 439 | |         "ratings": ("books_ratings_link", "rating"),
+2026-09-02T22:43:06.6076535Z 440 | |     }
+2026-09-02T22:43:06.6076721Z     | |_____^
+2026-09-02T22:43:06.6076902Z 441 |
+2026-09-02T22:43:06.6077137Z 442 |       def _prune_orphans(self, table: str) -> None:
+2026-09-02T22:43:06.6077438Z     |
+2026-09-02T22:43:06.6077760Z help: Consider initializing in `__init__` or annotating with `typing.ClassVar`
+2026-09-02T22:43:06.6078077Z 
+2026-09-02T22:43:06.6078206Z RUF012 Mutable default value for class attribute
+2026-09-02T22:43:06.6078511Z    --> src/cquarry/write.py:454:17
+2026-09-02T22:43:06.6078752Z     |
+2026-09-02T22:43:06.6079056Z 453 |       # Entities whose tables carry a `sort` column (tags/languages do not).
+2026-09-02T22:43:06.6079440Z 454 |       _HAS_SORT = {
+2026-09-02T22:43:06.6079662Z     |  _________________^
+2026-09-02T22:43:06.6079883Z 455 | |         "authors": True,
+2026-09-02T22:43:06.6080125Z 456 | |         "series": True,
+2026-09-02T22:43:06.6080375Z 457 | |         "publishers": True,
+2026-09-02T22:43:06.6080625Z 458 | |         "tags": False,
+2026-09-02T22:43:06.6080861Z 459 | |         "languages": False,
+2026-09-02T22:43:06.6081097Z 460 | |     }
+2026-09-02T22:43:06.6081281Z     | |_____^
+2026-09-02T22:43:06.6081459Z 461 |
+2026-09-02T22:43:06.6081763Z 462 |       def _resolve_or_create(self, table: str, name_col: str, name: str) -> int:
+2026-09-02T22:43:06.6082146Z     |
+2026-09-02T22:43:06.6082453Z help: Consider initializing in `__init__` or annotating with `typing.ClassVar`
+2026-09-02T22:43:06.6082766Z 
+2026-09-02T22:43:06.6082852Z Found 11 errors.
+2026-09-02T22:43:06.6083200Z No fixes available (3 hidden fixes can be enabled with the `--unsafe-fixes` option).
+2026-09-02T22:43:06.6093522Z ##[error]Process completed with exit code 1.
+2026-09-02T22:43:06.6237265Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-02T22:43:06.6238515Z Post job cleanup.
+2026-09-02T22:43:06.7083785Z [command]/usr/bin/git version
+2026-09-02T22:43:06.7127319Z git version 2.55.0
+2026-09-02T22:43:06.7170851Z Temporarily overriding HOME='/home/runner/work/_temp/543f113c-a9ba-4c4f-977b-082a33b894d5' before making global git config changes
+2026-09-02T22:43:06.7171725Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-02T22:43:06.7176814Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/cquarry/cquarry
+2026-09-02T22:43:06.7216373Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-02T22:43:06.7250973Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-02T22:43:06.7513126Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-02T22:43:06.7542292Z http.https://github.com/.extraheader
+2026-09-02T22:43:06.7555144Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-09-02T22:43:06.7589459Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-02T22:43:06.7876901Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-02T22:43:06.7913951Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-02T22:43:06.8354889Z Cleaning up orphan processes
+2026-09-02T22:43:06.8662369Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

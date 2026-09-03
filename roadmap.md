@@ -238,6 +238,15 @@ in calibre-web; and makes cquarry grow the read APIs a real web frontend needs.*
 >   research over verbatim code moves; if code must move, move it with its license notice and
 >   decide the project-wide licensing story first.
 
+- [x] **Fill the API gaps the audit finds** (first gap closed 2026-09-03):
+      `CalibreDB.list_books(*, ids, sort, descending, offset, limit)` is the
+      paginated sorted listing over cached rows (v1.10.0; suite 245 → 251).
+      Consumer postures: Carrel-calibre-web adopts in 0.6.31 (unwinding the
+      hybrid); CalibreQuarry/Hermitage/Bindery waived (no pager surface /
+      client-side grid / no listing surface — recorded per the cross-repo
+      rule). Still open from the map: typeahead prefix queries (deferred —
+      no consumer surface needs it yet); series-indices-by-id (interim
+      name-join works; revisit if a second consumer appears).
 - [x] **Audit & boundary map:** enumerate every `cps/db.py` / `config_sql.py` call site and classify: replace-with-existing-cquarry-API, needs-new-cquarry-API, or calibre-web-domain-only (session/user/shelf logic stays).
   *(Map completed 2026-09-03 (NEW-AUDIT Stage 6). Inventory: **cps/db.py**
   (1,204 lines) = ORM models + CalibreDB session lifecycle + query builders

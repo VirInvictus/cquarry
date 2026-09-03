@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.9.0
+**Version:** 1.10.0
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -33,6 +33,8 @@ These are invariants. Violating any of them is a spec breach.
 **Caching.** `get_all_books()` executes an 8-JOIN query and caches the result list. `get_virtual_libraries()` reads the `preferences` table once and caches the dict. `count_books()` uses the books cache or the all-IDs cache if either is populated, falling back to a raw `COUNT(*)`. All caches are populated lazily on first access and are never invalidated (the database is read-only and the connection is short-lived). To prevent memory exhaustion on large libraries, massive text blocks like `comments` and custom columns of type `comments` are strictly lazy-loaded on-demand per book ID rather than eager-loaded during search view construction.
 
 **Custom column dispatch.** `load_custom_column()` checks `sqlite_master` for the existence of `books_custom_column_N_link` to decide between the normalized path (text, enumeration, series: value table joined through a link table) and the direct path (int, float, bool, datetime, comments: value table with a `book` column). This is safer than keying off `is_multiple`, because a single-valued enumeration is normalized but not multi-valued.
+
+**Paginated listing (cquarry ≥ 1.10).** `list_books(ids=, sort=, descending=, offset=, limit=)` pages the cached rows for frontends that resolve an id set through the search engine and then paginate. Pure over the cache (no SQL of its own); None-valued sort keys sort last regardless of direction; unknown sort keys and negative offsets/limits raise.
 
 **Custom column lookup parity (cquarry ≥ 1.9).** Columns are addressable by `#label`, bare label, or display name through `find_custom_column()` / `load_custom_column()`: a leading `#` matches the label only (labels are unique, never ambiguous), otherwise an exact display-name match wins (the historical key, so existing callers keep working) and a bare label is the graceful fallback; label matching is case-insensitive, mirroring the write module's `_custom_column_meta`. `get_custom_columns()` stays keyed by display name.
 

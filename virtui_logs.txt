@@ -1,0 +1,171 @@
+﻿2026-09-02T21:58:55.3210387Z Current runner version: '2.337.0'
+2026-09-02T21:58:55.3236017Z ##[group]Runner Image Provisioner
+2026-09-02T21:58:55.3237009Z Hosted Compute Agent
+2026-09-02T21:58:55.3237613Z Version: 20260819.586
+2026-09-02T21:58:55.3238232Z Commit: 3cc4a88dfa507ef76119ad1bb3eccc6378bb2b76
+2026-09-02T21:58:55.3239030Z Build Date: 2026-08-18T23:20:18Z
+2026-09-02T21:58:55.3239746Z Worker ID: {b557b1ce-06ef-4356-8885-89ae9025c70a}
+2026-09-02T21:58:55.3240503Z Azure Region: westus
+2026-09-02T21:58:55.3241112Z ##[endgroup]
+2026-09-02T21:58:55.3243135Z ##[group]Operating System
+2026-09-02T21:58:55.3243885Z Ubuntu
+2026-09-02T21:58:55.3244440Z 24.04.4
+2026-09-02T21:58:55.3244980Z LTS
+2026-09-02T21:58:55.3245717Z ##[endgroup]
+2026-09-02T21:58:55.3246320Z ##[group]Runner Image
+2026-09-02T21:58:55.3247014Z Image: ubuntu-24.04
+2026-09-02T21:58:55.3247569Z Version: 20260823.283.1
+2026-09-02T21:58:55.3248844Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260823.283/images/ubuntu/Ubuntu2404-Readme.md
+2026-09-02T21:58:55.3250396Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283
+2026-09-02T21:58:55.3251446Z ##[endgroup]
+2026-09-02T21:58:55.3252643Z ##[group]GITHUB_TOKEN Permissions
+2026-09-02T21:58:55.3254887Z Contents: read
+2026-09-02T21:58:55.3255854Z Metadata: read
+2026-09-02T21:58:55.3256422Z Packages: read
+2026-09-02T21:58:55.3257445Z ##[endgroup]
+2026-09-02T21:58:55.3259648Z Secret source: Actions
+2026-09-02T21:58:55.3260704Z Prepare workflow directory
+2026-09-02T21:58:55.3591991Z Prepare all required actions
+2026-09-02T21:58:55.3640266Z Getting action download info
+2026-09-02T21:58:55.7177877Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+2026-09-02T21:58:55.8478509Z Download action repository 'actions/setup-python@v5' (SHA:a26af69be951a213d495a4c3e4e4022e16d87065)
+2026-09-02T21:58:56.0337986Z Complete job name: test
+2026-09-02T21:58:56.1101815Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-02T21:58:56.1111060Z ##[group]Run actions/checkout@v4
+2026-09-02T21:58:56.1111801Z with:
+2026-09-02T21:58:56.1112250Z   repository: VirInvictus/vir-tui
+2026-09-02T21:58:56.1116245Z   token: ***
+2026-09-02T21:58:56.1116678Z   ssh-strict: true
+2026-09-02T21:58:56.1117114Z   ssh-user: git
+2026-09-02T21:58:56.1117549Z   persist-credentials: true
+2026-09-02T21:58:56.1118037Z   clean: true
+2026-09-02T21:58:56.1118477Z   sparse-checkout-cone-mode: true
+2026-09-02T21:58:56.1118997Z   fetch-depth: 1
+2026-09-02T21:58:56.1119422Z   fetch-tags: false
+2026-09-02T21:58:56.1119861Z   show-progress: true
+2026-09-02T21:58:56.1120303Z   lfs: false
+2026-09-02T21:58:56.1120759Z   submodules: false
+2026-09-02T21:58:56.1121199Z   set-safe-directory: true
+2026-09-02T21:58:56.1121711Z   allow-unsafe-pr-checkout: false
+2026-09-02T21:58:56.1122500Z ##[endgroup]
+2026-09-02T21:58:56.2149053Z Syncing repository: VirInvictus/vir-tui
+2026-09-02T21:58:56.2151347Z ##[group]Getting Git version info
+2026-09-02T21:58:56.2152087Z Working directory is '/home/runner/work/vir-tui/vir-tui'
+2026-09-02T21:58:56.2153518Z [command]/usr/bin/git version
+2026-09-02T21:58:56.2216093Z git version 2.55.0
+2026-09-02T21:58:56.2256778Z ##[endgroup]
+2026-09-02T21:58:56.2266178Z Temporarily overriding HOME='/home/runner/work/_temp/e435ec4c-b152-45dd-823d-6ffbfff831c2' before making global git config changes
+2026-09-02T21:58:56.2269054Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-02T21:58:56.2271441Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/vir-tui/vir-tui
+2026-09-02T21:58:56.2326614Z Deleting the contents of '/home/runner/work/vir-tui/vir-tui'
+2026-09-02T21:58:56.2331260Z ##[group]Initializing the repository
+2026-09-02T21:58:56.2336283Z [command]/usr/bin/git init /home/runner/work/vir-tui/vir-tui
+2026-09-02T21:58:56.2444824Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-09-02T21:58:56.2449400Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-09-02T21:58:56.2450949Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-09-02T21:58:56.2452246Z hint: call:
+2026-09-02T21:58:56.2453064Z hint:
+2026-09-02T21:58:56.2453954Z hint: 	git config --global init.defaultBranch <name>
+2026-09-02T21:58:56.2454980Z hint:
+2026-09-02T21:58:56.2456237Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-09-02T21:58:56.2457842Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-09-02T21:58:56.2459143Z hint:
+2026-09-02T21:58:56.2459832Z hint: 	git branch -m <name>
+2026-09-02T21:58:56.2460623Z hint:
+2026-09-02T21:58:56.2461725Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-09-02T21:58:56.2463701Z Initialized empty Git repository in /home/runner/work/vir-tui/vir-tui/.git/
+2026-09-02T21:58:56.2468970Z [command]/usr/bin/git remote add origin https://github.com/VirInvictus/vir-tui
+2026-09-02T21:58:56.2517987Z ##[endgroup]
+2026-09-02T21:58:56.2519420Z ##[group]Disabling automatic garbage collection
+2026-09-02T21:58:56.2521729Z [command]/usr/bin/git config --local gc.auto 0
+2026-09-02T21:58:56.2554637Z ##[endgroup]
+2026-09-02T21:58:56.2556096Z ##[group]Setting up auth
+2026-09-02T21:58:56.2561652Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-02T21:58:56.2611810Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-02T21:58:56.2985388Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-02T21:58:56.3026492Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-02T21:58:56.3260372Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-02T21:58:56.3296978Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-02T21:58:56.3523283Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-09-02T21:58:56.3563265Z ##[endgroup]
+2026-09-02T21:58:56.3564073Z ##[group]Fetching the repository
+2026-09-02T21:58:56.3573640Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +6d87b9590e46b963a47b8dd8fd0f69cbffa5c9d2:refs/tags/v2.2.0
+2026-09-02T21:58:56.7603037Z From https://github.com/VirInvictus/vir-tui
+2026-09-02T21:58:56.7604034Z  * [new ref]         6d87b9590e46b963a47b8dd8fd0f69cbffa5c9d2 -> v2.2.0
+2026-09-02T21:58:56.7607716Z ##[endgroup]
+2026-09-02T21:58:56.7608681Z ##[group]Determining the checkout info
+2026-09-02T21:58:56.7610507Z ##[endgroup]
+2026-09-02T21:58:56.7616452Z [command]/usr/bin/git sparse-checkout disable
+2026-09-02T21:58:56.7670266Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-09-02T21:58:56.7702803Z ##[group]Checking out the ref
+2026-09-02T21:58:56.7706657Z [command]/usr/bin/git checkout --progress --force refs/tags/v2.2.0
+2026-09-02T21:58:56.7770407Z Note: switching to 'refs/tags/v2.2.0'.
+2026-09-02T21:58:56.7771072Z 
+2026-09-02T21:58:56.7771703Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-09-02T21:58:56.7773209Z changes and commit them, and you can discard any commits you make in this
+2026-09-02T21:58:56.7774449Z state without impacting any branches by switching back to a branch.
+2026-09-02T21:58:56.7775015Z 
+2026-09-02T21:58:56.7775384Z If you want to create a new branch to retain commits you create, you may
+2026-09-02T21:58:56.7777049Z do so (now or later) by using -c with the switch command. Example:
+2026-09-02T21:58:56.7777548Z 
+2026-09-02T21:58:56.7777757Z   git switch -c <new-branch-name>
+2026-09-02T21:58:56.7778099Z 
+2026-09-02T21:58:56.7778303Z Or undo this operation with:
+2026-09-02T21:58:56.7778617Z 
+2026-09-02T21:58:56.7778806Z   git switch -
+2026-09-02T21:58:56.7779046Z 
+2026-09-02T21:58:56.7779553Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-09-02T21:58:56.7780551Z 
+2026-09-02T21:58:56.7781001Z HEAD is now at 6d87b95 ci: add PyPI publish workflow
+2026-09-02T21:58:56.7783421Z ##[endgroup]
+2026-09-02T21:58:56.7823692Z [command]/usr/bin/git log -1 --format=%H
+2026-09-02T21:58:56.7850937Z 6d87b9590e46b963a47b8dd8fd0f69cbffa5c9d2
+2026-09-02T21:58:56.8136539Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-02T21:58:56.8139211Z ##[group]Run actions/setup-python@v5
+2026-09-02T21:58:56.8139734Z with:
+2026-09-02T21:58:56.8140147Z   python-version: 3.14
+2026-09-02T21:58:56.8140603Z   check-latest: false
+2026-09-02T21:58:56.8144341Z   token: ***
+2026-09-02T21:58:56.8144770Z   update-environment: true
+2026-09-02T21:58:56.8145261Z   allow-prereleases: false
+2026-09-02T21:58:56.8145993Z   freethreaded: false
+2026-09-02T21:58:56.8146431Z ##[endgroup]
+2026-09-02T21:58:56.9470372Z ##[group]Installed versions
+2026-09-02T21:58:56.9554515Z (node:2242) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-09-02T21:58:56.9556427Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-09-02T21:58:56.9557468Z Successfully set up CPython (3.14.7)
+2026-09-02T21:58:56.9558399Z ##[endgroup]
+2026-09-02T21:58:56.9730231Z ##[group]Run PYTHONPATH=src python -m unittest discover -s tests
+2026-09-02T21:58:56.9731203Z [36;1mPYTHONPATH=src python -m unittest discover -s tests[0m
+2026-09-02T21:58:56.9780051Z shell: /usr/bin/bash -e {0}
+2026-09-02T21:58:56.9780591Z env:
+2026-09-02T21:58:56.9781103Z   pythonLocation: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T21:58:56.9781936Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.14.7/x64/lib/pkgconfig
+2026-09-02T21:58:56.9782746Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T21:58:56.9783482Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T21:58:56.9784228Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.14.7/x64
+2026-09-02T21:58:56.9784973Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.14.7/x64/lib
+2026-09-02T21:58:56.9785826Z ##[endgroup]
+2026-09-02T21:58:57.3096500Z 
+2026-09-02T21:58:57.3097441Z ----------------------------------------------------------------------
+2026-09-02T21:58:57.3098681Z Ran 0 tests in 0.000s
+2026-09-02T21:58:57.3099121Z 
+2026-09-02T21:58:57.3099420Z NO TESTS RAN
+2026-09-02T21:58:57.3229895Z ##[error]Process completed with exit code 5.
+2026-09-02T21:58:57.3398267Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-02T21:58:57.3400383Z Post job cleanup.
+2026-09-02T21:58:57.4276787Z [command]/usr/bin/git version
+2026-09-02T21:58:57.4314028Z git version 2.55.0
+2026-09-02T21:58:57.4354863Z Temporarily overriding HOME='/home/runner/work/_temp/35d10b7d-497e-46bb-9cd5-95a1afa94b9f' before making global git config changes
+2026-09-02T21:58:57.4357848Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-02T21:58:57.4363688Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/vir-tui/vir-tui
+2026-09-02T21:58:57.4407496Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-02T21:58:57.4448386Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-02T21:58:57.4708359Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-02T21:58:57.4739581Z http.https://github.com/.extraheader
+2026-09-02T21:58:57.4751367Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-09-02T21:58:57.4786189Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-02T21:58:57.5100284Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-02T21:58:57.5152507Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-02T21:58:57.5620601Z Cleaning up orphan processes
+2026-09-02T21:58:57.6063037Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

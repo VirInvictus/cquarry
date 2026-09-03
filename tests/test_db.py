@@ -8,6 +8,117 @@ import unittest
 from cquarry.db import CalibreDB
 
 
+class TestListBooks(unittest.TestCase):
+    """list_books: the paginated, sorted listing over cached rows (1.10)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,"
+            " series_index REAL, path TEXT, has_cover INTEGER)"
+        )
+        rows = [
+            (1, "Zebra", "Zebra, A", "2021-01-01", None, 1.0),
+            (2, "Mango", "Mango", "2020-05-01", "1990-06-01", 2.0),
+            (3, "apple", "Apple", "2022-12-31", "1988-01-01", None),
+        ]
+        for bid, title, sort, ts, pub, sidx in rows:
+            conn.execute(
+                "INSERT INTO books (id, title, sort, timestamp, pubdate,"
+                " series_index, path, has_cover) VALUES (?,?,?,?,?,?,?,1)",
+                (bid, title, sort, ts, pub, sidx, f"p{bid}"),
+            )
+        conn.execute(
+            "CREATE TABLE books_series_link (id INTEGER PRIMARY KEY,"
+            " book INTEGER, series INTEGER)"
+        )
+        conn.execute("CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT)")
+        for table in (
+            "authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT)",
+            "books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER)",
+            "tags (id INTEGER PRIMARY KEY, name TEXT)",
+            "books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER)",
+            (
+                "data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT,"
+                " uncompressed_size INTEGER, name TEXT)"
+            ),
+            "publishers (id INTEGER PRIMARY KEY, name TEXT)",
+            "languages (id INTEGER PRIMARY KEY, lang_code TEXT)",
+            "books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER)",
+            "books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER)",
+            "comments (id INTEGER PRIMARY KEY, book INTEGER, text TEXT)",
+            "identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT)",
+            (
+                "annotations (id INTEGER PRIMARY KEY, book INTEGER, format TEXT,"
+                " user_type TEXT, user TEXT, timestamp TEXT, annot_id TEXT,"
+                " annot_type TEXT, annot_data TEXT, searchable_text TEXT)"
+            ),
+            "books_pages_link (id INTEGER PRIMARY KEY, book INTEGER, pages INTEGER, algorithm TEXT)",
+            "library_id (id INTEGER PRIMARY KEY, uuid TEXT)",
+        ):
+            conn.execute(f"CREATE TABLE {table}")
+        # ratings: book 2 rated 8, book 3 rated 4, book 1 unrated
+        conn.execute("CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER)")
+        conn.execute("INSERT INTO ratings (id, rating) VALUES (1, 8), (2, 4)")
+        conn.execute(
+            "CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY,"
+            " book INTEGER, rating INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO books_ratings_link (id, book, rating) VALUES (?, ?, ?)",
+            [(1, 2, 1), (2, 3, 2)],
+        )
+        conn.commit()
+        conn.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def _ids(self, rows):
+        return [r["id"] for r in rows]
+
+    def test_default_sort_is_calibre_title_sort(self):
+        rows = self.db.list_books()
+        self.assertEqual(self._ids(rows), [3, 2, 1])  # Apple, Mango, Zebra A→
+
+    def test_ids_filter_ignores_id_order(self):
+        rows = self.db.list_books(ids=[1, 3])
+        self.assertEqual(self._ids(rows), [3, 1])
+        self.assertEqual(self.db.list_books(ids=[999]), [])
+
+    def test_sort_keys_and_descending(self):
+        self.assertEqual(
+            self._ids(self.db.list_books(sort="timestamp", descending=True)),
+            [3, 1, 2],
+        )
+        self.assertEqual(
+            self._ids(self.db.list_books(sort="pubdate")), [3, 2, 1]
+        )  # None (book 1) sorts last either way
+        self.assertEqual(
+            self._ids(self.db.list_books(sort="rating", descending=True)), [2, 3, 1]
+        )
+        self.assertEqual(
+            self._ids(self.db.list_books(sort="series_index")), [1, 2, 3]
+        )  # book 3's None last
+
+    def test_offset_and_limit(self):
+        self.assertEqual(self._ids(self.db.list_books(offset=1, limit=1)), [2])
+        self.assertEqual(len(self.db.list_books(offset=2)), 1)
+
+    def test_unknown_sort_key_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.list_books(sort="nope")
+
+    def test_negative_offset_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.list_books(offset=-1)
+
+
 class TestCalibreDB(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
