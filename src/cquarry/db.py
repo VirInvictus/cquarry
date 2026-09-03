@@ -1,4 +1,5 @@
 import contextlib
+import functools
 import json
 import os
 import re
@@ -6,6 +7,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+from collections.abc import Sequence
 from typing import Any, Self
 
 from cquarry.helpers import calibre_rating_to_stars, db_uri_ro, strip_html, title_sort
@@ -628,6 +630,8 @@ class CalibreDB:
         "pubdate",
         "rating",
         "series_index",
+        "author_sort",
+        "series",
         "id",
     )
 
@@ -635,7 +639,7 @@ class CalibreDB:
         self,
         *,
         ids: list[int] | None = None,
-        sort: str = "sort",
+        sort: str | Sequence[str] = "sort",
         descending: bool = False,
         offset: int = 0,
         limit: int | None = None,
@@ -648,17 +652,23 @@ class CalibreDB:
 
         ``ids`` restricts the listing (None = whole library; the listing's
         order comes from ``sort``, never from the id order). ``sort`` is one
-        of ``sort`` (Calibre's title-sort), ``title``, ``timestamp``,
-        ``pubdate``, ``rating``, ``series_index``, ``id``; None values sort
-        last regardless of direction. ``offset``/``limit`` slice after
-        sorting; ``limit=None`` runs to the end. Unknown keys raise
-        ValueError.
+        key or a sequence of keys (primary first, one direction for all —
+        author sort tie-breaks on series name then series index); each is
+        one of ``sort`` (Calibre's title-sort), ``title``, ``timestamp``,
+        ``pubdate``, ``rating``, ``series_index``, ``author_sort``,
+        ``series``, ``id``; None values sort last regardless of direction.
+        ``offset``/``limit`` slice after sorting; ``limit=None`` runs to the
+        end. Unknown keys raise ValueError.
         """
-        if sort not in self._LIST_BOOKS_SORT_KEYS:
-            raise ValueError(
-                f"Unknown sort key {sort!r}. Available: "
-                + ", ".join(self._LIST_BOOKS_SORT_KEYS)
-            )
+        keys = (sort,) if isinstance(sort, str) else tuple(sort)
+        if not keys:
+            raise ValueError("sort must name at least one key")
+        for key in keys:
+            if key not in self._LIST_BOOKS_SORT_KEYS:
+                raise ValueError(
+                    f"Unknown sort key {key!r}. Available: "
+                    + ", ".join(self._LIST_BOOKS_SORT_KEYS)
+                )
         if offset < 0:
             raise ValueError("offset must be >= 0")
         if limit is not None and limit < 0:
@@ -667,14 +677,27 @@ class CalibreDB:
         wanted = set(ids) if ids is not None else None
         rows = [r for r in self.get_all_books() if wanted is None or r["id"] in wanted]
 
-        # None-valued keys sort last regardless of direction, so the sort
-        # runs on the populated rows and the absent ones are appended.
-        # Numbers (rating, series_index) and ISO-ish strings both compare
-        # naturally within their type.
-        present = [r for r in rows if r.get(sort) is not None]
-        absent = [r for r in rows if r.get(sort) is None]
-        present.sort(key=lambda r: r[sort], reverse=descending)
-        rows = present + absent
+        # Multi-key with one direction flag, None-valued keys last regardless
+        # of direction; numbers (rating, series_index) and ISO-ish strings
+        # both compare naturally within their type.
+        specs = [(key, descending) for key in keys]
+
+        def _cmp(ra: dict[str, Any], rb: dict[str, Any]) -> int:
+            for key, desc in specs:
+                a, b = ra.get(key), rb.get(key)
+                if a is None and b is None:
+                    continue
+                if a is None:
+                    return 1
+                if b is None:
+                    return -1
+                if a < b:
+                    return 1 if desc else -1
+                if a > b:
+                    return -1 if desc else 1
+            return 0
+
+        rows.sort(key=functools.cmp_to_key(_cmp))
 
         end = offset + limit if limit is not None else None
         return rows[offset:end]

@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.10.0
+**Version:** 1.11.0
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -34,7 +34,7 @@ These are invariants. Violating any of them is a spec breach.
 
 **Custom column dispatch.** `load_custom_column()` checks `sqlite_master` for the existence of `books_custom_column_N_link` to decide between the normalized path (text, enumeration, series: value table joined through a link table) and the direct path (int, float, bool, datetime, comments: value table with a `book` column). This is safer than keying off `is_multiple`, because a single-valued enumeration is normalized but not multi-valued.
 
-**Paginated listing (cquarry ≥ 1.10).** `list_books(ids=, sort=, descending=, offset=, limit=)` pages the cached rows for frontends that resolve an id set through the search engine and then paginate. Pure over the cache (no SQL of its own); None-valued sort keys sort last regardless of direction; unknown sort keys and negative offsets/limits raise.
+**Paginated listing (cquarry ≥ 1.10).** `list_books(ids=, sort=, descending=, offset=, limit=)` pages the cached rows for frontends that resolve an id set through the search engine and then paginate. `sort` takes one key or a sequence (primary first, one direction for all — the author-sort/series-name/series-index shape). Pure over the cache (no SQL of its own); None-valued sort keys sort last regardless of direction; unknown sort keys and negative offsets/limits raise.
 
 **Custom column lookup parity (cquarry ≥ 1.9).** Columns are addressable by `#label`, bare label, or display name through `find_custom_column()` / `load_custom_column()`: a leading `#` matches the label only (labels are unique, never ambiguous), otherwise an exact display-name match wins (the historical key, so existing callers keep working) and a bare label is the graceful fallback; label matching is case-insensitive, mirroring the write module's `_custom_column_meta`. `get_custom_columns()` stays keyed by display name.
 

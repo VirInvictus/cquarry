@@ -1,4 +1,21 @@
 ## v1.9.0 (2026-09-02)
+## v1.11.0 (2026-09-03)
+
+### list_books: multi-key sorts (the search-page sort-header shape)
+
+- **`sort` accepts a key sequence** (primary first, one direction for
+  all) alongside a single key, and `author_sort`/`series` join the key
+  set — together covering the eight-button search-page sort header
+  (`authaz` = author_sort, series, series_index; `authza` = the same
+  descending) that motivated the API. None-valued keys still sink last
+  regardless of direction; unknown keys raise. Implemented as an explicit
+  comparator (`functools.cmp_to_key`) so the None handling and multi-key
+  ordering are one readable rule.
+- Tests: suite grows 251 → 254 (multi-key ordering both directions with
+  a NULL tie-breaker, unknown-key-in-sequence, empty-sequence).
+- Consumer postures unchanged from 1.10.0: the fork adopts immediately;
+  CalibreQuarry/Hermitage/Bindery waivers stand.
+
 ## v1.10.0 (2026-09-03)
 
 ### list_books: the paginated, sorted listing (Phase 7's needs-new-API gap)

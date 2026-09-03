@@ -25,11 +25,13 @@ class TestListBooks(unittest.TestCase):
             (2, "Mango", "Mango", "2020-05-01", "1990-06-01", 2.0),
             (3, "apple", "Apple", "2022-12-31", "1988-01-01", None),
         ]
+        author_sorts = {1: "Beta, A", 2: "Alpha, B", 3: None}
         for bid, title, sort, ts, pub, sidx in rows:
             conn.execute(
-                "INSERT INTO books (id, title, sort, timestamp, pubdate,"
-                " series_index, path, has_cover) VALUES (?,?,?,?,?,?,?,1)",
-                (bid, title, sort, ts, pub, sidx, f"p{bid}"),
+                "INSERT INTO books (id, title, sort, author_sort, timestamp,"
+                " pubdate, series_index, path, has_cover)"
+                " VALUES (?,?,?,?,?,?,?,?,1)",
+                (bid, title, sort, author_sorts[bid], ts, pub, sidx, f"p{bid}"),
             )
         conn.execute(
             "CREATE TABLE books_series_link (id INTEGER PRIMARY KEY,"
@@ -109,6 +111,29 @@ class TestListBooks(unittest.TestCase):
     def test_offset_and_limit(self):
         self.assertEqual(self._ids(self.db.list_books(offset=1, limit=1)), [2])
         self.assertEqual(len(self.db.list_books(offset=2)), 1)
+
+    def test_multi_key_sort_with_one_direction(self):
+        # The authaz shape: author_sort primary, series name then series
+        # index tie-breaking, one direction for all keys. Book 3 has no
+        # author_sort value here, so it sinks last regardless.
+        rows = self.db.list_books(
+            sort=("author_sort", "series", "series_index"), descending=False
+        )
+        # author_sort asc: Alpha (2) then Beta (1); NULL author_sort sinks
+        # last regardless of direction.
+        self.assertEqual([r["id"] for r in rows], [2, 1, 3])
+        rows = self.db.list_books(
+            sort=("author_sort", "series", "series_index"), descending=True
+        )
+        self.assertEqual([r["id"] for r in rows], [1, 2, 3])
+
+    def test_unknown_key_in_sequence_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.list_books(sort=("sort", "nope"))
+
+    def test_empty_key_sequence_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.list_books(sort=())
 
     def test_unknown_sort_key_raises(self):
         with self.assertRaises(ValueError):

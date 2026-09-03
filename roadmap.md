@@ -247,6 +247,11 @@ in calibre-web; and makes cquarry grow the read APIs a real web frontend needs.*
       rule). Still open from the map: typeahead prefix queries (deferred —
       no consumer surface needs it yet); series-indices-by-id (interim
       name-join works; revisit if a second consumer appears).
+      **v1.11.0 addendum:** `list_books` gained multi-key sorts
+      (`sort` as a key sequence, one direction for all) plus the
+      `author_sort`/`series` keys — the search-page sort-header shape the
+      fork's results swap needed (suite 251 → 254; consumer postures
+      unchanged: fork adopts immediately, the other three waivers stand).
 - [x] **Audit & boundary map:** enumerate every `cps/db.py` / `config_sql.py` call site and classify: replace-with-existing-cquarry-API, needs-new-cquarry-API, or calibre-web-domain-only (session/user/shelf logic stays).
   *(Map completed 2026-09-03 (NEW-AUDIT Stage 6). Inventory: **cps/db.py**
   (1,204 lines) = ORM models + CalibreDB session lifecycle + query builders
