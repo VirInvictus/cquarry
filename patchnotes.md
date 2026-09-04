@@ -1,4 +1,3 @@
-## v1.9.0 (2026-09-02)
 ## v1.11.1 (2026-09-03)
 
 ### Fixed: the "sort" key was a silent no-op
@@ -54,6 +53,8 @@
 - Tests: suite grows 245 → 251 (ids filtering, every sort key both
   directions, None-last semantics, offset/limit slices, error paths).
 
+
+## v1.9.0 (2026-09-02)
 
 ### Custom-column lookup parity (the read side catches up to the write side)
 

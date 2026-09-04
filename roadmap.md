@@ -274,8 +274,8 @@ in calibre-web; and makes cquarry grow the read APIs a real web frontend needs.*
   typeahead prefix queries. Licensing: README Acknowledgements verified
   current; all pulls behavioral/clean-room.)*
 - [ ] **Fill the API gaps the audit finds** in cquarry (likely: paginated/sorted book listing, browse facets, shelf-equivalent reads), each flowing through the Cross-Repo Implementation Rule (upstream research for CalibreQuarry, Bindery, Hermitage).
-- [ ] **Route `cps/cover.py` through `get_cover_path()`** (deferred from Phase 6's cover-helpers item).
-- [ ] **Swap the data layer:** replace `db.py` internals module-by-module behind its existing interface until metadata.db access happens only through cquarry; delete dead code.
+- [x] **Route `cps/cover.py` through `get_cover_path()`** (deferred from Phase 6's cover-helpers item). *(Done in Carrel-calibre-web 0.6.30: the cover route resolves through cquarry's get_cover_path via the fork's shared library_cache quarry(); png-only catalogued covers now serve their real art.)*
+- [ ] **Swap the data layer:** replace `db.py` internals module-by-module behind its existing interface until metadata.db access happens only through cquarry; delete dead code. *(IN PROGRESS: series_info, covers, about counts, wings, saved_searches, categories, search results, /basic, and ALL index.html browse grids are off the ORM (fork 0.6.30-0.6.36); remaining: web.py detail/hot/downloaded internals, opds.py XML adapter details, /ajax/listbooks sealed instead of swapped. Full plan in NEW-AUDIT.md Stage 6 box.)*
 - [ ] **Rebrand decision + README attribution** once the swap is complete.
 
 ### Write-side expansion (after the dirtied fix lands)
