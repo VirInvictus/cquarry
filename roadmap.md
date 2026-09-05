@@ -187,7 +187,7 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
   - *(Shipped in v1.3.0: `.jpg` primary with `.png` fallback, `verify=` toggle, ValueError on unknown books.)*
   - Upstream sync:
     - [x] *Hermitage*: audit how thumbnails resolve today, then route through `get_cover_path()`. *(v1.4.0: `Book.cover_path` delegates to cquarry, unverified semantics preserved.)*
-    - [ ] *Carrel-calibre-web*: same for its cover route/static serving.; **Deferred to Phase 7** (the cover route is stock calibre-web `cps/cover.py`; routing it through cquarry is part of the data-layer extraction below, not a one-line swap).
+    - [x] *Carrel-calibre-web*: same for its cover route/static serving.; **Deferred to Phase 7** (the cover route is stock calibre-web `cps/cover.py`; routing it through cquarry is part of the data-layer extraction below, not a one-line swap). *(Done there: see Phase 7's "Route `cps/cover.py`" box, Carrel 0.6.30. This sub-box stayed unticked as a stale duplicate until the 2026-09-05 doc pass ticked it.)*
     - [x] *CalibreQuarry*: cover-audit commands switch to the helper. *(v3.17.0: audit cover checks resolve through `get_cover_path()`.)*
     - [x] *Bindery*: pair `get_cover_path()` with `get_image_size()` for EPUB cover audits.; **Waived**: Bindery has no cover-audit code path today (its audits are content/pagenumbers/emptytext/ocr); nothing pairs against yet.
 - [x] **Custom-column display config:** `get_custom_columns()` omits `normalized`, `editable`, and the `display` JSON (enum_values/enum_colors/composite_template). The richer `field_metadata` preference key is also unread.
@@ -213,10 +213,8 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
   - Upstream sync:
     - [x] *CalibreQuarry*: "pending OPF sync" section in doctor/check commands. *(Added to `--audit` output in CalibreQuarry v3.16.0.)*
     - *Others*: unaffected.
-- [ ] **Notes system (adjacent DB):** modern Calibre stores category-item notes in `.calnotes/notes.db` (`notes`, `resources`, `notes_resources_link`; present but empty in this library). Out of `metadata.db` scope but worth a separate read-only module eventually.
-  - Upstream sync (future):
-    - [ ] *Hermitage*: display author/tag/publisher notes.
-    - [ ] *CalibreQuarry*: include notes in catalog exports.
+- [x] **~~Notes system (adjacent DB)~~** — modern Calibre stores category-item notes in `.calnotes/notes.db` (`notes`, `resources`, `notes_resources_link`; present but empty in this library). **DECLINED 2026-09-05 (Brandon's verdict): he does not use notes, so there is no test surface and no consumer; a module that cannot be verified against real data does not get built.** The adjacent-DB read stays documented here as the known scope boundary; revisit only if a real consumer appears.
+  - Upstream sync: none, by the same verdict — both candidate consumers (Hermitage notes display, CalibreQuarry catalog-export notes) decline with the capability itself.
 
 ## Phase 7: Carrel extraction; from calibre-web fork to a cquarry-native web app (proposed 2026-08-26)
 *Context: Carrel-calibre-web is currently a calibre-web fork where seven Carrel-owned modules
@@ -273,7 +271,7 @@ in calibre-web; and makes cquarry grow the read APIs a real web frontend needs.*
   fill_indexpage equivalent; prerequisite for unwinding the hybrid),
   typeahead prefix queries. Licensing: README Acknowledgements verified
   current; all pulls behavioral/clean-room.)*
-- [ ] **Fill the API gaps the audit finds** in cquarry (likely: paginated/sorted book listing, browse facets, shelf-equivalent reads), each flowing through the Cross-Repo Implementation Rule (upstream research for CalibreQuarry, Bindery, Hermitage).
+- [x] **Fill the API gaps the audit finds** in cquarry (likely: paginated/sorted book listing, browse facets, shelf-equivalent reads), each flowing through the Cross-Repo Implementation Rule (upstream research for CalibreQuarry, Bindery, Hermitage). *(Closed in the 2026-09-05 doc pass as a stale duplicate of the Phase 7 box above: the paginated/sorted listing shipped there (`list_books`, v1.10.0, extended v1.11.0). The genuinely open residue — typeahead prefix queries (deferred, no consumer surface), series-indices-by-id (interim compose), and the browse-facets/shelf-read ideas — is tracked in that box's "Still open from the map" note.)*
 - [x] **Route `cps/cover.py` through `get_cover_path()`** (deferred from Phase 6's cover-helpers item). *(Done in Carrel-calibre-web 0.6.30: the cover route resolves through cquarry's get_cover_path via the fork's shared library_cache quarry(); png-only catalogued covers now serve their real art.)*
 - [ ] **Swap the data layer:** replace `db.py` internals module-by-module behind its existing interface until metadata.db access happens only through cquarry; delete dead code. *(IN PROGRESS: series_info, covers, about counts, wings, saved_searches, categories, search results, /basic, and ALL index.html browse grids are off the ORM (fork 0.6.30-0.6.36); remaining: web.py detail/hot/downloaded internals, opds.py XML adapter details, /ajax/listbooks sealed instead of swapped. Full plan in NEW-AUDIT.md Stage 6 box.)*
 - [ ] **Rebrand decision + README attribution** once the swap is complete.
@@ -614,3 +612,113 @@ design); CalibreQuarry's `scripts/db_util.py` connect-ro triplication stays
   workaround now teaches `clear_identifier`; both import skills swept.)*
   - [x] *CalibreQuarry*: *(the `--clear-identifier` verb rides 3.26.0 (NEW-AUDIT Stage 2); the phase-3 skill teaches the Python API directly, so no earlier release is needed.)*
   - *Hermitage / Carrel-calibre-web*: unaffected (no identifier write surface; read-only by contract). *Bindery*: unaffected (tags are its only write); the uv.lock deferral note above covers its dependency bump.
+
+## Phase 10: `add_book` — the creation path (researched, approved 2026-09-05)
+
+*Context: the keystone of the automated phase-2 import ("import approved books
+into Calibre"): a CalibreQuarry-side runner (its roadmap Phase 17) will hand
+cquarry a manifest of approved files plus seed metadata and consume the
+returned ids. This item was left open at the v1.5.0 book-lifecycle ship:
+"creation flows want more design (path layout, cover handling) than a bare row
+insert." The design is now done, researched 2026-09-05 from Calibre's own add
+path (reference clone 9.14, matching the installed Calibre) and this machine's
+user_version-27 schema. Approved by Brandon 2026-09-05.*
+
+- [ ] **`WritableCalibreDB.add_book(title, authors, *, formats=None, cover=None,
+      identifiers=None, language=None, pubdate=None, publisher=None,
+      dry_run=False) -> int | dict`**: creates the book row with triggers
+      intact, links authors/identifiers/language/pubdate/publisher, copies
+      format file(s) and an optional cover into the Calibre-authored
+      `Author/Title (id)/` layout, writes truthful `data` rows, and queues OPF
+      resync. Returns the new id; with `dry_run=True` returns the computed
+      plan (resolved authors, `author_sort`, predicted path with the id
+      predicted from `sqlite_sequence` and labeled as predicted, format
+      filenames, row diff) and writes nothing.
+- [ ] **Design decisions** (each evidence-backed):
+  - Insert FIRST, id from `lastrowid`, path written after. Calibre's own
+    `create_book_entry` inserts only `(title, series_index, author_sort)` and
+    lets `books_insert_trg` fill `sort`/`uuid`; the trigger owns the uuid and
+    the caller never passes one.
+  - Path layout reproduced stdlib-only: `Author/Title (id)` with upstream's
+    per-component budgets (PATH_LIMIT 100 on POSIX), filename sanitization via
+    plain `encode('ascii', 'replace')` (the ONE documented deviation: Calibre
+    runs an ICU user-codec first; visible only if Calibre later re-derives the
+    path on a rename), `Unknown` fallbacks, first-author-only path component,
+    format filename `Title - Author.ext`.
+  - ONE `batch()` covering row, links, and files. Files are copied atomically
+    (temp name, fsync, `os.replace`, directory fsync — the bindery
+    `install_format` precedent) INSIDE the transaction; because the book
+    directory cannot pre-exist (its name contains the fresh id), the failure
+    compensation is a tracked `rmtree` of the created directory while the SQL
+    undoes itself via the batch. Copy by default; move semantics available.
+  - `data.uncompressed_size` = real bytes of the placed file; cover copied
+    verbatim as `cover.jpg` + `has_cover=1` (no re-encode: stdlib-only,
+    documented deviation from Calibre's image processing); NO `metadata.opf`
+    write — `_mark_dirty()` queues the id and Calibre generates the sidecar at
+    next startup, exactly as it does for its own imports.
+  - No tags, series, ratings, comments, or custom columns at creation (phase 2
+    clears/sets those itself; phase 3 curates); no identifier validation
+    beyond `set_identifier` normalization (a wrong-but-plausible ISBN pulls
+    the WRONG book's metadata downstream; the seed passes through verbatim);
+    no timestamp fakery.
+  - `'Unknown'` title/author defaults mirror Calibre; author-less adds are
+    legal and land exactly as `find_authorless` expects.
+- [ ] **Tests** in the `test_write.py` house style: the fixture extends
+      `_WRITE_SCHEMA` with the real INSERT-path hazards (`books_insert_trg`
+      calling `title_sort()`/`uuid4()`, `books_pages_link_create_trigger`, the
+      `fkc_insert_*` guards, `series_insert_trg`). Acceptance: trigger-filled
+      `sort`/`uuid` with the caller passing neither; path and filename match
+      the upstream rules including budgets and fallbacks; `data` size equals
+      the file on disk; `metadata_dirtied` gains exactly the new id;
+      fault-injected mid-add failure leaves zero rows, zero links, and no
+      directory; dry-run writes nothing. Manual pass against
+      `testing_facility/metadata_write.db`: Calibre opens the added book and
+      regenerates its `.opf` on next start.
+- [ ] **Upstream sync**: *CalibreQuarry* Phase 17 (`run phase2` is the driving
+      consumer); *Bindery* unaffected (`--install-to-calibre` repairs existing
+      books via `install_format`, never creates rows); *Carrel-calibre-web*
+      unaffected (read-only by construction); *Hermitage* unaffected
+      (read-mostly posture; no Flatpak pin bump needed).
+- [ ] **Skill sync**: phase-3-import still reads "`add_book` is the known gap,
+      and this loop never creates books"; update the line when this ships, and
+      the future phase-2 runner docs record the manifest → `add_book`
+      contract.
+
+Open questions (Brandon): copy vs move default (recommend copy; phase 1
+already backs up originals to /tmp); cover normalization (verbatim bytes vs
+runner-side pre-normalization to a sane JPEG); whether dry-run is surfaced as
+a CalibreQuarry CLI flag or stays Python-API-only.
+
+Risks: a future Calibre schema bump adding or changing an INSERT trigger (the
+fixture pins the expected trigger census of user_version 27; re-run the manual
+pass after any Calibre upgrade); filesystem non-transactionality (SIGKILL
+mid-copy leaves an orphan directory with no row — the same window Calibre
+itself has; `find_book_by_path` sweeps detect it); the ICU-decode deviation
+above.
+
+## Phase 11: Write-module conveniences for set operations (proposed 2026-09-05)
+
+*Context: pulled by CalibreQuarry's Phase 16 (set-oriented writes) and its
+Phase 17 (`run phase2`'s clear-tags/clear-rating and `#audience` steps).
+Everything else that work needs already exists in `write.py`; these are the
+genuine gaps.*
+
+- [ ] **`clear_tags(book_id) -> int`**: delete all `books_tags_link` rows for
+      the book, prune orphaned tag rows, `_touch_book` + `_mark_dirty`;
+      returns the count removed. Today only per-name `remove_tag` exists, so a
+      caller must already know the tags in order to clear them.
+- [ ] **`add_custom_column_values(book_id, label, values) -> int`**: append
+      semantics for `is_multiple` (Pattern A) columns: dedupe against the
+      book's existing values (the link table is `UNIQUE(book, value)`), insert
+      only the new ones, honest count. `set_custom_column` is replace-only, so
+      setting cc9 `#audience` to `Brandon` beside an existing `Rin` currently
+      takes a read-modify-replace dance.
+- [ ] **`clear_rating(book_id) -> bool`**: a self-documenting alias of
+      `set_rating(book_id, None)` (deletes the link, prunes the orphan rating
+      row) so the audit trail names the operation. Optional but cheap.
+- [ ] **Tests** in the `test_write.py` style, including the
+      `UNIQUE(book, value)` fixture shape CalibreQuarry's set-write tests will
+      mirror.
+
+Non-goals: no CLI verbs here (frontend-only split; CalibreQuarry ships the
+verbs); no bulk/many-book APIs (the frontend loops over ids).
