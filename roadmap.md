@@ -15,6 +15,9 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
 > (`~/.claude/projects/-home-bdkl--gitrepos-cquarry/memory/project_phase89_extraction.md`),
 > and the next session should resume there. Phase 7 (Carrel data-layer extraction)
 > remains the follow-on project after Phase 9, with its license/attribution gate.
+> *(Staleness pass, 2026-09-05: Phase 9 shipped in v1.8.0 with its full-mine
+> expansion; Phase 7 closed with the fork on 2026-09-04, both recorded in their
+> sections below; the open work is Phases 10-11.)*
 
 ## Phase 1: Read-Only Enhancements (Current & Near-Term)
 *Context: Improving our query capabilities using existing read-only mechanics (ref: database_report.md Sections 1-4).*
@@ -273,8 +276,9 @@ in calibre-web; and makes cquarry grow the read APIs a real web frontend needs.*
   current; all pulls behavioral/clean-room.)*
 - [x] **Fill the API gaps the audit finds** in cquarry (likely: paginated/sorted book listing, browse facets, shelf-equivalent reads), each flowing through the Cross-Repo Implementation Rule (upstream research for CalibreQuarry, Bindery, Hermitage). *(Closed in the 2026-09-05 doc pass as a stale duplicate of the Phase 7 box above: the paginated/sorted listing shipped there (`list_books`, v1.10.0, extended v1.11.0). The genuinely open residue — typeahead prefix queries (deferred, no consumer surface), series-indices-by-id (interim compose), and the browse-facets/shelf-read ideas — is tracked in that box's "Still open from the map" note.)*
 - [x] **Route `cps/cover.py` through `get_cover_path()`** (deferred from Phase 6's cover-helpers item). *(Done in Carrel-calibre-web 0.6.30: the cover route resolves through cquarry's get_cover_path via the fork's shared library_cache quarry(); png-only catalogued covers now serve their real art.)*
-- [ ] **Swap the data layer:** replace `db.py` internals module-by-module behind its existing interface until metadata.db access happens only through cquarry; delete dead code. *(IN PROGRESS: series_info, covers, about counts, wings, saved_searches, categories, search results, /basic, and ALL index.html browse grids are off the ORM (fork 0.6.30-0.6.36); remaining: web.py detail/hot/downloaded internals, opds.py XML adapter details, /ajax/listbooks sealed instead of swapped. Full plan in NEW-AUDIT.md Stage 6 box.)*
-- [ ] **Rebrand decision + README attribution** once the swap is complete.
+- [x] **Swap the data layer:** replace `db.py` internals module-by-module behind its existing interface until metadata.db access happens only through cquarry; delete dead code. *(Closed with the fork 2026-09-04, per NEW-AUDIT.md Stage 6's recorded close (Brandon's call). The shipped arc is Carrel 0.6.30-0.6.39: series_info, covers, about counts, wings, saved_searches, categories, search results, /basic, and ALL index.html browse grids (incl. archived/read-unread/hot/downloaded), the OPDS book-list feeds, show_book/read_book detail, advsearch deleted, /ajax/listbooks + the table surface sealed. Residue DOCUMENTED, not swapped: web.py's /publisher /series /ratings /formats /category /get_matching_tags and opds.py's letter/publisher/formats index feeds plus the Calibre-Companion endpoint still read metadata.db through the ORM (none are in `_SEALED_PREFIXES`), and db.py stands at its 1,204 lines; the upstream candidates that residue fed are recorded in the new box below. Status text refreshed in the 2026-09-05 staleness pass.)*
+- [x] **Rebrand decision + README attribution** once the swap is complete. *(Decided 2026-09-04, option 1: keep the name `Carrel-calibre-web`. Executed as 0.6.39's light-touch rebrand: README identity Carrel-first, upstream headers stripped from Carrel-owned rewritten files, stock calibre-web files keep theirs. Recorded in NEW-AUDIT.md Stage 6's CLOSED paragraph; ticked in the 2026-09-05 staleness pass.)*
+- [ ] **Upstream candidates recorded downstream, never entered this roadmap** (found in the 2026-09-05 staleness pass; NEW-AUDIT.md Stage 6 lists them as "cquarry 1.12.0 candidates (not built)" and Carrel 0.6.35's patchnotes repeat the first): `get_book_by_uuid` (the Calibre-Companion JSON endpoint's dependency); the entity→ids resolver (rows-side interim compose works; the superset of the series-indices-by-id note in the API-gaps box above); a `list_books` ids-order mode (retires quarry_grid's fork-side `preserve_order` shim from 0.6.34); and a bulk formats map. Plus the cc-adapter gap: a series-datatype link table's `.extra` float (`books_series_link.extra`) is unread, which blocks OPDS custom-column content blocks.
 
 ### Write-side expansion (after the dirtied fix lands)
 - [x] **Entity setters:** authors (N:M link + name/sort computation), series (+`series_index`), publisher, rating (UNIQUE(rating) dedup), languages (canonicalize to ISO codes).
@@ -719,6 +723,24 @@ genuine gaps.*
 - [ ] **Tests** in the `test_write.py` style, including the
       `UNIQUE(book, value)` fixture shape CalibreQuarry's set-write tests will
       mirror.
+- [ ] **Upstream sync**: *CalibreQuarry* is the consumer, and its roadmap
+      already carries the dependency boxes (Phase 16's set-mode verbs
+      clear-tags / clear-rating / add-column-value sit directly on these
+      three calls); its Phase 17 `run phase2` clears through those verbs
+      while its `#audience` step calls `add_custom_column_values`
+      directly. No new CalibreQuarry roadmap work is needed beyond
+      Phases 16/17 as written. *Bindery* unaffected (its only sanctioned
+      writes are `audit --tag` flagging and `install_format` repair
+      placement; no clear-all-tags, custom-column, or rating surface).
+      *Hermitage* unaffected (read-only by contract; no Flatpak pin bump
+      needed). *Carrel-calibre-web* unaffected (read-only by construction).
+- [ ] **Skill sync**: the phase-3-import skill's custom-column guidance
+      predates an append primitive (`set_custom_column` is replace-only, so
+      the Rin-beside-Brandon `#audience` append is a read-modify-replace
+      dance, and its `UNIQUE(book, value)` gotcha teaches raw-SQL
+      delete-then-insert); when `add_custom_column_values` ships, the
+      skill's multi-value column step appends through it. Floor, not
+      ceiling, per the standing rule.
 
 Non-goals: no CLI verbs here (frontend-only split; CalibreQuarry ships the
 verbs); no bulk/many-book APIs (the frontend loops over ids).
