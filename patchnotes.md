@@ -1,3 +1,24 @@
+## v1.12.0 (2026-09-06)
+
+### genre_distribution: genre shares for the whole library
+
+- **New `analytics.genre_distribution(db)`** answers "what fraction of the
+  library is each genre" over Calibre's genre-as-hierarchical-tags
+  convention. Every dot-path node rolls up its subtree (`Fic.Fantasy.Epic`
+  contributes to `Fic`, `Fic.Fantasy`, and itself), shares are fractions of
+  every book in the library, and a book counts once per node even when
+  several of its tags share an ancestor. Multi-genre books therefore land
+  in several roots and the shares can legitimately sum over 1.0; the
+  docstring says so where renderers will read it. Nodes come back
+  depth-first (parents before children, siblings share-descending then
+  name) so both a top-level headline slice and a full tree render are
+  plain dict walks; books with no tags count under `"untagged"`, last.
+- Deliberately not a duplicate of `get_tag_counts` (flat per-tag link
+  counts): the rollup, the denominator, and the untagged bucket are the
+  delta the analytics module's scope rule demands. CalibreQuarry's
+  `--analytics genres` (3.27.0) is the first renderer.
+- Suite 255 → 258.
+
 ## v1.11.1 (2026-09-03)
 
 ### Fixed: the "sort" key was a silent no-op

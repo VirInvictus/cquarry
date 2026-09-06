@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.11.1
+**Version:** 1.12.0
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -131,7 +131,7 @@ The mechanical definitions of "incomplete" promoted from CalibreQuarry's fronten
 
 ### 3.8 Analytics derivations (`analytics.py`, cquarry ≥ 1.8)
 
-Derivations promoted from CalibreQuarry's `--analytics` frontend; the frontend keeps formatting, cquarry owns the math. Pure over the cached rows: `addition_timeline(db, granularity="month")` (`"YYYY-MM"` buckets, chronological; `"year"` supported; timestampless books skipped), `author_stats` (per primary author `{author, book_count, avg_rating, rated_count, formats}`; star-scale averages over rated books only, count-desc then name, authorless books skipped; `rated_count` is the renderer-facing additive key the average alone cannot give back), `rating_distribution` (half-step star floats ascending, `"unrated"` last), and `vl_overlap(db, names=None)` (books in two or more virtual libraries as `{(wing, ...): [ids]}`, unknown names raising through `resolve_vl`).
+Derivations promoted from CalibreQuarry's `--analytics` frontend; the frontend keeps formatting, cquarry owns the math. Pure over the cached rows: `addition_timeline(db, granularity="month")` (`"YYYY-MM"` buckets, chronological; `"year"` supported; timestampless books skipped), `author_stats` (per primary author `{author, book_count, avg_rating, rated_count, formats}`; star-scale averages over rated books only, count-desc then name, authorless books skipped; `rated_count` is the renderer-facing additive key the average alone cannot give back), `rating_distribution` (half-step star floats ascending, `"unrated"` last), `genre_distribution(db)` (every dot-path node of the tag hierarchy as a fraction of the whole library: subtree rollup with a book counted once per node even when its tags share an ancestor, so multi-genre books push the sum over 1.0; depth-first, parents before children, siblings share-descending then name, `"untagged"` last; the rollup-plus-denominator delta over `get_tag_counts`), and `vl_overlap(db, names=None)` (books in two or more virtual libraries as `{(wing, ...): [ids]}`, unknown names raising through `resolve_vl`).
 
 ## 4. Field location table
 

@@ -97,7 +97,7 @@ The full per-method reference lives in [API.md](API.md). One line per module:
 | `cquarry.search` | The lexer/parser/evaluator porting Calibre's search grammar; usable standalone behind the `MetadataProvider` protocol. |
 | `cquarry.helpers` | Domain utilities: rating conversion, comment sanitization, author display, series gaps, image dimension sniffing, the ISBN family (`isbn_normalize`, `isbn_check_digit_is_valid`, `to_isbn13`), and `tag_rollup`. |
 | `cquarry.integrity` | The shared library-integrity predicates: untagged, unrated, authorless, formatless, coverless, missing cover files, deprecated formats, low-res covers, duplicates, series gaps. |
-| `cquarry.analytics` | Shared derivations: addition timeline, per-author stats, rating distribution, virtual library (wing) overlap. |
+| `cquarry.analytics` | Shared derivations: addition timeline, per-author stats, rating distribution, genre distribution (hierarchical tag shares), virtual library (wing) overlap. |
 | `cquarry.write` | The opt-in mutation path (`WritableCalibreDB`): trigger-safe setters, `batch()` transactions, `remove_book`. Every mutation queues OPF resync. |
 | `cquarry.config` | Saved database-path configuration (`~/.config/cquarry/config.json`). |
 

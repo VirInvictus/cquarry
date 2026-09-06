@@ -15,6 +15,7 @@ import unittest
 from cquarry.analytics import (
     addition_timeline,
     author_stats,
+    genre_distribution,
     rating_distribution,
     vl_overlap,
 )
@@ -67,12 +68,19 @@ class TestAnalytics(unittest.TestCase):
         )
         c.execute("CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)")
         c.execute("INSERT INTO tags (id, name) VALUES (1, 'Fic')")
+        c.executemany(
+            "INSERT INTO tags (id, name) VALUES (?, ?)",
+            [(2, "Fic.Fantasy"), (3, "Fic.SciFi"), (4, "NonFic.History")],
+        )
         c.execute(
             "CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY,"
             " book INTEGER, tag INTEGER)"
         )
+        # Book 1 carries two Fic.* siblings (one book, several nodes under
+        # the same ancestor); book 3 crosses roots (Fic and NonFic at once).
         c.executemany(
-            "INSERT INTO books_tags_link (book, tag) VALUES (?, 1)", [(1,), (3,)]
+            "INSERT INTO books_tags_link (book, tag) VALUES (?, ?)",
+            [(1, 1), (1, 2), (1, 3), (3, 1), (3, 4)],
         )
         c.execute("CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER)")
         c.execute(
@@ -171,6 +179,34 @@ class TestAnalytics(unittest.TestCase):
         # Book 4 has no author link, so it lands in no author's rollup;
         # Alice(2) + Bob(1) account for every authorable book.
         self.assertEqual(sum(s["book_count"] for s in author_stats(self.db)), 3)
+
+    def test_genre_distribution_rollup_tree_order_untagged_last(self):
+        dist = genre_distribution(self.db)
+        # 4 books: book 1 → Fic + two Fic.* siblings, book 3 → Fic +
+        # NonFic.History, books 2 and 4 untagged. Parents precede children,
+        # siblings sort share-descending then name, "untagged" last.
+        self.assertEqual(
+            dist,
+            {
+                "Fic": 0.5,
+                "Fic.Fantasy": 0.25,
+                "Fic.SciFi": 0.25,
+                "NonFic": 0.25,
+                "NonFic.History": 0.25,
+                "untagged": 0.5,
+            },
+        )
+        self.assertEqual(list(dist)[-1], "untagged")
+
+    def test_genre_distribution_counts_a_book_once_per_ancestor(self):
+        # Book 1 carries two Fic.* tags: Fic counts one book, not two
+        # link rows. 2 of 4 books sit under Fic.
+        self.assertEqual(genre_distribution(self.db)["Fic"], 0.5)
+
+    def test_genre_distribution_multi_genre_sums_over_one(self):
+        # Book 3 belongs to Fic and NonFic at once, so shares are honest
+        # fractions of the library and legitimately exceed 1.0 in total.
+        self.assertGreater(sum(genre_distribution(self.db).values()), 1.0)
 
     def test_rating_distribution_ascending_unrated_last(self):
         dist = rating_distribution(self.db)

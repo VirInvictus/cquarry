@@ -508,6 +508,12 @@ cquarry's caches/row shapes), never a verbatim code move.
   then name), `rating_distribution(db) -> {stars | "unrated": n}`,
   `vl_overlap(db, names=None) -> {(wing, ...): [ids]}` (multi-wing combos only;
   unknown wing raises via `resolve_vl`).
+- [x] **`genre_distribution(db)`** *(v1.12.0.)* every dot-path node's share of
+  the whole library: subtree rollup (a book once per node even when its tags
+  share an ancestor, so multi-genre roots sum over 1.0), fractions not link
+  counts, depth-first with share-descending siblings, `"untagged"` last. The
+  rollup-plus-denominator delta over `get_tag_counts` that satisfies the
+  analytics scope rule; rendered by CalibreQuarry's `--analytics genres`.
 - [x] **Docs: `API.md` + README unbusy.** *(v1.8.0: API.md carries the full reference plus every new API; README 444 → 255 lines with a dossier quick-start and a module-at-a-glance table.)* New `API.md` at repo root carries the
   full per-method reference (moved from README's Public API section) plus every
   new API above; README keeps hero, features, quick-starts (dossier + batch),

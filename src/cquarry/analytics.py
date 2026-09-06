@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 __all__ = [
     "addition_timeline",
     "author_stats",
+    "genre_distribution",
     "rating_distribution",
     "vl_overlap",
 ]
@@ -90,6 +91,59 @@ def author_stats(db: CalibreDB) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def genre_distribution(db: CalibreDB) -> dict[str, float]:
+    """Share of the library per genre node, tree order, ``"untagged"`` last.
+
+    Genre means the dot-path hierarchy of the tags: every node of every
+    tag path carries its subtree total (``Fic.Fantasy.Epic`` contributes
+    to ``Fic``, ``Fic.Fantasy``, and ``Fic.Fantasy.Epic``), the same
+    rollup :func:`cquarry.helpers.tag_rollup` performs on link counts.
+    Shares are fractions of every book in the library, not of the tagged
+    subset, and a book counts once per node even when several of its tags
+    share an ancestor — so a multi-genre book lands in several roots and
+    the shares can sum over 1.0; renderers should say so. Nodes come back
+    depth-first, parents before children, siblings share-descending then
+    name; books with no tags count under the ``"untagged"`` string key,
+    last. Unlike :meth:`CalibreDB.get_tag_counts` (flat per-tag link
+    counts), this owns the rollup, the denominator, and the untagged
+    bucket.
+    """
+    counts: dict[str, int] = {}
+    total = 0
+    untagged = 0
+    for b in db.get_all_books():
+        total += 1
+        if not b["tags"]:
+            untagged += 1
+            continue
+        seen: set[str] = set()
+        for tag in b["tags"]:
+            parts = [p for p in str(tag).split(".") if p]
+            for i in range(1, len(parts) + 1):
+                seen.add(".".join(parts[:i]))
+        for key in seen:
+            counts[key] = counts.get(key, 0) + 1
+
+    if total == 0:
+        return {}
+    share = {key: n / total for key, n in counts.items()}
+    children: dict[str, list[str]] = {}
+    for key in share:
+        children.setdefault(key.rpartition(".")[0], []).append(key)
+
+    ordered: dict[str, float] = {}
+
+    def _emit(parent: str) -> None:
+        for key in sorted(children.get(parent, ()), key=lambda k: (-share[k], k)):
+            ordered[key] = share[key]
+            _emit(key)
+
+    _emit("")
+    if untagged:
+        ordered["untagged"] = untagged / total
+    return ordered
 
 
 def rating_distribution(db: CalibreDB) -> dict[float | str, int]:
