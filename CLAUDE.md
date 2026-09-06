@@ -52,4 +52,4 @@ PYTHONPATH=src python -m pytest tests/ -q
 (The bare `python -m pytest` picks up whatever cquarry is pip-installed in the environment; check its version if results look stale.)
 
 ## Cross-Repo Implementation Rule
-If any major update or new feature is added to `cquarry`, you MUST immediately assess and implement it throughout `~/.gitrepos/CalibreQuarry`, `~/.gitrepos/Bindery`, and `~/.gitrepos/Hermitage` if the update logically fits their respective domains. Keep the entire Calibre ecosystem synchronized with `cquarry`'s latest capabilities.
+If any major update or new feature is added to `cquarry`, you MUST immediately assess and implement it throughout `~/.gitrepos/CalibreQuarry`, `~/.gitrepos/bindery-cli`, and `~/.gitrepos/Hermitage` if the update logically fits their respective domains. Keep the entire Calibre ecosystem synchronized with `cquarry`'s latest capabilities.

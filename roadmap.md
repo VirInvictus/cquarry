@@ -198,7 +198,7 @@ This roadmap outlines the planned evolution of `cquarry` from a read-only metada
   - *(Shipped in v1.4.0: `editable`/`normalized`/decoded `display` with documented defaults on old schemas, plus `get_field_metadata()`.)*
   - Upstream sync:
     - [x] *Hermitage*: render enumeration values as colored badges (`#reading_status` is the showcase column). *(v1.5.0: pills tint from `display.enum_colors`.)*
-    - [ ] *CalibreQuarry*: TUI coloring from `enum_colors`; disable edit verbs when `editable=0`.; **Deferred**: CalibreQuarry's terminal output has no pill/badge rendering surface yet and no edit verbs exist until the write-side verbs land; both arrive naturally then.
+    - [x] *CalibreQuarry*: TUI coloring from `enum_colors`; disable edit verbs when `editable=0`.; **DECLINED 2026-09-06 (Stage 7 verdict, now recorded here; until today it lived only in the superseded NEW-AUDIT)**: CalibreQuarry's terminal output has no pill/badge rendering surface for `enum_colors` to serve, and the box's original rationale ("no edit verbs until the write-side verbs land") went stale when those verbs landed in 3.19.0: `--set-column`/`--clear-column` already surface non-editable columns as clean errors, which is the editable-guard half of this box done. Reopen only if the TUI ever grows a colored category render.
     - *Carrel / Bindery*: unaffected.
 - [x] **Generic preferences accessor:** typed `get_preference(key)` wrapper; surface `grouped_search_terms`, `user_categories`, `tag_browser_*` order/hidden state.
   - Includes search-parity work inside cquarry itself (resolve grouped-search names in queries).
