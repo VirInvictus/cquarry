@@ -1,3 +1,36 @@
+## v1.13.0 (2026-09-06)
+
+### Write-module conveniences for set operations
+
+- **`clear_tags(book_id) -> int`** detaches every tag from a book in one
+  call: link rows deleted, now-orphaned tag rows pruned after (the
+  `fkc_delete_on_tags` order), `last_modified` bumped and the book queued
+  for OPF resync only when a link actually went away. The count of removed
+  links comes back and an already-untagged book is an honest zero; until
+  now a caller had to know the tags to clear them through per-name
+  `remove_tag`.
+- **`add_custom_column_values(book_id, label, values) -> int`** gives
+  multi-valued custom columns append semantics. `set_custom_column` is
+  replace-only, so putting `Brandon` beside an existing `Rin` in `#audience`
+  took a read-modify-replace dance; the new call dedupes against the book's
+  existing values (the link table is `UNIQUE(book, value)`), collapses
+  duplicates within the input, inserts only genuinely new links, and
+  returns the honest count. Scoped to `is_multiple` Pattern-A columns:
+  single-valued and direct-storage columns raise with a pointer to
+  `set_custom_column`, and a bare string is a `TypeError` rather than a
+  comma-split guess.
+- **`clear_rating(book_id) -> bool`** is a self-documenting alias of
+  `set_rating(book_id, None)` so an audit trail names the operation; the
+  orphaned rating row prunes with it.
+- Consumers: CalibreQuarry's Phase 16 set-mode verbs and Phase 17's
+  `#audience` step sit directly on these three calls and need nothing new
+  downstream; Bindery, Hermitage, and Carrel-calibre-web are unaffected in
+  their recorded postures and no Flatpak pin moves. The phase-3-import
+  skill's `UNIQUE(book, value)` gotcha now teaches the setters instead of
+  raw delete-then-insert, and the phase-1 skill was swept clean.
+- The test fixture's link tables now carry the real `UNIQUE(book, value)`
+  shape plus an is_multiple `#audience` column; suite 255 → 280.
+
 ## v1.12.0 (2026-09-06)
 
 ### genre_distribution: genre shares for the whole library

@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.12.0
+**Version:** 1.13.0
 
 ## Public API
 
@@ -257,7 +257,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.12.0"
+print(cquarry.__version__)  # "1.13.0"
 ```
 
 ### Writes (from `cquarry.write`)
@@ -279,6 +279,7 @@ print(cquarry.__version__)  # "1.12.0"
 | `title_sort(title)` | `str` | Re-exported from `cquarry.helpers`. |
 | `update_title(book_id, new_title)` | `None` | Rename with refreshed sort key and `last_modified`. |
 | `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` | `bool` | Idempotent tag mutation following Calibre's link-table sequence; returns whether state changed. |
+| `clear_tags(book_id)` | `int` | Detach every tag from the book (since 1.13.0): links deleted, orphaned tag rows pruned after (the `fkc_delete_on_tags` order), OPF resync queued only on change. Returns the count of links removed; an already-untagged book is an honest 0. |
 | `set_identifier(book_id, id_type, val)` | `bool` | EAV upsert honoring `UNIQUE(book, type)`; `None` deletes. Returns `True` if state changed. |
 | `set_identifiers(book_id, pairs)` | `int` | Batch upsert identifiers. Returns count of changed entries. |
 | `clear_identifier(book_id, id_type)` | `bool` | Delete one identifier pair (since 1.9.0). The type is normalized exactly like `set_identifier` (stripped, lowercased; empty raises); a pair already absent is an honest no-op. Deletion queues OPF regeneration. |
@@ -286,10 +287,12 @@ print(cquarry.__version__)  # "1.12.0"
 | `set_series(book_id, name, index=None)` | `bool` | Assign/clear series + `series_index` (defaults 1.0 fresh, preserves on reassign). |
 | `set_publisher(book_id, name)` | `bool` | Replace/clear publisher; case-insensitive match; orphans pruned. |
 | `set_rating(book_id, stars)` | `bool` | 0-5 stars stored as x2; UNIQUE(rating) rows deduplicated via find-or-create. |
+| `clear_rating(book_id)` | `bool` | Self-documenting alias of `set_rating(book_id, None)` (since 1.13.0); the orphaned rating row prunes with it. False when the book was already unrated. |
 | `set_languages(book_id, codes)` | `bool` | Replace languages (supports `list[str]` or comma-separated `str`); English names canonicalized to ISO 639-2 via the search engine's map. |
 | `set_comments(book_id, text)` | `bool` | 1:1 upsert/clear of the comments HTML row. |
 | `set_pubdate(book_id, value)` | `bool` | Publication-date setter accepting `str` / `date` / `datetime` / `None` (sentinel); stored as Calibre TEXT in UTC. |
 | `set_custom_column(book_id, label, value)` | `bool` | Generic custom-column writer: storage layout auto-detected (link-table vs direct), enumerations validated against `display.enum_values`, tristate bools accepted, non-editable/composite columns raise. |
+| `add_custom_column_values(book_id, label, values)` | `int` | Append semantics for multi-valued (Pattern A) columns (since 1.13.0): dedupes against the book's existing values (the link table is `UNIQUE(book, value)`) and within the input, inserts only the new links, returns the honest count; a no-op bumps nothing. Single-valued and direct-storage columns raise toward `set_custom_column`; a bare string raises `TypeError` rather than being comma-split. |
 | `add_format(book_id, fmt, name, size)` / `remove_format(book_id, fmt)` | `bool` | Register/drop `data` rows (the file itself is the caller's responsibility). |
 | `set_has_cover(book_id, has_cover)` | `bool` | Toggle the catalogued flag. |
 | `remove_book(book_id)` | `None` | Full book removal: custom columns (both patterns) + dirtied queues cleaned, cascade trigger fires, orphaned entities pruned. Irreversible. |

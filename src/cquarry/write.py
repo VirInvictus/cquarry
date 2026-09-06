@@ -346,6 +346,31 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    def clear_tags(self, book_id: int) -> int:
+        """Detach every tag from a book. Returns how many links were removed.
+
+        The caller no longer needs to know the tags first (per-name
+        ``remove_tag`` does). Cleans the link table first, then prunes
+        now-orphaned tag rows; the order the fkc_delete_on_tags trigger
+        requires. An already-untagged book is an honest no-op: zero
+        returned, no ``last_modified`` bump, nothing queued.
+        """
+        cur = self.conn.cursor()
+        self._begin()
+        try:
+            self._require_book(book_id)
+            before = self.conn.total_changes
+            cur.execute("DELETE FROM books_tags_link WHERE book = ?", (book_id,))
+            removed = self.conn.total_changes - before
+            if removed:
+                self._prune_orphans("tags")
+                self._touch_book(book_id)
+            self._commit()
+            return removed
+        except Exception:
+            self._rollback()
+            raise
+
     def set_identifier(self, book_id: int, id_type: str, val: str | None) -> bool:
         """Upsert one entry in the EAV ``identifiers`` table.
 
@@ -718,6 +743,15 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    def clear_rating(self, book_id: int) -> bool:
+        """Clear the book's rating. Self-documenting alias of
+        ``set_rating(book_id, None)`` so an audit trail names the operation.
+
+        Deletes the link and prunes the orphaned rating row; returns True
+        when stored state changed, False when the book was already unrated.
+        """
+        return self.set_rating(book_id, None)
+
     def set_languages(self, book_id: int, codes: list[str] | str | None) -> bool:
         """Replace the book's languages. Returns True when changed.
 
@@ -1037,6 +1071,100 @@ class WritableCalibreDB:
                 (stored, book_id),
             )
         return True
+
+    def add_custom_column_values(
+        self, book_id: int, label: str, values: list[str] | tuple[str, ...]
+    ) -> int:
+        """Append values to a multi-valued custom column. Returns how many
+        links were added.
+
+        ``set_custom_column`` is replace-only, so adding a second audience
+        beside an existing one took a read-modify-replace dance. This
+        appends: values already on the book are deduped away (the link
+        table is ``UNIQUE(book, value)``), duplicates within ``values``
+        collapse, only genuinely new ones insert, and the returned count is
+        honest. A no-op append does not bump ``last_modified`` or queue
+        anything.
+
+        Only ``is_multiple`` Pattern-A (link-table) columns qualify; a
+        single-valued column has one value to replace, so it raises with a
+        pointer to ``set_custom_column``. A bare string is rejected rather
+        than comma-split: for an append, ``"Rin, Brandon"`` naming one
+        value or two is the caller's knowledge, not the API's guess.
+        """
+        meta = self._custom_column_meta(label)
+        if not meta["editable"]:
+            raise ValueError(f"Custom column #{label} is not editable")
+        if str(meta["datatype"]).lower() == "composite":
+            raise ValueError(
+                f"#{label} is a composite column; Calibre computes it and it "
+                "has no storage to write"
+            )
+        if not meta["is_multiple"]:
+            raise ValueError(
+                f"#{label} is not multi-valued; add_custom_column_values "
+                "appends, and a single-valued column only has a value to "
+                "replace (set_custom_column)"
+            )
+        if isinstance(values, str) or not isinstance(values, (list, tuple)):
+            raise TypeError(
+                "values must be a list of strings; a bare string is "
+                "ambiguous for an append (one value or comma-joined?) and "
+                "is rejected"
+            )
+        items: list[str] = []
+        for v in values:
+            s = str(v).strip()
+            if s and s not in items:
+                items.append(s)
+        cid = meta["id"]
+        link_table = f"books_custom_column_{cid}_link"
+        value_table = f"custom_column_{cid}"
+        if not self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (link_table,),
+        ).fetchone():
+            raise ValueError(
+                f"#{label} has no link table (direct storage); use set_custom_column"
+            )
+        self._begin()
+        try:
+            self._require_book(book_id)
+            existing = {
+                r["v"]
+                for r in self.conn.execute(
+                    f"SELECT c.value AS v FROM {link_table} l "
+                    f"JOIN {value_table} c ON c.id = l.value WHERE l.book = ?",
+                    (book_id,),
+                ).fetchall()
+            }
+            added = 0
+            for val in items:
+                if val in existing:
+                    continue
+                vrow = self.conn.execute(
+                    f"SELECT id FROM {value_table} WHERE value = ?", (val,)
+                ).fetchone()
+                vid = (
+                    vrow["id"]
+                    if vrow is not None
+                    else self.conn.execute(
+                        f"INSERT INTO {value_table} (value) VALUES (?)", (val,)
+                    ).lastrowid
+                )
+                self.conn.execute(
+                    f"INSERT INTO {link_table} (book, value) VALUES (?, ?)",
+                    (book_id, vid),
+                )
+                existing.add(val)
+                added += 1
+            if added:
+                self._touch_book(book_id)
+            self._commit()
+            return added
+        except Exception:
+            self._rollback()
+            raise
 
     # -- Format management --
 

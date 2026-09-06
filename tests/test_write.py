@@ -352,8 +352,10 @@ CREATE TABLE custom_columns (
     is_multiple BOOL DEFAULT 0, normalized BOOL DEFAULT 0
 );
 CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT UNIQUE, link TEXT DEFAULT '');
-CREATE TABLE books_custom_column_1_link (book INTEGER, value INTEGER);
+CREATE TABLE books_custom_column_1_link (book INTEGER, value INTEGER, UNIQUE(book, value));
 CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, book INTEGER, value BOOL);
+CREATE TABLE custom_column_3 (id INTEGER PRIMARY KEY, value TEXT UNIQUE, link TEXT DEFAULT '');
+CREATE TABLE books_custom_column_3_link (book INTEGER, value INTEGER, UNIQUE(book, value));
 CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
 """
 
@@ -387,6 +389,11 @@ class TestWriteSideExpansion(unittest.TestCase):
         )
         conn.execute(
             "INSERT INTO custom_columns VALUES (2,'liked','Liked','bool',1,'{}',0,0)"
+        )
+        # Multi-valued text column (the #audience shape CalibreQuarry's
+        # set-write verbs consume).
+        conn.execute(
+            "INSERT INTO custom_columns VALUES (3,'audience','Audience','text',1,'{}',1,1)"
         )
         conn.commit()
         conn.close()
@@ -653,4 +660,118 @@ class TestSetPubdate(TestWriteSideExpansion):
             wdb.set_pubdate(1, "2014-03-01")
             wdb.set_pubdate(2, "not a date")
         self.assertIsNone(self._pubdate())
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
+
+
+class TestSetWriteConveniences(TestWriteSideExpansion):
+    """Phase-11 set-write conveniences: clear_tags, add_custom_column_values,
+    clear_rating. The link-table fixture carries UNIQUE(book, value), the
+    shape CalibreQuarry's set-write tests will mirror."""
+
+    def _audience(self, book=1):
+        return self._sql2(
+            "SELECT c.value FROM books_custom_column_3_link l "
+            "JOIN custom_column_3 c ON c.id=l.value WHERE l.book=? "
+            "ORDER BY c.id",
+            (book,),
+        )
+
+    def test_clear_tags_returns_count_and_prunes_orphans(self):
+        with self._wdb() as wdb:
+            wdb.add_tag(1, "Fic")
+            wdb.add_tag(1, "Audited")
+            wdb.add_tag(2, "Fic")  # shared: survives book 1's clear
+            self.assertEqual(wdb.clear_tags(1), 2)
+            self.assertEqual(wdb.clear_tags(1), 0)  # honest no-op
+        self.assertEqual(self._sql2("SELECT name FROM tags"), [("Fic",)])
+        self.assertEqual(self._sql2("SELECT tag FROM books_tags_link WHERE book=1"), [])
+
+    def test_clear_tags_touches_book_and_queues_only_on_change(self):
+        with self._wdb() as wdb:
+            wdb.add_tag(1, "Fic")
+            before = self._sql2("SELECT last_modified FROM books WHERE id=1")[0][0]
+            self.assertEqual(wdb.clear_tags(1), 1)
+            after = self._sql2("SELECT last_modified FROM books WHERE id=1")[0][0]
+            self.assertNotEqual(after, before)
+            wdb.clear_tags(2)  # untagged already: nothing queued
+        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(1,)])
+
+    def test_clear_tags_unknown_book_raises(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.clear_tags(999)
+
+    def test_add_custom_column_values_appends_beside_existing(self):
+        # The motivating case: #audience "Rin" already set, "Brandon" joins.
+        with self._wdb() as wdb:
+            wdb.set_custom_column(1, "#audience", "Rin")
+            self.assertEqual(
+                wdb.add_custom_column_values(1, "#audience", ["Brandon"]), 1
+            )
+            # Re-appending a value the book already carries is a no-op.
+            self.assertEqual(
+                wdb.add_custom_column_values(1, "#audience", ["Brandon"]), 0
+            )
+        self.assertEqual(self._audience(), [("Rin",), ("Brandon",)])
+
+    def test_add_custom_column_values_dedupes_and_counts_honestly(self):
+        with self._wdb() as wdb:
+            self.assertEqual(
+                wdb.add_custom_column_values(1, "#audience", ["Rin", "Rin", "Brandon"]),
+                2,
+            )
+            # One already present, one genuinely new.
+            self.assertEqual(
+                wdb.add_custom_column_values(1, "#audience", ["Brandon", "New"]), 1
+            )
+            # A second book shares the value row instead of duplicating it:
+            # the count stays at three and UNIQUE(value) holds.
+            self.assertEqual(wdb.add_custom_column_values(2, "#audience", ["Rin"]), 1)
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_3"), [(3,)])
+        self.assertEqual(self._audience(2), [("Rin",)])
+
+    def test_add_custom_column_values_rejects_replace_only_surfaces(self):
+        with self._wdb() as wdb:
+            # Single-valued (enumeration) and direct-storage (bool) columns
+            # have a value to replace, not a set to append to.
+            with self.assertRaises(ValueError):
+                wdb.add_custom_column_values(1, "#status", ["Read"])
+            with self.assertRaises(ValueError):
+                wdb.add_custom_column_values(1, "#liked", ["Yes"])
+            # A bare string is ambiguous for an append (wrong type, not a
+            # bad value).
+            with self.assertRaises(TypeError):
+                wdb.add_custom_column_values(1, "#audience", "Brandon")
+            with self.assertRaises(ValueError):
+                wdb.add_custom_column_values(1, "#nope", ["x"])
+            with self.assertRaises(ValueError):
+                wdb.add_custom_column_values(999, "#audience", ["x"])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_3"), [(0,)])
+
+    def test_add_custom_column_values_noop_touches_nothing(self):
+        with self._wdb() as wdb:
+            wdb.add_custom_column_values(1, "#audience", ["Rin"])
+            before = self._sql2("SELECT last_modified FROM books WHERE id=1")[0][0]
+            wdb.add_custom_column_values(1, "#audience", ["Rin"])
+            after = self._sql2("SELECT last_modified FROM books WHERE id=1")[0][0]
+            self.assertEqual(after, before)
+        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(1,)])
+
+    def test_clear_rating_alias_deletes_link_and_prunes(self):
+        with self._wdb() as wdb:
+            wdb.set_rating(1, 4)
+            wdb.set_rating(2, 4)  # shares the ratings row (UNIQUE(rating))
+            self.assertTrue(wdb.clear_rating(1))
+            self.assertFalse(wdb.clear_rating(1))  # already unrated
+            self.assertEqual(self._sql2("SELECT rating FROM ratings"), [(8,)])
+            self.assertTrue(wdb.clear_rating(2))
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM ratings"), [(0,)])
+
+    def test_new_setters_inside_batch_rollback_atomically(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError), wdb.batch():
+            wdb.add_tag(1, "Temp")
+            wdb.add_custom_column_values(1, "#audience", ["Rin"])
+            wdb.clear_rating(1)
+            wdb.clear_tags(999)  # unknown book raises mid-batch
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(0,)])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_3"), [(0,)])
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])

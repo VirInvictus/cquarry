@@ -713,23 +713,39 @@ Phase 17 (`run phase2`'s clear-tags/clear-rating and `#audience` steps).
 Everything else that work needs already exists in `write.py`; these are the
 genuine gaps.*
 
-- [ ] **`clear_tags(book_id) -> int`**: delete all `books_tags_link` rows for
+- [x] **`clear_tags(book_id) -> int`**: delete all `books_tags_link` rows for
       the book, prune orphaned tag rows, `_touch_book` + `_mark_dirty`;
       returns the count removed. Today only per-name `remove_tag` exists, so a
       caller must already know the tags in order to clear them.
-- [ ] **`add_custom_column_values(book_id, label, values) -> int`**: append
+      *(Shipped in v1.13.0: link-table delete first, `_prune_orphans("tags")`
+      after (the fkc_delete_on_tags order), `_touch_book()` only when a link
+      actually went away; an already-untagged book returns 0 and queues
+      nothing.)*
+- [x] **`add_custom_column_values(book_id, label, values) -> int`**: append
       semantics for `is_multiple` (Pattern A) columns: dedupe against the
       book's existing values (the link table is `UNIQUE(book, value)`), insert
       only the new ones, honest count. `set_custom_column` is replace-only, so
       setting cc9 `#audience` to `Brandon` beside an existing `Rin` currently
       takes a read-modify-replace dance.
-- [ ] **`clear_rating(book_id) -> bool`**: a self-documenting alias of
+      *(Shipped in v1.13.0: scoped to `is_multiple` Pattern-A columns;
+      single-valued and direct-storage columns raise toward
+      `set_custom_column`, composite/non-editable raise as usual; input is
+      deduped case-exactly against the book's existing values, matching the
+      link table's `UNIQUE(book, value)`; a bare string is a TypeError rather
+      than a comma-split guess; a no-op append bumps nothing.)*
+- [x] **`clear_rating(book_id) -> bool`**: a self-documenting alias of
       `set_rating(book_id, None)` (deletes the link, prunes the orphan rating
       row) so the audit trail names the operation. Optional but cheap.
-- [ ] **Tests** in the `test_write.py` style, including the
+      *(Shipped in v1.13.0 as exactly that alias; the orphan rating row prunes
+      with it.)*
+- [x] **Tests** in the `test_write.py` style, including the
       `UNIQUE(book, value)` fixture shape CalibreQuarry's set-write tests will
       mirror.
-- [ ] **Upstream sync**: *CalibreQuarry* is the consumer, and its roadmap
+      *(v1.13.0: ten tests in `TestSetWriteConveniences`, including one batch
+      rollback across all three new calls; the `_WRITE_SCHEMA` link tables now
+      carry the real `UNIQUE(book, value)` shape plus an is_multiple
+      `#audience` column mirroring cc9; suite 255 → 280.)*
+- [x] **Upstream sync**: *CalibreQuarry* is the consumer, and its roadmap
       already carries the dependency boxes (Phase 16's set-mode verbs
       clear-tags / clear-rating / add-column-value sit directly on these
       three calls); its Phase 17 `run phase2` clears through those verbs
@@ -740,13 +756,20 @@ genuine gaps.*
       placement; no clear-all-tags, custom-column, or rating surface).
       *Hermitage* unaffected (read-only by contract; no Flatpak pin bump
       needed). *Carrel-calibre-web* unaffected (read-only by construction).
-- [ ] **Skill sync**: the phase-3-import skill's custom-column guidance
+      *(Shipped in v1.13.0 with the postures verified as written: CalibreQuarry's
+      Phases 16/17 land on top of this push and need nothing new downstream;
+      the other three waivers stand as recorded above; no Flatpak pin moves.)*
+- [x] **Skill sync**: the phase-3-import skill's custom-column guidance
       predates an append primitive (`set_custom_column` is replace-only, so
       the Rin-beside-Brandon `#audience` append is a read-modify-replace
       dance, and its `UNIQUE(book, value)` gotcha teaches raw-SQL
       delete-then-insert); when `add_custom_column_values` ships, the
       skill's multi-value column step appends through it. Floor, not
       ceiling, per the standing rule.
+      *(Done 2026-09-06: the gotcha now teaches `set_custom_column` /
+      `add_custom_column_values` instead of raw delete-then-insert, the
+      setter list names all three conveniences, and `phase-1-import` was
+      swept and is unaffected (it never writes metadata.db).)*
 
 Non-goals: no CLI verbs here (frontend-only split; CalibreQuarry ships the
 verbs); no bulk/many-book APIs (the frontend loops over ids).

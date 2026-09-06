@@ -39,7 +39,7 @@ The canonical SQLite database layer and search grammar engine for Calibre; every
 - `src/cquarry/helpers.py`: Common domain-specific logic (star ratings, JPEG/PNG header sniffing, author normalization, `strip_html`, `tags_to_tree`, `tag_rollup`, `title_sort`; the stdlib Calibre title-sort key, reused by `write.register_udfs()` and `get_tag_browser_counts()`; the ISBN family: `isbn_normalize`, `isbn_check_digit_is_valid`, `to_isbn13`).
 - `src/cquarry/integrity.py`: Pure library-integrity predicates over the cached rows (`find_untagged` … `find_series_gaps`). No SQL of their own; cover-file checks ride `get_cover_path` + `get_image_size`.
 - `src/cquarry/analytics.py`: Pure derivations over the cached rows (`addition_timeline`, `author_stats`, `rating_distribution`, `vl_overlap`). Formatting stays in the frontends.
-- `src/cquarry/write.py`: Opt-in `WritableCalibreDB` + `register_udfs()` for trigger-safe writes. Separate module by design (spec §3.6).
+- `src/cquarry/write.py`: Opt-in `WritableCalibreDB` + `register_udfs()` for trigger-safe writes, plus the set-write conveniences (`clear_tags`, `clear_rating`, `add_custom_column_values` for is_multiple Pattern-A columns). Separate module by design (spec §3.6).
 - `src/cquarry/config.py`: Default path configuration.
 - `tests/`: Extensive unit tests imported from the original CalibreQuarry repository.
 - `API.md`: The full per-method reference (moved out of the README in 1.8.0); keep it in sync when the API changes.
