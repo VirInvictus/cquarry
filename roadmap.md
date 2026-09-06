@@ -663,8 +663,11 @@ user_version-27 schema. Approved by Brandon 2026-09-05.*
     undoes itself via the batch. **Copy only (Brandon's verdict 2026-09-06):**
     move is the runner's post-success policy, never this API.
   - `data.uncompressed_size` = real bytes of the placed file; cover copied
-    verbatim as `cover.jpg` + `has_cover=1` (no re-encode: stdlib-only,
-    documented deviation from Calibre's image processing); NO `metadata.opf`
+    verbatim (no re-encode: stdlib-only, documented deviation from Calibre's
+    image processing) after a `get_image_size()` sniff: JPEG bytes land as
+    `cover.jpg`, PNG as `cover.png` (matching `get_cover_path()`'s fallback
+    contract), unparseable covers raise instead of being catalogued with
+    `has_cover=1` (Brandon's verdict 2026-09-06); NO `metadata.opf`
     write — `_mark_dirty()` queues the id and Calibre generates the sidecar at
     next startup, exactly as it does for its own imports.
   - No tags, series, ratings, comments, or custom columns at creation (phase 2
@@ -704,9 +707,25 @@ a moved-in source now lives in; the write module's standing posture is
 rows-ours/files-the-caller's beyond necessary placement, and the frozen
 signature has no move parameter). Queue hygiene, archiving or deleting
 sources after a verified add, is CalibreQuarry `run phase2` policy, not
-this API's. Still open: cover normalization (verbatim bytes vs
-runner-side pre-normalization to a sane JPEG); whether dry-run is
-surfaced as a CalibreQuarry CLI flag or stays Python-API-only.
+this API's. ~~cover normalization~~ **DECIDED 2026-09-06: verbatim
+bytes, no re-encode, with a sniff-or-raise guard and name-by-truth**
+(neither layer can re-encode while stdlib-only holds, so normalization
+is out of scope for both repos; `helpers.get_image_size()` vets the
+cover before cataloguing and unparseable bytes raise `ValueError`
+rather than catalogue `has_cover=1` garbage that
+`find_missing_cover_files` cannot see and `find_low_res_covers`
+deliberately skips; JPEG lands as `cover.jpg`, PNG as `cover.png`,
+matching `get_cover_path()`'s existing fallback contract; oversized
+covers, if real-library bloat ever shows up, become a
+`find_oversized_covers` integrity predicate, not write-path mutation).
+~~dry-run surfacing~~ **DECIDED 2026-09-06: Python-API-only here; the
+CLI arrives with CalibreQuarry Phase 17** (a CLI flag cannot live in
+this repo: verbs are CalibreQuarry's per the frontend-only split, whose
+Phase 16/17 design is already dry-run-by-default behind `--apply`, so
+the runner's manifest preview consumes `dry_run=True` in a loop; same
+shape as `remove_book`: the API owns the capability, the frontend owns
+presentation and confirmation). **No open questions remain; Phase 10 is
+fully unblocked and buildable in a day.**
 
 Risks: a future Calibre schema bump adding or changing an INSERT trigger (the
 fixture pins the expected trigger census of user_version 27; re-run the manual
