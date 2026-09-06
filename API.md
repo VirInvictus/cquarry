@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.13.0
+**Version:** 1.14.0
 
 ## Public API
 
@@ -227,6 +227,7 @@ Utility functions used across the ecosystem. All are importable from `cquarry.he
 
 | Function | Returns | Description |
 |----------|-----------|-------------|
+| `sniff_image_format(data)` | `str \| None` | The bytes-level sibling (since 1.14.0): `'jpg'`, `'png'`, or `None` from the same signatures, no file needed; `add_book`'s cover sniff-or-raise builds on it. |
 | `get_image_size(filepath)` | `tuple[int, int] \| None` | Return `(width, height)` for a JPEG or PNG by sniffing the file signature. Returns `None` for unrecognized formats or read errors. |
 | `get_jpeg_size(filepath)` | `tuple[int, int] \| None` | Seek through JPEG segment markers to find the SOF frame dimensions. Handles large EXIF/ICC blocks that a fixed header read would miss. |
 | `get_png_size(filepath)` | `tuple[int, int] \| None` | Read the IHDR chunk of a PNG for its dimensions. |
@@ -257,7 +258,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.13.0"
+print(cquarry.__version__)  # "1.14.0"
 ```
 
 ### Writes (from `cquarry.write`)
@@ -295,6 +296,7 @@ print(cquarry.__version__)  # "1.13.0"
 | `add_custom_column_values(book_id, label, values)` | `int` | Append semantics for multi-valued (Pattern A) columns (since 1.13.0): dedupes against the book's existing values (the link table is `UNIQUE(book, value)`) and within the input, inserts only the new links, returns the honest count; a no-op bumps nothing. Single-valued and direct-storage columns raise toward `set_custom_column`; a bare string raises `TypeError` rather than being comma-split. |
 | `add_format(book_id, fmt, name, size)` / `remove_format(book_id, fmt)` | `bool` | Register/drop `data` rows (the file itself is the caller's responsibility). |
 | `set_has_cover(book_id, has_cover)` | `bool` | Toggle the catalogued flag. |
+| `add_book(title, authors, *, formats=None, cover=None, identifiers=None, language=None, pubdate=None, publisher=None, dry_run=False)` | `int \| dict` | The creation path (since 1.14.0): inserts `(title, series_index, author_sort)` first and lets `books_insert_trg` fill `sort`/`uuid`, then links authors/identifiers/language/pubdate/publisher, copies format files and an optional cover (JPEG/PNG sniff-or-raise) into the `Author/Title (id)` directory with truthful `data` rows, and queues OPF resync. ONE `batch()`: any failure rolls the SQL back and removes the created directory. Empty title becomes `Unknown` (Calibre parity); an empty author list is legal (no links, what `find_authorless` expects). `dry_run=True` writes nothing and returns the plan (predicted id from `sqlite_sequence`, resolved authors, format filenames, the row diff). Copy only: sources are never moved or deleted. |
 | `remove_book(book_id)` | `None` | Full book removal: custom columns (both patterns) + dirtied queues cleaned, cascade trigger fires, orphaned entities pruned. Irreversible. |
 | `batch()` | `ContextManager` | Defer commits across a multi-book, multi-field pass. Explicit context manager that batches writes into one transaction. |
 | `transaction()` | `ContextManager` | Alias for `batch()`, kept for backwards compatibility. |

@@ -1,3 +1,58 @@
+## v1.14.0 (2026-09-06)
+
+### `add_book`: the creation path
+
+- **Calibre-parity book creation, one batch, copy-only.**
+  `WritableCalibreDB.add_book(title, authors, ...)` inserts
+  `(title, series_index, author_sort)` FIRST and lets
+  `books_insert_trg` fill `sort`/`uuid` (the caller never passes
+  either), takes the id from `lastrowid`, then writes the
+  `Author/Title (id)` path with upstream's component budgets
+  (`PATH_LIMIT` 100 POSIX) and fallbacks. The ONE documented
+  deviation: the ASCII fold is a plain `encode("ascii", "replace")`
+  where Calibre runs an ICU user-codec first. Seeds: format FILES
+  (copied atomically and placed as `Title - Author.ext`, `data` rows
+  carrying the real bytes on disk), a cover (path or bytes,
+  JPEG/PNG sniff-or-raise so an unparseable cover is never
+  catalogued with `has_cover=1`), identifiers (types normalized like
+  `set_identifier`), one language (canonicalized like
+  `set_languages`), pubdate, publisher. No tags/series/ratings/
+  comments/custom columns at creation: phase 2 clears and sets
+  those itself, phase 3 curates. An empty title becomes `Unknown`
+  (Calibre parity); an empty author list is legal and leaves the
+  book exactly what `find_authorless` expects. Everything runs in
+  ONE `batch()` with the setters reused inside it: any failure
+  rolls the SQL back and the tracked directory is removed, so a
+  failed add leaves zero rows, zero links, and no directory.
+  `_touch_book()` queues the id; Calibre generates the sidecar
+  `.opf` on next startup. Copy only, by decision: sources are
+  never moved or deleted; queue hygiene is the runner's policy.
+- **`dry_run=True` writes nothing** and returns the computed plan:
+  the id predicted from `sqlite_sequence` (labeled `predicted_id`),
+  the predicted path, resolved authors with their sort keys and
+  whether each row is new, format filenames and sizes, the cover
+  filename, and the `books` row that would be inserted.
+- **New helper `helpers.sniff_image_format(data)`**: the
+  bytes-level sibling of `get_image_size()`; the cover guard
+  builds on it.
+- Manual pass against a copy of the testing-facility library
+  (user_version 27): predicted id matched the real id, triggers
+  filled sort/uuid, the format file landed with a truthful size,
+  and the read side (`get_book`, `get_format_path`) resolves the
+  book. The Calibre-GUI half of the pass (open the book, watch the
+  `.opf` regenerate on next start) awaits Brandon.
+- Upstream sync: CalibreQuarry Phase 17 (`run phase2`) is the
+  driving consumer and awaits this release; Bindery
+  (`--install-to-calibre` repairs existing books only),
+  Carrel-calibre-web (read-only), and Hermitage (read-mostly, no
+  Flatpak pin bump) are unaffected per the Phase 10 roadmap box.
+- Suite: the `test_write.py` fixture gains the real INSERT-path
+  hazards (`books_insert_trg`, `books_pages_link_create_trigger`,
+  `series_insert_trg`, the `fkc_insert_*` guards) and 13 new
+  add_book tests cover the row/link/path contract, atomic file
+  placement, the sniff-or-raise, dry-run honesty, and both
+  failure-compensation shapes.
+
 ## v1.13.0 (2026-09-06)
 
 ### Write-module conveniences for set operations

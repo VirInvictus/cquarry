@@ -634,7 +634,7 @@ insert." The design is now done, researched 2026-09-05 from Calibre's own add
 path (reference clone 9.14, matching the installed Calibre) and this machine's
 user_version-27 schema. Approved by Brandon 2026-09-05.*
 
-- [ ] **`WritableCalibreDB.add_book(title, authors, *, formats=None, cover=None,
+- [x] **`WritableCalibreDB.add_book(title, authors, *, formats=None, cover=None,
       identifiers=None, language=None, pubdate=None, publisher=None,
       dry_run=False) -> int | dict`**: creates the book row with triggers
       intact, links authors/identifiers/language/pubdate/publisher, copies
@@ -644,7 +644,7 @@ user_version-27 schema. Approved by Brandon 2026-09-05.*
       plan (resolved authors, `author_sort`, predicted path with the id
       predicted from `sqlite_sequence` and labeled as predicted, format
       filenames, row diff) and writes nothing.
-- [ ] **Design decisions** (each evidence-backed):
+- [x] **Design decisions** (each evidence-backed):
   - Insert FIRST, id from `lastrowid`, path written after. Calibre's own
     `create_book_entry` inserts only `(title, series_index, author_sort)` and
     lets `books_insert_trg` fill `sort`/`uuid`; the trigger owns the uuid and
@@ -677,7 +677,7 @@ user_version-27 schema. Approved by Brandon 2026-09-05.*
     no timestamp fakery.
   - `'Unknown'` title/author defaults mirror Calibre; author-less adds are
     legal and land exactly as `find_authorless` expects.
-- [ ] **Tests** in the `test_write.py` house style: the fixture extends
+- [x] **Tests** in the `test_write.py` house style: the fixture extends
       `_WRITE_SCHEMA` with the real INSERT-path hazards (`books_insert_trg`
       calling `title_sort()`/`uuid4()`, `books_pages_link_create_trigger`, the
       `fkc_insert_*` guards, `series_insert_trg`). Acceptance: trigger-filled
@@ -688,12 +688,20 @@ user_version-27 schema. Approved by Brandon 2026-09-05.*
       directory; dry-run writes nothing. Manual pass against
       `testing_facility/metadata_write.db`: Calibre opens the added book and
       regenerates its `.opf` on next start.
-- [ ] **Upstream sync**: *CalibreQuarry* Phase 17 (`run phase2` is the driving
+      *(Shipped in v1.14.0, 2026-09-06. All boxes of this phase in one
+      release: the API exactly as designed, the fixture extended with the
+      user_version-27 INSERT-path hazards, 13 add_book tests, and the
+      DB-side manual pass (predicted id 8934 matched the real id, triggers
+      filled sort/uuid, the format file landed truthful, `get_book`/
+      `get_format_path` resolve it). The Calibre-GUI half of the manual
+      pass (open the book, watch the `.opf` regenerate) is seeded on
+      `testing_facility/metadata_write.db` and awaits Brandon's eyes.)*
+- [x] **Upstream sync**: *CalibreQuarry* Phase 17 (`run phase2` is the driving
       consumer); *Bindery* unaffected (`--install-to-calibre` repairs existing
       books via `install_format`, never creates rows); *Carrel-calibre-web*
       unaffected (read-only by construction); *Hermitage* unaffected
       (read-mostly posture; no Flatpak pin bump needed).
-- [ ] **Skill sync**: phase-3-import still reads "`add_book` is the known gap,
+- [x] **Skill sync**: phase-3-import still reads "`add_book` is the known gap,
       and this loop never creates books"; update the line when this ships, and
       the future phase-2 runner docs record the manifest → `add_book`
       contract.

@@ -359,16 +359,99 @@ CREATE TABLE books_custom_column_3_link (book INTEGER, value INTEGER, UNIQUE(boo
 CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
 """
 
+# Phase 10 (add_book): _WRITE_SCHEMA extended with the real INSERT-path
+# hazards a user_version-27 library carries — AUTOINCREMENT on books.id
+# (sqlite_sequence drives dry-run's id prediction), books_insert_trg
+# (title_sort()/uuid4()), the Count Pages create trigger, series_insert_trg,
+# and the fkc_insert_* guards the link-table writes must satisfy.
+_ADD_BOOK_SCHEMA = (
+    _WRITE_SCHEMA.replace(
+        "id INTEGER PRIMARY KEY, title TEXT",
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT",
+        1,
+    )
+    + """
+CREATE TABLE books_pages_link (
+    book INTEGER PRIMARY KEY,
+    pages INTEGER DEFAULT 0 NOT NULL,
+    algorithm INTEGER DEFAULT 0 NOT NULL,
+    format TEXT DEFAULT '' NOT NULL,
+    format_size INTEGER DEFAULT 0 NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    needs_scan INTEGER NOT NULL DEFAULT 0 CHECK(needs_scan IN (0, 1))
+);
+CREATE TRIGGER books_insert_trg AFTER INSERT ON books
+BEGIN
+    UPDATE books SET sort = title_sort(NEW.title), uuid = uuid4() WHERE id = NEW.id;
+END;
+CREATE TRIGGER series_insert_trg AFTER INSERT ON series
+BEGIN
+    UPDATE series SET sort = title_sort(NEW.name) WHERE id = NEW.id;
+END;
+CREATE TRIGGER books_pages_link_create_trigger AFTER INSERT ON books FOR EACH ROW
+BEGIN
+    INSERT INTO books_pages_link(book) VALUES (NEW.id);
+END;
+CREATE TRIGGER fkc_insert_books_authors_link BEFORE INSERT ON books_authors_link
+BEGIN
+    SELECT CASE
+        WHEN (SELECT id FROM books WHERE id = NEW.book) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+        WHEN (SELECT id FROM authors WHERE id = NEW.author) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: author not in authors')
+    END;
+END;
+CREATE TRIGGER fkc_insert_books_series_link BEFORE INSERT ON books_series_link
+BEGIN
+    SELECT CASE
+        WHEN (SELECT id FROM books WHERE id = NEW.book) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+        WHEN (SELECT id FROM series WHERE id = NEW.series) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: series not in series')
+    END;
+END;
+CREATE TRIGGER fkc_insert_books_publishers_link BEFORE INSERT ON books_publishers_link
+BEGIN
+    SELECT CASE
+        WHEN (SELECT id FROM books WHERE id = NEW.book) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+        WHEN (SELECT id FROM publishers WHERE id = NEW.publisher) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: publisher not in publishers')
+    END;
+END;
+CREATE TRIGGER fkc_insert_books_languages_link BEFORE INSERT ON books_languages_link
+BEGIN
+    SELECT CASE
+        WHEN (SELECT id FROM books WHERE id = NEW.book) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+        WHEN (SELECT id FROM languages WHERE id = NEW.lang_code) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: language not in languages')
+    END;
+END;
+CREATE TRIGGER fkc_insert_books_tags_link BEFORE INSERT ON books_tags_link
+BEGIN
+    SELECT CASE
+        WHEN (SELECT id FROM books WHERE id = NEW.book) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+        WHEN (SELECT id FROM tags WHERE id = NEW.tag) IS NULL
+        THEN RAISE(ABORT, 'Foreign key violation: tag not in tags')
+    END;
+END;
+"""
+)
+
 
 class TestWriteSideExpansion(unittest.TestCase):
     """Phase-6 write-side expansion: entity setters, set_comments,
     set_custom_column, format management and remove_book."""
 
+    SCHEMA = _WRITE_SCHEMA
+
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "metadata.db")
         conn = sqlite3.connect(self.db_path)
-        conn.executescript(_WRITE_SCHEMA)
+        conn.executescript(self.SCHEMA)
         conn.execute(
             "INSERT INTO books (id, title, sort, author_sort) "
             "VALUES (1, 'Old Title', 'Old Title', 'Writer, Zed A.')"
@@ -775,3 +858,294 @@ class TestSetWriteConveniences(TestWriteSideExpansion):
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(0,)])
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_3"), [(0,)])
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
+
+
+class TestAddBook(TestWriteSideExpansion):
+    """Phase 10: the creation path.
+
+    The fixture carries the real INSERT-path hazards (books_insert_trg
+    calling title_sort()/uuid4(), the Count Pages create trigger, the
+    fkc_insert_* guards), so every assert below runs against the same
+    trigger census a user_version-27 library presents. setUp seeds ids 1
+    and 2, so with AUTOINCREMENT the next id (real or predicted) is 3.
+    """
+
+    SCHEMA = _ADD_BOOK_SCHEMA
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        # The seeded inserts themselves fire books_insert_trg.
+        register_udfs(conn)
+        conn.executescript(self.SCHEMA)
+        conn.execute(
+            "INSERT INTO books (id, title, sort, author_sort) "
+            "VALUES (1, 'Old Title', 'Old Title', 'Writer, Zed A.')"
+        )
+        conn.execute("INSERT INTO books (id, title, sort) VALUES (2, 'Other', 'Other')")
+        # Existing author with a hand-tuned sort key; shared with book 2.
+        conn.execute(
+            "INSERT INTO authors VALUES (1, 'Zed A. Writer', 'Writer, Zed A.', '')"
+        )
+        conn.executemany(
+            "INSERT INTO books_authors_link (book, author) VALUES (?, 1)", [(1,), (2,)]
+        )
+        # Inherited custom-column tests need the seeded columns.
+        conn.execute(
+            "INSERT INTO custom_columns VALUES "
+            "(1,'status','Status','enumeration',1,?,0,1)",
+            ('{"enum_values": ["Read", "Reading", "To Read"]}',),
+        )
+        conn.execute(
+            "INSERT INTO custom_columns VALUES (2,'liked','Liked','bool',1,'{}',0,0)"
+        )
+        conn.execute(
+            "INSERT INTO custom_columns VALUES (3,'audience','Audience','text',1,'{}',1,1)"
+        )
+        conn.commit()
+        conn.close()
+
+    def _epub(self, payload: bytes = b"EPUBPAYLOAD") -> str:
+        path = os.path.join(self.temp_dir, "seed.epub")
+        with open(path, "wb") as f:
+            f.write(payload)
+        return path
+
+    def _count(self, sql: str) -> int:
+        return self._sql2(sql)[0][0]
+
+    def test_add_book_minimal_row_links_and_path(self):
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("The Fifth Head of Data", ["Ann Leckie"])
+        self.assertEqual(book_id, 3)
+        row = self._sql2(
+            "SELECT title, sort, uuid, author_sort, path, has_cover FROM books "
+            "WHERE id = 3"
+        )[0]
+        title, sort, uuid, author_sort, path, has_cover = row
+        self.assertEqual(title, "The Fifth Head of Data")
+        self.assertEqual(sort, "Fifth Head of Data, The")  # books_insert_trg
+        self.assertEqual(len(uuid), 36)  # books_insert_trg uuid4()
+        self.assertEqual(author_sort, "Ann Leckie")  # new author, sort = name
+        self.assertEqual(path, "Ann Leckie/The Fifth Head of Data (3)")
+        self.assertEqual(has_cover, 0)
+        # Author link + the Count Pages create-trigger row.
+        self.assertEqual(
+            self._sql2(
+                "SELECT a.name FROM books_authors_link l JOIN authors a "
+                "ON a.id = l.author WHERE l.book = 3"
+            ),
+            [("Ann Leckie",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM books_pages_link WHERE book = 3"), [(3,)]
+        )
+        # Queued for OPF regeneration like every other write.
+        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(3,)])
+
+    def test_add_book_formats_placed_atomically_with_truthful_rows(self):
+        source = self._epub(b"EXACT-PAYLOAD")
+        with self._wdb() as wdb:
+            book_id = wdb.add_book(
+                "The Fifth Head of Data", ["Ann Leckie"], formats=[source]
+            )
+        name, size = self._sql2(
+            "SELECT name, uncompressed_size FROM data WHERE book = ? AND format = 'EPUB'",
+            (book_id,),
+        )[0]
+        self.assertEqual(name, "The Fifth Head of Data - Ann Leckie")
+        self.assertEqual(size, len(b"EXACT-PAYLOAD"))
+        placed = os.path.join(
+            self.temp_dir, "Ann Leckie", "The Fifth Head of Data (3)", f"{name}.epub"
+        )
+        with open(placed, "rb") as f:
+            self.assertEqual(f.read(), b"EXACT-PAYLOAD")
+        # Copy only: the source survives untouched.
+        with open(source, "rb") as f:
+            self.assertEqual(f.read(), b"EXACT-PAYLOAD")
+
+    def test_add_book_cover_places_and_flags(self):
+        for sig, expected in (
+            (b"\xff\xd8\xff\xe0jpegbody", "cover.jpg"),
+            (b"\x89PNG\r\n\x1a\nrest", "cover.png"),
+        ):
+            with self.subTest(expected=expected):
+                with self._wdb() as wdb:
+                    book_id = wdb.add_book(
+                        "The Fifth Head of Data", ["Ann Leckie"], cover=sig
+                    )
+                rel_path = self._sql2(
+                    "SELECT path FROM books WHERE id = ?", (book_id,)
+                )[0][0]
+                self.assertTrue(
+                    os.path.isfile(os.path.join(self.temp_dir, rel_path, expected))
+                )
+                self.assertEqual(
+                    self._sql2("SELECT has_cover FROM books WHERE id = ?", (book_id,)),
+                    [(1,)],
+                )
+
+    def test_add_book_cover_sniff_or_raise_writes_nothing(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.add_book(
+                "The Fifth Head of Data",
+                ["Ann Leckie"],
+                cover=b"definitely not an image",
+            )
+        self.assertEqual(self._count("SELECT COUNT(*) FROM books"), 2)
+        self.assertFalse(os.path.isdir(os.path.join(self.temp_dir, "Ann Leckie")))
+
+    def test_add_book_empty_title_and_no_authors_is_legal(self):
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("   ", [])
+        self.assertEqual(book_id, 3)
+        title, author_sort, path = self._sql2(
+            "SELECT title, author_sort, path FROM books WHERE id = 3"
+        )[0]
+        self.assertEqual(title, "Unknown")  # Calibre's own default
+        self.assertEqual(author_sort, "")
+        self.assertEqual(path, "Unknown/Unknown (3)")
+        # No author links: exactly what find_authorless expects.
+        self.assertEqual(
+            self._count("SELECT COUNT(*) FROM books_authors_link WHERE book = 3"),
+            0,
+        )
+
+    def test_add_book_full_seed(self):
+        with self._wdb() as wdb:
+            wdb.add_book(
+                "The Fifth Head of Data",
+                ["Ann Leckie"],
+                formats=[self._epub()],
+                identifiers={"ISBN": " 9780000000000 ", "GoodReads": "42"},
+                language="English",
+                pubdate="2001-02-03",
+                publisher="Orbit",
+            )
+        row = self._sql2("SELECT pubdate, has_cover FROM books WHERE id = 3")[0]
+        self.assertEqual(row[0], "2001-02-03 00:00:00+00:00")
+        self.assertEqual(row[1], 0)  # no cover seeded, no cover catalogued
+        self.assertEqual(
+            self._sql2(
+                "SELECT type, val FROM identifiers WHERE book = 3 ORDER BY type"
+            ),
+            [("goodreads", "42"), ("isbn", "9780000000000")],
+        )
+        self.assertEqual(
+            self._sql2(
+                "SELECT l.lang_code FROM books_languages_link bl JOIN languages l "
+                "ON l.id = bl.lang_code WHERE bl.book = 3"
+            ),
+            [("eng",)],
+        )
+        self.assertEqual(
+            self._sql2(
+                "SELECT p.name FROM books_publishers_link pl JOIN publishers p "
+                "ON p.id = pl.publisher WHERE pl.book = 3"
+            ),
+            [("Orbit",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT format FROM data WHERE book = 3"), [("EPUB",)]
+        )
+
+    def test_add_book_duplicate_format_seed_raises(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.add_book("T", ["A"], formats=[self._epub(), self._epub(b"other")])
+
+    def test_add_book_ascii_fold_is_the_documented_deviation(self):
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("Ünicode Tëst", ["Ann Leckie"])
+        path = self._sql2("SELECT path FROM books WHERE id = ?", (book_id,))[0][0]
+        self.assertEqual(path, "Ann Leckie/_nicode T_st (3)")
+
+    def test_add_book_existing_author_reuses_sort_nocase(self):
+        with self._wdb() as wdb:
+            wdb.add_book("The Fifth Head of Data", ["zed a. writer"])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM authors"), [(1,)])
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 3"),
+            [("Writer, Zed A.",)],
+        )
+
+    def test_add_book_dry_run_writes_nothing(self):
+        source = self._epub()
+        with self._wdb() as wdb:
+            plan = wdb.add_book(
+                "The Fifth Head of Data",
+                ["Ann Leckie"],
+                formats=[source],
+                cover=b"\xff\xd8\xff\xe0jpegbody",
+                dry_run=True,
+            )
+        self.assertTrue(plan["dry_run"])
+        self.assertEqual(plan["predicted_id"], 3)
+        self.assertEqual(
+            plan["books_row"]["path"], "Ann Leckie/The Fifth Head of Data (3)"
+        )
+        self.assertEqual(plan["books_row"]["sort"], "Fifth Head of Data, The")
+        self.assertEqual(
+            plan["authors"], [{"name": "Ann Leckie", "sort": "Ann Leckie", "new": True}]
+        )
+        self.assertEqual(
+            plan["formats"],
+            [
+                {
+                    "format": "EPUB",
+                    "filename": "The Fifth Head of Data - Ann Leckie.epub",
+                    "size": len(b"EPUBPAYLOAD"),
+                    "source": source,
+                }
+            ],
+        )
+        self.assertEqual(plan["cover"], "cover.jpg")
+        self.assertEqual(self._count("SELECT COUNT(*) FROM books"), 2)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM authors"), 1)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM metadata_dirtied"), 0)
+        self.assertFalse(os.path.isdir(os.path.join(self.temp_dir, "Ann Leckie")))
+
+    def test_add_book_dry_run_prediction_tracks_adds(self):
+        with self._wdb() as wdb:
+            first = wdb.add_book("First", ["A"])
+            plan = wdb.add_book("Second", ["A"], dry_run=True)
+            second = wdb.add_book("Second", ["A"])
+        self.assertEqual(plan["predicted_id"], first + 1)
+        self.assertEqual(second, first + 1)
+
+    def test_add_book_failure_removes_rows_and_directory(self):
+        # A directory squatting on the format-file path makes the atomic
+        # replace fail AFTER the row was inserted: the batch must undo the
+        # SQL and the tracked rmtree must take the whole directory (and the
+        # squatter) with it.
+        book_dir = os.path.join(
+            self.temp_dir, "Ann Leckie", "The Fifth Head of Data (3)"
+        )
+        squatter = os.path.join(book_dir, "The Fifth Head of Data - Ann Leckie.epub")
+        os.makedirs(squatter)
+        with open(os.path.join(squatter, "sentinel.txt"), "w") as f:
+            f.write("planted")
+        with self._wdb() as wdb, self.assertRaises(OSError):
+            wdb.add_book(
+                "The Fifth Head of Data", ["Ann Leckie"], formats=[self._epub()]
+            )
+        self.assertEqual(self._count("SELECT COUNT(*) FROM books"), 2)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM authors"), 1)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM data"), 0)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM metadata_dirtied"), 0)
+        self.assertFalse(os.path.exists(book_dir))
+
+    def test_add_book_nested_failure_rolls_back_together(self):
+        # add_book joined to a caller's batch: its OWN failure must remove
+        # its files (inner compensation) while the outer batch undoes the
+        # SQL. An outer failure AFTER a successful add is the documented
+        # orphan window instead (the risks note in the roadmap).
+        book_dir = os.path.join(self.temp_dir, "Ann Leckie", "Doomed (3)")
+        squatter = os.path.join(book_dir, "Doomed - Ann Leckie.epub")
+        os.makedirs(squatter)
+        with self._wdb() as wdb, self.assertRaises(OSError), wdb.batch():
+            wdb.add_book("Doomed", ["Ann Leckie"], formats=[self._epub()])
+        self.assertEqual(self._count("SELECT COUNT(*) FROM books"), 2)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM authors"), 1)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM metadata_dirtied"), 0)
+        self.assertFalse(os.path.isdir(book_dir))

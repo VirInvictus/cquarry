@@ -132,6 +132,20 @@ def get_image_size(filepath: str) -> tuple[int, int] | None:
     return None
 
 
+def sniff_image_format(data: bytes) -> str | None:
+    """Identify image bytes by signature: ``'jpg'``, ``'png'``, or None.
+
+    The bytes-level sibling of :func:`get_image_size` (same signatures, no
+    file needed); ``add_book``'s cover sniff-or-raise builds on it so the
+    write path never catalogues an unparseable cover.
+    """
+    if data[:2] == b"\xff\xd8":
+        return "jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    return None
+
+
 def calibre_rating_to_stars(rating: int | None) -> float | None:
     """Convert Calibre's internal rating (0-10) to stars (0-5)."""
     if rating is None or rating == 0:

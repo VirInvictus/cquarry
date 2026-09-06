@@ -33,13 +33,15 @@ Example::
 import contextlib
 import json
 import os
+import re
+import shutil
 import sqlite3
 import uuid as _uuid
 from collections.abc import Generator
 from datetime import UTC, date, datetime
 from typing import Any, Self
 
-from cquarry.helpers import title_sort
+from cquarry.helpers import sniff_image_format, title_sort
 
 __all__ = ["WritableCalibreDB", "register_udfs", "title_sort", "uuid4"]
 
@@ -107,6 +109,140 @@ def _same_instant(current: str | None, new: str) -> bool:
         return datetime.fromisoformat(current) == datetime.fromisoformat(new)
     except ValueError, TypeError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Calibre's book-path layout, reproduced stdlib-only for ``add_book``
+# (backend.py ``construct_path_name`` / ``construct_file_name``). The ONE
+# documented deviation (roadmap Phase 10): upstream runs an ICU user-codec
+# before the ASCII fold; here the fold is a plain ``encode("ascii",
+# "replace")`` — visible only if Calibre later re-derives the path on a
+# rename. ``PATH_LIMIT`` pins the POSIX budget (backend.py: PATH_LIMIT = 40
+# if iswindows else 100); the ecosystem targets POSIX.
+# ---------------------------------------------------------------------------
+
+_PATH_LIMIT = 100
+_BOOK_ID_PATH_TEMPLATE = " ({})"  # backend.py BOOK_ID_PATH_TEMPLATE
+_WINDOWS_RESERVED_NAMES = frozenset(
+    [
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    ]
+)
+# backend.py: upstream's union of Windows/macOS/Linux-illegal characters
+# plus control characters (calibre/__init__.py _filename_sanitize_unicode).
+_FILENAME_ILLEGAL = frozenset('\\|?*<>":+/') | {chr(i) for i in range(32)}
+
+
+def _ascii_filename(text: str, substitute: str = "_") -> str:
+    """Sanitize one path component the way upstream's ``ascii_filename`` +
+    ``sanitize_file_name`` chain does, with the plain ASCII fold."""
+    one = text.encode("ascii", "replace").decode("ascii").replace("?", substitute)
+    one = "".join(substitute if ch in _FILENAME_ILLEGAL else ch for ch in one)
+    one = re.sub(r"\s", " ", one).strip()
+    bname, ext = os.path.splitext(one)
+    one = re.sub(r"^\.+$", "_", bname)
+    one = one.replace("..", substitute)
+    one += ext
+    # Windows dislikes components ending in a period or space, and Unix
+    # hides leading periods; upstream applies both guards unconditionally.
+    if one and one[-1] in (".", " "):
+        one = one[:-1] + substitute
+    if one.startswith("."):
+        one = substitute + one[1:]
+    return one
+
+
+def _construct_path_name(book_id: int, title: str, author: str) -> str:
+    """The relative ``Author/Title (id)`` directory (backend.py parity)."""
+    id_part = _BOOK_ID_PATH_TEMPLATE.format(book_id)
+    limit = _PATH_LIMIT - (len(id_part) // 2) - 2
+    author = _ascii_filename(author)[:limit]
+    title = _ascii_filename(title.lstrip())[:limit].rstrip()
+    if not title:
+        title = "Unknown"[:limit]
+    while author and author[-1] in (" ", "."):
+        author = author[:-1]
+    if not author:
+        author = _ascii_filename("Unknown")
+    if author.upper() in _WINDOWS_RESERVED_NAMES:
+        author += "w"
+    return f"{author}/{title}{id_part}"
+
+
+def _construct_file_name(title: str, author: str, extlen: int) -> str:
+    """The ``Title - Author`` format-file stem (backend.py parity).
+
+    ``extlen`` counts the dot plus the extension, floored like upstream so
+    ``ORIGINAL_EPUB``-sized names always fit.
+    """
+    extlen = max(extlen, 14)  # 14 accounts for ORIGINAL_EPUB
+    limit = (_PATH_LIMIT - extlen - 2) // 2
+    author = _ascii_filename(author)[:limit]
+    title = _ascii_filename(title.lstrip())[:limit].rstrip()
+    if not title:
+        title = "Unknown"[:limit]
+    name = title + " - " + author
+    while name.endswith("."):
+        name = name[:-1]
+    if not name:
+        name = _ascii_filename("Unknown")
+    return name
+
+
+def _place_stream(src: str, dest: str) -> int:
+    """Copy a file into place atomically; returns the bytes on disk.
+
+    The bindery ``install_format`` precedent: temp name, fsync the file,
+    ``os.replace``, then fsync the directory so the rename survives a crash.
+    """
+    tmp = dest + ".cquarry-tmp"
+    with open(src, "rb") as fin, open(tmp, "wb") as fout:
+        shutil.copyfileobj(fin, fout, length=1024 * 1024)
+        fout.flush()
+        os.fsync(fout.fileno())
+    os.replace(tmp, dest)
+    dfd = os.open(os.path.dirname(dest) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+    return os.path.getsize(dest)
+
+
+def _place_bytes(data: bytes, dest: str) -> None:
+    """Write bytes into place atomically (the cover path)."""
+    tmp = dest + ".cquarry-tmp"
+    with open(tmp, "wb") as fout:
+        fout.write(data)
+        fout.flush()
+        os.fsync(fout.fileno())
+    os.replace(tmp, dest)
+    dfd = os.open(os.path.dirname(dest) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 class WritableCalibreDB:
@@ -1243,6 +1379,272 @@ class WritableCalibreDB:
         except Exception:
             self._rollback()
             raise
+
+    # -- Book creation (Phase 10) --
+
+    def add_book(
+        self,
+        title: str,
+        authors: list[str],
+        *,
+        formats: list[str | os.PathLike] | None = None,
+        cover: str | os.PathLike | bytes | None = None,
+        identifiers: dict[str, str] | None = None,
+        language: str | None = None,
+        pubdate: str | date | datetime | None = None,
+        publisher: str | None = None,
+        dry_run: bool = False,
+    ) -> int | dict[str, Any]:
+        """Create a book row with triggers intact and return the new id.
+
+        The creation path the automated phase-2 import stands on. Mirrors
+        Calibre's own add sequence: insert ``(title, series_index,
+        author_sort)`` FIRST and let ``books_insert_trg`` fill ``sort`` and
+        ``uuid``; id from ``lastrowid``; the ``Author/Title (id)`` directory
+        and format files (``Title - Author.ext``, truthful ``data`` sizes)
+        written after. Everything lands in ONE ``batch()``: a failure rolls
+        the SQL back and the tracked directory is removed, so a failed add
+        leaves zero rows, zero links, and no directory. ``_touch_book()``
+        queues the id so Calibre generates the sidecar ``.opf`` on next
+        startup; no ``metadata.opf`` is written here.
+
+        Seeds, all optional: format FILES copied into the book directory
+        (``data`` rows follow, one per file, type taken from the file
+        extension), a cover (path or bytes; JPEG/PNG only, sniff-or-raise:
+        an unparseable cover raises rather than being catalogued with
+        ``has_cover=1``), ``identifiers`` (types normalized like
+        ``set_identifier``), one ``language`` (canonicalized through the
+        search engine's map, ``English`` -> ``eng``; unknown names pass
+        through verbatim, exactly like ``set_languages``), ``pubdate``, and
+        a ``publisher``.
+        No tags, series, ratings, comments, or custom columns at creation:
+        phase 2 clears/sets those itself and phase 3 curates. An empty or
+        blank title becomes ``Unknown`` (Calibre parity); an EMPTY author
+        list is legal and leaves the book with no author links, exactly
+        what ``find_authorless`` expects (the path component falls back to
+        ``Unknown``).
+
+        With ``dry_run=True`` nothing is written: the computed plan is
+        returned instead, with the id predicted from ``sqlite_sequence``
+        (labeled ``predicted_id``) and the row that would be inserted.
+
+        Copy only by design: sources are never moved or deleted; queue
+        hygiene is the runner's post-success policy.
+        """
+        title = (title or "").strip() or "Unknown"
+        cleaned_authors: list[str] = []
+        for name in authors or []:
+            cleaned = name.strip()
+            if cleaned and not any(
+                cleaned.lower() == existing.lower() for existing in cleaned_authors
+            ):
+                cleaned_authors.append(cleaned)
+        first_author = cleaned_authors[0] if cleaned_authors else ""
+        author_sort = " & ".join(
+            sort for _name, sort, _new in self._author_sort_keys(cleaned_authors)
+        )
+
+        fmt_entries: list[tuple[str, str, str, int]] = []
+        seen_fmts: set[str] = set()
+        for raw in formats or []:
+            src = os.path.abspath(os.fspath(raw))
+            if not os.path.isfile(src):
+                raise FileNotFoundError(f"Format file not found: {src}")
+            ext = os.path.splitext(src)[1][1:]
+            fmt = ext.upper()
+            if not fmt:
+                raise ValueError(f"Format file has no extension: {src!r}")
+            if fmt in seen_fmts:
+                raise ValueError(f"Duplicate format seed: {fmt}")
+            seen_fmts.add(fmt)
+            fmt_entries.append((fmt, src, ext, os.path.getsize(src)))
+
+        cover_data: bytes | None = None
+        cover_ext: str | None = None
+        if cover is not None:
+            if isinstance(cover, (bytes, bytearray)):
+                cover_data = bytes(cover)
+            else:
+                cover_path = os.fspath(cover)
+                if not os.path.isfile(cover_path):
+                    raise FileNotFoundError(f"Cover file not found: {cover_path}")
+                with open(cover_path, "rb") as f:
+                    cover_data = f.read()
+            cover_ext = sniff_image_format(cover_data)
+            if cover_ext is None:
+                raise ValueError(
+                    "Cover is neither JPEG nor PNG (sniff-or-raise: an "
+                    "unparseable cover must not be catalogued with has_cover=1)"
+                )
+
+        clean_identifiers: dict[str, str] = {}
+        for id_type, val in (identifiers or {}).items():
+            id_type = id_type.strip().lower()
+            if not id_type:
+                raise ValueError("Identifier type must not be empty")
+            if not str(val).strip():
+                raise ValueError(
+                    f"Identifier value for {id_type!r} must not be empty "
+                    "(set_identifier deletes; add_book has nothing to delete)"
+                )
+            clean_identifiers[id_type] = str(val).strip()
+
+        clean_language: str | None = None
+        if language is not None:
+            from .search import canonical_language
+
+            clean_language = canonical_language(str(language).strip())
+
+        clean_publisher = (publisher or "").strip() or None
+        pubdate_text = _normalize_pubdate(pubdate)
+
+        if dry_run:
+            return self._add_book_plan(
+                title,
+                cleaned_authors,
+                author_sort,
+                first_author,
+                fmt_entries,
+                cover_ext,
+                clean_identifiers,
+                clean_language,
+                clean_publisher,
+                pubdate_text,
+            )
+
+        book_dir: str | None = None
+        try:
+            with self.batch():
+                # Insert FIRST, id from lastrowid (books_insert_trg fills
+                # sort/uuid; the caller never passes either); path written
+                # after, now that the id exists.
+                cur = self.conn.execute(
+                    "INSERT INTO books (title, series_index, author_sort) "
+                    "VALUES (?, ?, ?)",
+                    (title, 1.0, author_sort),
+                )
+                book_id = cur.lastrowid
+                rel_path = _construct_path_name(book_id, title, first_author)
+                self.conn.execute(
+                    "UPDATE books SET path = ? WHERE id = ?", (rel_path, book_id)
+                )
+                self.conn.execute(
+                    "UPDATE books SET pubdate = ? WHERE id = ?",
+                    (pubdate_text, book_id),
+                )
+                # The directory name carries the fresh id, so it cannot
+                # belong to any live book; a leftover orphan from a crashed
+                # prior attempt is absorbed (and removed wholesale if this
+                # attempt fails).
+                book_dir = os.path.join(os.path.dirname(self.db_path), rel_path)
+                os.makedirs(book_dir, exist_ok=True)
+                for fmt, src, ext, _size in fmt_entries:
+                    stem = _construct_file_name(title, first_author, len(ext) + 1)
+                    placed = _place_stream(
+                        src, os.path.join(book_dir, f"{stem}.{ext.lower()}")
+                    )
+                    self.conn.execute(
+                        "INSERT INTO data (book, format, uncompressed_size, name) "
+                        "VALUES (?, ?, ?, ?)",
+                        (book_id, fmt, placed, stem),
+                    )
+                if cover_data is not None and cover_ext is not None:
+                    _place_bytes(
+                        cover_data, os.path.join(book_dir, f"cover.{cover_ext}")
+                    )
+                    self.conn.execute(
+                        "UPDATE books SET has_cover = 1 WHERE id = ?", (book_id,)
+                    )
+                # The setters reuse their tested link/sort/prune logic; the
+                # batch makes their per-call transaction control a no-op.
+                if cleaned_authors:
+                    self.set_authors(book_id, cleaned_authors)
+                if clean_publisher:
+                    self.set_publisher(book_id, clean_publisher)
+                if clean_language:
+                    self.set_languages(book_id, clean_language)
+                if clean_identifiers:
+                    self.set_identifiers(book_id, clean_identifiers)
+                self._touch_book(book_id)
+            return book_id
+        except Exception:
+            # Failure compensation for the filesystem half: the SQL undoes
+            # itself via the batch above; the created directory goes too.
+            if book_dir is not None:
+                shutil.rmtree(book_dir, ignore_errors=True)
+            raise
+
+    def _author_sort_keys(self, names: list[str]) -> list[tuple[str, str, bool]]:
+        """Resolve author names to (name, sort, is_new) without writing.
+
+        Existing rows keep their hand-tuned ``sort``; new ones default it
+        to the display name, Calibre's starting point.
+        """
+        resolved: list[tuple[str, str, bool]] = []
+        for name in names:
+            row = self.conn.execute(
+                "SELECT sort FROM authors WHERE name = ? COLLATE NOCASE", (name,)
+            ).fetchone()
+            if row is None:
+                resolved.append((name, name, True))
+            else:
+                resolved.append((name, row["sort"] or name, False))
+        return resolved
+
+    def _add_book_plan(
+        self,
+        title: str,
+        authors: list[str],
+        author_sort: str,
+        first_author: str,
+        fmt_entries: list[tuple[str, str, str, int]],
+        cover_ext: str | None,
+        identifiers: dict[str, str],
+        language: str | None,
+        publisher: str | None,
+        pubdate_text: str,
+    ) -> dict[str, Any]:
+        """The ``dry_run=True`` plan: predicted id/path, filenames, row diff."""
+        try:
+            seq = self.conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = ?", ("books",)
+            ).fetchone()
+            predicted_id = (seq["seq"] if seq else 0) + 1
+        except sqlite3.OperationalError:
+            # No sqlite_sequence (no AUTOINCREMENT): max-id fallback.
+            predicted_id = self.conn.execute(
+                "SELECT IFNULL(MAX(id), 0) + 1 AS nxt FROM books"
+            ).fetchone()["nxt"]
+        return {
+            "dry_run": True,
+            "predicted_id": predicted_id,
+            "books_row": {
+                "title": title,
+                "sort": title_sort(title),
+                "author_sort": author_sort,
+                "series_index": 1.0,
+                "pubdate": pubdate_text,
+                "path": _construct_path_name(predicted_id, title, first_author),
+            },
+            "authors": [
+                {"name": name, "sort": sort, "new": is_new}
+                for name, sort, is_new in self._author_sort_keys(authors)
+            ],
+            "publisher": publisher,
+            "language": language,
+            "identifiers": dict(identifiers),
+            "formats": [
+                {
+                    "format": fmt,
+                    "filename": f"{_construct_file_name(title, first_author, len(ext) + 1)}.{ext.lower()}",
+                    "size": size,
+                    "source": src,
+                }
+                for fmt, src, ext, size in fmt_entries
+            ],
+            "cover": f"cover.{cover_ext}" if cover_ext else None,
+            "author_sort_computed": author_sort,
+        }
 
     # -- Book lifecycle --
 
