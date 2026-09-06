@@ -660,7 +660,8 @@ user_version-27 schema. Approved by Brandon 2026-09-05.*
     `install_format` precedent) INSIDE the transaction; because the book
     directory cannot pre-exist (its name contains the fresh id), the failure
     compensation is a tracked `rmtree` of the created directory while the SQL
-    undoes itself via the batch. Copy by default; move semantics available.
+    undoes itself via the batch. **Copy only (Brandon's verdict 2026-09-06):**
+    move is the runner's post-success policy, never this API.
   - `data.uncompressed_size` = real bytes of the placed file; cover copied
     verbatim as `cover.jpg` + `has_cover=1` (no re-encode: stdlib-only,
     documented deviation from Calibre's image processing); NO `metadata.opf`
@@ -694,10 +695,18 @@ user_version-27 schema. Approved by Brandon 2026-09-05.*
       the future phase-2 runner docs record the manifest → `add_book`
       contract.
 
-Open questions (Brandon): copy vs move default (recommend copy; phase 1
-already backs up originals to /tmp); cover normalization (verbatim bytes vs
-runner-side pre-normalization to a sane JPEG); whether dry-run is surfaced as
-a CalibreQuarry CLI flag or stays Python-API-only.
+Open questions (Brandon): ~~copy vs move default~~ **DECIDED 2026-09-06:
+copy, and only copy** (grounded against upstream's add path: calibredb
+add has no move/delete-source option and `db/adding.py` never mutates
+sources; a true move would collide with this design's tracked-`rmtree`
+failure compensation, since a mid-add failure would rmtree the directory
+a moved-in source now lives in; the write module's standing posture is
+rows-ours/files-the-caller's beyond necessary placement, and the frozen
+signature has no move parameter). Queue hygiene, archiving or deleting
+sources after a verified add, is CalibreQuarry `run phase2` policy, not
+this API's. Still open: cover normalization (verbatim bytes vs
+runner-side pre-normalization to a sane JPEG); whether dry-run is
+surfaced as a CalibreQuarry CLI flag or stays Python-API-only.
 
 Risks: a future Calibre schema bump adding or changing an INSERT trigger (the
 fixture pins the expected trigger census of user_version 27; re-run the manual
