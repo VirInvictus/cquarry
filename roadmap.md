@@ -908,7 +908,23 @@ closing the connection, never mentioning commit-on-exit.*
       flag or documented semantics, plus the CLAUDE.md carve-out (the
       module deletes the removed book's dirty-queue entries, which the
       blanket "never DELETE from them" wording forbids).
-- [ ] **Upstream-fidelity papercuts (P3, decide-don't-drift):**
+      *(RECORDED 2026-09-09, decision pending with Brandon. Option A: a
+      `delete_files: bool = False` kwarg -- after the rows commit,
+      remove_book deletes the book's whole `<books.path>/` directory
+      (format files, cover, sidecars); matches Calibre's own
+      remove-books-then-rmtree posture, keeps the
+      rows-ours/files-the-caller's stance opt-in, and reuses the batch
+      compensation machinery the module already owns. Option B: documented
+      semantics only -- rows deleted, files stay as orphans that
+      find_book_by_path sweeps can detect, API.md states "rows only; the
+      directory is the caller's". RECOMMENDATION: Option A, default False,
+      with the API.md row naming the flag explicitly; a rows-only remove
+      quietly strands files that look like a live book to every path-based
+      tool, and the sweep showed phase-2 imports are exactly this shape.
+      Also recorded: the CLAUDE.md dirty-queue carve-out should be reworded
+      -- remove_book DELETING the removed book's queue entries is correct
+      and the "never DELETE" wording is about living books.)*
+- [x] **Upstream-fidelity papercuts (P3, decide-don't-drift):**
       `set_languages` never writes `item_order` (all rows land at 0;
       insertion order survives only via the read side's tiebreaker);
       `set_rating(book_id, 0)` stores a 0-rating row where Calibre maps
@@ -920,33 +936,64 @@ closing the connection, never mentioning commit-on-exit.*
       silently discards the transaction while the batch path propagates
       them; `_write_pattern_a`'s no-op detection has no ORDER BY and can
       report spurious `changed`; `add_format` accepts negative sizes.
+      *(DISPOSITIONED 2026-09-09, shipped in 1.15.0/1.16.0. IMPLEMENTED
+      where upstream is unambiguous: rating 0 clears (93f896a);
+      item_order written when the schema carries it (93f896a); the
+      pattern-A no-op check orders old rows by rowid (93f896a);
+      add_format rejects negative sizes (93f896a); datetime custom
+      columns normalize like set_pubdate (9a109b4); `__exit__` propagates
+      commit failures (7c798a3). DOCUMENTED instead: new authors default
+      sort to the display name -- upstream's surname-flip heuristic
+      (author_to_author_sort) runs on GUI metadata edits, not row
+      creation, and reproducing it is name-heuristic territory; dated
+      note added to the spec's add_book paragraph.)*
 
 ### Read side
 
-- [ ] **Stop the comma round-trip in multi-valued custom columns (P1).**
+- [x] **Stop the comma round-trip in multi-valued custom columns (P1).**
       `load_custom_column` joins Pattern-A values with `", "` (`db.py:926`)
       and `_custom_value` re-splits on commas (`db.py:1614-1615`), so a
       value like `Doe, John` becomes phantom values `Doe` and `John` in
       `field()` and the dossier, and count/exact searches lie about the
       stored data (reproduced). Keep native lists end to end.
-- [ ] **Canonicalize before the vl lookup (P1).** `resolve_vl` guards with
+      *(SHIPPED 2026-09-09 as 1.16.0, commit 811f7f5: native `list[str]`
+      from `load_custom_column()` and `field()` for is_multiple columns,
+      and the write side treats a bare string as ONE value instead of
+      comma-splitting; cascade note for consumers that comma-split
+      recorded at the bottom of this phase.)*
+- [x] **Canonicalize before the vl lookup (P1).** `resolve_vl` guards with
       the quote/pad-stripping `vl_expression` but then looks the raw string
       up (`db.py:1396`, `1418`), so `"My VL"` and `" My VL "` raise bare
       `StopIteration` for KNOWN libraries while `search('vl:"My VL"')`
       works. Look up through the same canonicalization.
-- [ ] **Guard the preference JSON and finish schema degradation (P2).**
+      *(SHIPPED 2026-09-09 as 1.16.0, commit ea6724d: one shared
+      `_canonical_pref_name` match backs both `resolve_vl` and
+      `resolve_saved_search`, so the guard and the lookup can never
+      disagree; quoted/padded known names resolve, unknown names keep the
+      ValueError-with-available-names contract.)*
+- [x] **Guard the preference JSON and finish schema degradation (P2).**
       Corrupt or non-dict `virtual_libraries`/`saved_searches` rows crash
       every read that touches them (`db.py:952`, `969`; the same hazard is
       guarded two functions over), and on ancient schemas `get_book()` and
       `search()` crash where `get_all_books()` degrades (`db.py:1534`,
       `1447`, `353`). Same suppress + isinstance treatment as `_preferences`.
-- [ ] **Give long-lived holders a refresh boundary (P2).** There is no
+      *(SHIPPED 2026-09-09 as 1.16.0, commit 7298944 (+fbd14be style):
+      decode-and-isinstance treatment for both preference rows degrading
+      to {}, `get_identifiers` and the search view's identifiers sweep
+      suppressing the missing-table error, and `field()`'s comments read
+      degrading to '' like `get_comments`.)*
+- [x] **Give long-lived holders a refresh boundary (P2).** There is no
       invalidation API, and caches populate at different moments, so one
       connection contradicts itself after an external write: `count_books`
       says 1, `all_ids` says 2, search sees neither (reproduced). A
       `refresh()` that clears the caches, or one shared snapshot boundary,
       matters for Hermitage/Carrel holding connections.
-- [ ] **Read-side papercuts (P3):** `list_books` sorts the 0101-01-01
+      *(SHIPPED 2026-09-09 as 1.16.0, commit 0727c7f: `CalibreDB.refresh()`
+      clears every cache via the shared `_init_caches()`, built search
+      engine included; the contradiction repro is the regression test.
+      Adoption by Hermitage/Carrel is their lane's decision, noted for the
+      cascade at the bottom of this phase.)*
+- [x] **Read-side papercuts (P3):** `list_books` sorts the 0101-01-01
       pubdate sentinel as a real date (undated books first on descending
       pubdate; the search engine already treats it as dateless);
       `format_path_index`/`find_book_by_path` docstrings overclaim (normcase
@@ -956,17 +1003,27 @@ closing the connection, never mentioning commit-on-exit.*
       HTML is the primary input); `title_sort` misses Calibre's quote-pair
       stripping; duplicate `books_ratings_link` rows fan out
       `get_all_books()`.
+      *(SHIPPED 2026-09-09 as 1.16.0, commit 7eddfd1 (+8b202ec format):
+      sentinel maps to dateless in the sort, hydration dedupes duplicate
+      ratings links first-wins, `title_sort` strips quote pairs like
+      upstream's `quote_pairs`, `strip_html` drops unterminated script/
+      style bodies, and the two path docstrings state the POSIX truth
+      (semantics already pinned by 7975719).)*
 
 ### Search parity
 
-- [ ] **Convert RecursionError to ParseException (P1).** Grammar-valid
+- [x] **Convert RecursionError to ParseException (P1).** Grammar-valid
       adversarial queries (400-deep nesting, 5000-term chains, deep VL
       chains) escape as raw RecursionError from parse, evaluate, and the
       vl/saved-search matchers; upstream converts exactly this at two sites
       (`search.py:288-294`, `761-772`, `1025-1046`; calibre
       search_query_parser.py:383-384). One try/except RuntimeError around
       `search()` closes the family.
-- [ ] **Close the user-visible parity gaps (P2), or write each into spec §5
+      *(SHIPPED 2026-09-09 as 1.16.0, commits 07ebaf6 + ea79a18:
+      RuntimeError-to-ParseException at search() and at both the vl and
+      saved-search matchers, with upstream's messages as the model; deep
+      chain tests per site.)*
+- [x] **Close the user-visible parity gaps (P2), or write each into spec §5
       per the "documented deviations only" rule:** empty query after a
       location matches presence (`title:` returns all books; upstream and
       cquarry's own `tags:` return nothing); `=..` component matching
@@ -978,7 +1035,17 @@ closing the connection, never mentioning commit-on-exit.*
       not canonicalized (`languages:ja` misses `jpn`); the `all` sweep
       omits `formats`, `languages`, and numeric exact-matches that
       upstream sweeps.
-- [ ] **Smaller parity papercuts (P3):** `search:=Name` fails on an
+      *(SHIPPED 2026-09-09 as 1.16.0, commit b126c4f; each verified against
+      the upstream clone first. Empty-location queries match nothing;
+      invalid boolean keywords raise; two-letter codes canonicalize
+      (`_LANG_2TO3`); component matching strips parts and the docstring's
+      flagship example was replaced with one that is actually true (the
+      quoted `..Cj. Cherryh` shape fails upstream too -- the real
+      behavior is stripped-component matching); the all sweep covers
+      formats, languages, identifier keys, and numeric exact-equality,
+      dates excluded, as upstream does. The custom-rating scale half
+      closed with 1.15.0's star convention (9a109b4).)*
+- [x] **Smaller parity papercuts (P3):** `search:=Name` fails on an
       existing saved search (upstream removeprefix's the `=`); bare `#N`
       is treated as a count where upstream text-searches (undocumented
       extension); the extended bool vocabulary leaks into identifier value
@@ -987,6 +1054,12 @@ closing the connection, never mentioning commit-on-exit.*
       and compares UTC wall clock instead of local; composite custom
       columns silently match nothing (upstream searches them) and §5
       doesn't say so.
+      *(SHIPPED 2026-09-09 as 1.16.0, commit 7bc30b0: fixed -- `search:=`
+      removeprefix, bare `#N` as literal text, identifier presence on
+      exactly true/false, whitespace-only values absent; documented as
+      dated spec §5 items 7-8 -- date parsing/comparison leniency and
+      composite columns matching nothing (the template engine is §7
+      out-of-scope).)*
 
 ### Tests, API.md, docs
 
@@ -1064,3 +1137,34 @@ the search engine needs its recursion guard and a §5 hygiene pass over the
 newly-found deviations, and the read side needs the comma round-trip and
 the preference-JSON guards. Nothing here is architecture; it is one focused
 hardening release.*
+
+### Cascade notes for the 2026-09-09 hardening releases
+
+*(Recorded here per the cascade rule: every affected consumer is named with
+what changed under it; adoption or waiver happens in each consumer's own
+lane.)*
+
+- **1.15.0 (write module).** `set_custom_column` dispatches by datatype and
+  takes stars for rating-typed columns; `add_book` refuses byte-identical
+  re-imports and compensates whole-batch filesystems; `__exit__` and
+  `batch()` rollback semantics strengthened (BaseException, poisoned
+  nested batches). CalibreQuarry's phase-16/17 set-write verbs and
+  phase-2 runner are the affected callers (that repo's lane); bindery-cli
+  composes `add_format` only (unaffected); Hermitage and Carrel write
+  nothing.
+- **1.16.0 (read side and search).** Multi-valued custom columns are
+  native lists from `field()`/`load_custom_column()` (since 1.16): any
+  consumer that `.split(",")`s custom-column output must stop
+  (CalibreQuarry renders `#audience`; Hermitage reads custom columns;
+  Carrel-calibre-web renders `field()` values). Rating-typed custom
+  columns surface as stars. `CalibreDB.refresh()` is available and
+  recommended for long-lived holders (Hermitage/Carrel keep connections
+  open across Calibre writes). The search parity changes (empty-location
+  matches nothing, invalid booleans raise, `all` sweep widened,
+  two-letter language codes) match upstream and need no consumer action
+  beyond awareness.
+- **Import skills synced 2026-09-09** (same release as the behavior):
+  `phase-1-import` gained the byte-identity floor note in its duplicate
+  screen; `phase-3-import` gained the Ctrl-C-safe/poisoned-batch note, the
+  one-value-per-bare-string custom-column rule, and the add_book
+  double-import clause.

@@ -1,3 +1,104 @@
+## v1.16.0 (2026-09-09)
+
+### Search parity: the upstream-fidelity batch
+
+- **Recursion never escapes as `RecursionError`.** Grammar-valid
+  adversarial queries (400-deep nesting, 5000-term chains, deep
+  `vl:`/`search:` chains) now surface as `ParseException` from
+  `search()` and from the virtual-library and saved-search matchers,
+  with upstream's own two guard sites as the model.
+- **An empty query after any location matches nothing.** `title:` used
+  to match presence (all books) while upstream, and cquarry's own
+  `tags:`, returned nothing; every location now agrees with upstream,
+  including `vl:`, `search:`, and date fields.
+- **Invalid boolean keywords raise.** `cover:maybe` raises
+  `ParseException` like upstream's `BooleanSearch` instead of silently
+  matching nothing.
+- **Two-letter language codes canonicalize.** `languages:ja` matches
+  books stored with `jpn` (upstream's `canonicalize_lang` step, now
+  mirrored with a full ISO 639-1 to 639-2 map for cquarry's languages).
+- **Component exact matching strips parts.** `authors:=..Cherryh`
+  matches `C.J. Cherryh`'s last component (upstream matches stripped
+  components; cquarry compared raw split parts), the leading-dot
+  literal comparison mirrors upstream's one-dot form, and the module
+  docstring's flagship example is replaced with one that is actually
+  true.
+- **The `all` sweep is upstream's.** Bare terms now cover `formats`
+  and `languages` (canonicalized), sweep identifier KEYS as text, and
+  probe numeric fields (`id`, `series_index`, `rating`, `pages`,
+  `size`, `cover` as 0/1) by exact equality; date fields take no part,
+  all exactly like upstream's sweep.
+- **Smaller papercuts, fixed or dated.** Fixed: `search:=Name` strips
+  the exact-match prefix instead of reporting a known search as
+  unknown; a bare `#N` with no relop text-searches the literal string
+  instead of raising; identifier presence accepts exactly
+  `true`/`false` so `yes`/`checked` no longer leak into value
+  matching; whitespace-only stored values count as absent. Documented
+  as dated spec section 5 items instead: date parsing/comparison
+  leniency (`fromisoformat` vs `dateutil`, calendar dates vs local
+  instants) and composite custom columns matching nothing (the
+  template engine stays out of scope per section 7).
+
+### Read side
+
+- **Native lists end to end for multi-valued custom columns.**
+  `load_custom_column()` and `field()` return `list[str]` for
+  multi-valued columns, and `set_custom_column` treats a bare string
+  as ONE value instead of comma-splitting it, so a stored
+  `Doe, John` survives as a single value; the old join-on-load,
+  re-split-on-use round-trip turned it into phantom values and made
+  count and exact searches lie. Consumers that `.split(",")`
+  custom-column output must stop.
+- **`CalibreDB.refresh()`.** The cache-invalidation boundary for
+  long-lived holders: one call clears every cache (rows, ids, search
+  view and engine, preferences, custom columns, path index) so a
+  connection held open across an external write stops contradicting
+  itself.
+- **Corrupt preferences and ancient schemas degrade instead of
+  crashing.** A corrupt or non-dict `virtual_libraries`/`saved_searches`
+  payload degrades to `{}` with the same treatment the generic
+  preferences accessor already used; `get_identifiers()`, the search
+  view's identifier sweep, and `field()`'s comments read degrade on
+  schemas missing those tables, like `get_all_books()` always did.
+- **`resolve_vl()` and `resolve_saved_search()` canonicalize before the
+  lookup.** `"My VL"` and `" My VL "` resolve to a known library
+  instead of raising; the guard and the lookup can never disagree
+  again.
+- **Papercuts.** The `0101-01-01` sentinel sorts as dateless in
+  `list_books` (undated books no longer come first on descending
+  pubdate); duplicate `books_ratings_link` rows no longer fan a book
+  out into several rows; `title_sort` strips a wrapping quote pair
+  before the article move (upstream's `quote_pairs`, also making the
+  trigger UDF more faithful); `strip_html` drops unterminated
+  `script`/`style` bodies; the format-path docstrings state the POSIX
+  truth about `normcase`.
+
+### Write module (smaller upstream-parity fixes)
+
+- `set_rating(book_id, 0)` clears like `None` (Calibre maps 0 to
+  unrated; a 0-rating link used to land as a spurious Tag Browser
+  entry).
+- `set_languages` writes `item_order` when the schema carries it
+  instead of leaving every row at 0.
+- `_write_pattern_a`'s no-op detection orders old rows deterministically
+  instead of relying on scan order.
+- `add_format` rejects negative sizes.
+- Dispositioned as documented: new authors default their sort to the
+  display name (upstream's surname-flip heuristic runs on GUI edits,
+  not row creation); dated note in the spec.
+
+### Skills and records
+
+- Both import skills synced with the behavior changes: phase-1 gained
+  the byte-identity floor note in its duplicate screen; phase-3 gained
+  the Ctrl-C-safe batch note, the one-value-per-bare-string rule, and
+  the add_book double-import clause.
+- The gated items are recorded, not decided: `remove_book`'s
+  filesystem story carries both options and a recommendation in the
+  roadmap box; the sweep's papercut list is fully dispositioned
+  (implemented or documented, each with its commit); the promotion
+  candidates remain open for Brandon.
+
 ## v1.15.0 (2026-09-09)
 
 ### Write-module hardening: the two confirmed holes closed
