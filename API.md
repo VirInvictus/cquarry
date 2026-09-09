@@ -97,6 +97,7 @@ All eight return `[]`/`{}` on databases whose schema predates the tables.
 | Method | Description |
 |--------|-------------|
 | `close()` | Close the database connection and remove any temporary snapshot files. |
+| `refresh()` | Drop every cache (rows, ids, search view and engine, preferences, custom columns, path index) so subsequent reads re-query the database; the coherence boundary for long-lived holders after an external write (since 1.16.0). |
 | `__enter__()` / `__exit__()` | Context manager support. Calls `close()` on exit. |
 
 #### Composed reads

@@ -1459,6 +1459,42 @@ class TestCorruptPrefsAndDegradation(unittest.TestCase):
         self.assertEqual(self.db.get_identifiers(1), {})
 
 
+class TestRefreshBoundary(TestReadApis):
+    """refresh(): the coherence boundary for long-lived holders (the :919
+    sweep repro -- caches populate at different moments, so one connection
+    contradicts itself after an external write)."""
+
+    def test_refresh_resolves_external_write_contradiction(self):
+        # Populate the ids cache, then let Calibre (here: a second
+        # connection) add a book behind the handle's back.
+        self.assertEqual(self.db.all_ids(), {1, 2})
+        self.assertEqual(self.db.count_books(), 2)
+        ext = sqlite3.connect(self.db_path)
+        try:
+            ext.execute(
+                "INSERT INTO books (id, title, sort) VALUES (3, 'Later', 'Later')"
+            )
+            ext.commit()
+        finally:
+            ext.close()
+        # The stale cache answers from before the write.
+        self.assertEqual(self.db.all_ids(), {1, 2})
+        self.assertEqual(self.db.count_books(), 2)
+        self.db.refresh()
+        # Everything agrees on current state after the boundary.
+        self.assertEqual(self.db.all_ids(), {1, 2, 3})
+        self.assertEqual(self.db.count_books(), 3)
+        self.assertEqual(self.db.search("Later"), {3})
+
+    def test_refresh_rebuilds_the_search_engine(self):
+        # The engine caches custom locations and grouped terms; refresh()
+        # must drop it too so preference edits become visible.
+        self.db.search("Fic")  # force engine construction
+        self.assertIsNotNone(self.db._search_engine)
+        self.db.refresh()
+        self.assertIsNone(self.db._search_engine)
+
+
 class TestLockedDBSnapshot(unittest.TestCase):
     """The locked-database snapshot fallback: a README headline feature the
     sweep found untested, including the -wal/-shm sidecar copies and the

@@ -78,6 +78,13 @@ class CalibreDB:
             raise FileNotFoundError(f"Database not found: {db_path}")
         self.db_path = db_path
         self._tmp_path: str | None = None
+        self._init_caches()
+
+        self.conn = self._open(db_path)
+        self.conn.row_factory = sqlite3.Row
+
+    def _init_caches(self) -> None:
+        """(Re)initialize every lazy cache; __init__ and refresh() share it."""
         self._vl_cache: dict[str, str] | None = None
         self._books_cache: list[dict[str, Any]] | None = None
         self._all_ids_cache: set[int] | None = None
@@ -96,8 +103,18 @@ class CalibreDB:
         self._cc_schema_cache: dict[str, bool] | None = None
         self._annotations_text_cache: dict[int, str] | None = None
 
-        self.conn = self._open(db_path)
-        self.conn.row_factory = sqlite3.Row
+    def refresh(self) -> None:
+        """Drop every cache so subsequent reads re-query the database.
+
+        The coherence boundary for long-lived holders (Hermitage/Carrel keep
+        a connection open while Calibre writes externally): caches normally
+        populate at different moments, so one connection can contradict
+        itself, with ``count_books`` answering from one snapshot and
+        ``search`` from another. One ``refresh()`` call clears everything,
+        the built search engine included; the next read repopulates from
+        current database state.
+        """
+        self._init_caches()
 
     def _open(self, db_path: str) -> sqlite3.Connection:
         """Open the database read-only; fall back to a temp copy if locked."""
