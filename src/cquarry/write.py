@@ -77,6 +77,14 @@ def register_udfs(conn: sqlite3.Connection) -> None:
 _UNDEFINED_PUBDATE = "0101-01-01 00:00:00+00:00"
 
 
+# Calibre's custom-column datatypes by storage pattern (upstream
+# create_custom_column: normalized is everything except datetime, comments,
+# int, bool, float, composite). The writers dispatch on these; anything
+# else raises instead of being silently stringified into the column.
+_PATTERN_A_DATATYPES = frozenset({"text", "enumeration", "series", "rating"})
+_PATTERN_B_DATATYPES = frozenset({"int", "float", "bool", "datetime", "comments"})
+
+
 def _normalize_pubdate(value: str | date | datetime | None) -> str:
     """Normalize a pubdate input to the TEXT form Calibre stores.
 
@@ -1089,6 +1097,26 @@ class WritableCalibreDB:
             meta["display"] = {}
         return meta
 
+    def _validate_enum(self, meta: dict[str, Any], sval: str) -> None:
+        """Enumeration membership check shared by the Pattern-A writers.
+
+        An empty ``enum_values`` rejects every value: upstream's writer
+        filters any non-member, so an empty allowed set silently drops the
+        whole write; cquarry says so with a raise instead.
+        """
+        allowed = (meta["display"] or {}).get("enum_values") or []
+        if sval in allowed:
+            return
+        if allowed:
+            raise ValueError(
+                f"Value {sval!r} is not in #{meta['label']}'s enumeration: "
+                f"{', '.join(map(str, allowed))}"
+            )
+        raise ValueError(
+            f"#{meta['label']} has an empty enumeration (display.enum_values "
+            "is missing or []); no value is writable"
+        )
+
     def set_custom_column(self, book_id: int, label: str, value: Any) -> bool:
         """Write one custom-column value (or clear with ``value=None``).
 
@@ -1121,6 +1149,16 @@ class WritableCalibreDB:
                 (link_table,),
             ).fetchone()
         )
+        # Datatype dispatch: only the datatypes Calibre ships may be written,
+        # each through its own storage pattern. Unknown datatypes (and known
+        # datatypes on the wrong layout) raise rather than being stringified.
+        known = _PATTERN_A_DATATYPES if has_link else _PATTERN_B_DATATYPES
+        if datatype not in known:
+            raise ValueError(
+                f"#{label} is a {datatype!r} column on "
+                f"{'link-table' if has_link else 'direct'} storage; refusing to "
+                "write it (unsupported datatype or datatype/layout mismatch)"
+            )
         self._begin()
         try:
             self._require_book(book_id)
@@ -1168,22 +1206,39 @@ class WritableCalibreDB:
             self._clear_pattern_a(link_table, value_table, book_id)
             return True
         if datatype == "enumeration":
-            allowed = (meta["display"] or {}).get("enum_values") or []
             sval = str(value).strip()
-            if allowed and sval not in allowed:
-                raise ValueError(
-                    f"Value {sval!r} is not in #{meta['label']}'s enumeration: "
-                    f"{', '.join(map(str, allowed))}"
-                )
-            new_vals = [sval]
+            self._validate_enum(meta, sval)
+            new_vals: list[Any] = [sval]
+        elif datatype == "rating":
+            # Custom ratings share builtin ratings' storage scale (0-10,
+            # UNIQUE value rows) but the API takes stars, exactly like
+            # set_rating, so one library never carries two conventions.
+            # 0 stars means unrated: Calibre purges 0-rating rows.
+            stars = float(value)
+            if not 0 <= stars <= 5:
+                raise ValueError(f"Rating must be within 0-5 stars, got {stars:g}")
+            internal = round(stars * 2)
+            if internal == 0:
+                if not old_rows:
+                    return False
+                self._clear_pattern_a(link_table, value_table, book_id)
+                return True
+            new_vals = [internal]
         elif is_multiple or isinstance(value, (list, tuple)):
-            items = (
-                [str(x).strip() for x in value]
-                if isinstance(value, (list, tuple))
-                else [x.strip() for x in str(value).split(",")]
-            )
+            items: list[str] = []
+            if isinstance(value, (list, tuple)):
+                for v in value:
+                    if v is None:
+                        # A None entry is skipped, never stringified into
+                        # the literal 'None'.
+                        continue
+                    s = str(v).strip()
+                    if s:
+                        items.append(s)
+            else:
+                items = [x.strip() for x in str(value).split(",")]
             new_vals = [x for x in items if x]
-        else:
+        else:  # text (single-valued) and series: one text value
             new_vals = [str(value)]
         if new_vals == old_rows:
             return False
@@ -1233,8 +1288,16 @@ class WritableCalibreDB:
             stored = int(value)
         elif datatype == "float":
             stored = float(value)
-        else:  # datetime, comments: stored as given (strings)
+        elif datatype == "datetime":
+            # The set_pubdate convention: ISO text in UTC, never a naive
+            # str() without the offset (Calibre reads these as timestamps).
+            stored = _normalize_pubdate(value)
+        elif datatype == "comments":
             stored = str(value)
+        else:  # unreachable: set_custom_column's dispatch gate raised first
+            raise ValueError(
+                f"#{meta['label']}: {datatype!r} is not writable on direct storage"
+            )
         old = self.conn.execute(
             f"SELECT value FROM {value_table} WHERE book = ?", (book_id,)
         ).fetchone()
@@ -1291,6 +1354,12 @@ class WritableCalibreDB:
                 "appends, and a single-valued column only has a value to "
                 "replace (set_custom_column)"
             )
+        datatype = str(meta["datatype"]).lower()
+        if datatype not in _PATTERN_A_DATATYPES:
+            raise ValueError(
+                f"#{label}: {datatype!r} columns are not append targets; use "
+                "set_custom_column"
+            )
         if isinstance(values, str) or not isinstance(values, (list, tuple)):
             raise TypeError(
                 "values must be a list of strings; a bare string is "
@@ -1299,8 +1368,15 @@ class WritableCalibreDB:
             )
         items: list[str] = []
         for v in values:
+            if v is None:
+                # A None entry is skipped, never stringified into 'None'.
+                continue
             s = str(v).strip()
-            if s and s not in items:
+            if not s:
+                continue
+            if datatype == "enumeration":
+                self._validate_enum(meta, s)
+            if s not in items:
                 items.append(s)
         cid = meta["id"]
         link_table = f"books_custom_column_{cid}_link"

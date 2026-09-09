@@ -1611,6 +1611,11 @@ class CalibreDB:
         val = self._custom_val_cache[location].get(book_id)
         if val is None:
             return None
+        if col["datatype"] == "rating":
+            # Calibre stores custom ratings on the same 0-10 internal scale
+            # as the builtin rating; surface stars so both compare alike in
+            # the engine (the writer's star input mirrors set_rating).
+            return calibre_rating_to_stars(int(val))
         if col["is_multiple"] and isinstance(val, str):
             return [p.strip() for p in val.split(",") if p.strip()]
         return val

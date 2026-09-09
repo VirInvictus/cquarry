@@ -665,6 +665,10 @@ CREATE TABLE custom_column_1 (
     id INTEGER PRIMARY KEY, value TEXT, link TEXT DEFAULT ''
 );
 CREATE TABLE books_custom_column_1_link (book INT, value INT);
+CREATE TABLE custom_column_9 (
+    id INTEGER PRIMARY KEY, value INTEGER UNIQUE, link TEXT DEFAULT ''
+);
+CREATE TABLE books_custom_column_9_link (book INT, value INT);
 """
 
 
@@ -715,6 +719,13 @@ class TestReadSideV14(unittest.TestCase):
         )
         con.execute("INSERT INTO custom_column_1 (value) VALUES ('Read')")
         con.execute("INSERT INTO books_custom_column_1_link VALUES (1,1)")
+        # Rating column: Calibre stores custom ratings on the same 0-10
+        # internal scale as builtin ratings (4 stars = 8).
+        con.execute(
+            "INSERT INTO custom_columns VALUES (9,'myrat','My Rat','rating',1,'{}',0,1)"
+        )
+        con.execute("INSERT INTO custom_column_9 (value) VALUES (8)")
+        con.execute("INSERT INTO books_custom_column_9_link VALUES (1,1)")
         # Annotations feed the annotations: location.
         con.execute(
             "INSERT INTO annotations (book, format, searchable_text, annot_data) "
@@ -773,6 +784,15 @@ class TestReadSideV14(unittest.TestCase):
         self.assertTrue(status["normalized"])
         self.assertEqual(status["display"]["enum_values"], ["Read", "Reading"])
         self.assertEqual(status["display"]["enum_colors"], {"Read": "#00ff00"})
+
+    def test_custom_rating_column_surfaces_stars(self):
+        # Custom ratings share the builtin rating's internal 0-10 scale;
+        # field() surfaces stars so a cc and the builtin compare alike in
+        # the engine (the writer's star input mirrors set_rating).
+        self.assertEqual(self.db.field(1, "#myrat"), 4.0)
+        self.assertIsNone(self.db.field(2, "#myrat"))
+        self.assertEqual(self.db.search("#myrat:4"), {1})
+        self.assertEqual(self.db.search("#myrat:false"), {2})
 
     def test_custom_column_dual_resolution(self):
         # #label, bare label, and display name all reach the same record and

@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from cquarry.write import WritableCalibreDB, register_udfs, title_sort
 
@@ -675,6 +675,145 @@ class TestWriteSideExpansion(unittest.TestCase):
         conn.close()
         with self._wdb() as wdb, self.assertRaises(ValueError):
             wdb.set_custom_column(1, "#status", "Read")
+
+    # The hardening tests seed their own columns in-test (rather than in
+    # setUp) so the TestWriteSideExpansion subclasses that re-run these
+    # methods against other schemas stay valid.
+
+    def _add_rating_column(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_4 (
+                id INTEGER PRIMARY KEY, value INTEGER UNIQUE, link TEXT DEFAULT ''
+            );
+            CREATE TABLE books_custom_column_4_link (
+                book INTEGER, value INTEGER, UNIQUE(book, value)
+            );
+            INSERT INTO custom_columns VALUES
+                (4,'myrat','My Rat','rating',1,'{}',0,1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def _add_datetime_column(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_5 (
+                id INTEGER PRIMARY KEY, book INTEGER UNIQUE, value TIMESTAMP
+            );
+            INSERT INTO custom_columns VALUES
+                (5,'when','When','datetime',1,'{}',0,0);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_custom_rating_column_takes_stars_and_purges_zero(self):
+        # The stored scale is Calibre's internal 0-10 (4 stars = 8), shared
+        # across books via UNIQUE(value); 0 stars means unrated, matching
+        # Calibre's purge of 0-rating rows. Raw values used to land as-is.
+        self._add_rating_column()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#myrat", 4))
+            self.assertTrue(wdb.set_custom_column(2, "#myrat", 4))  # shares row
+            self.assertFalse(wdb.set_custom_column(2, "#myrat", 4))
+            with self.assertRaises(ValueError):
+                wdb.set_custom_column(1, "#myrat", 5.5)
+            with self.assertRaises(ValueError):
+                wdb.set_custom_column(1, "#myrat", -1)
+        self.assertEqual(self._sql2("SELECT value FROM custom_column_4"), [(8,)])
+        self.assertEqual(
+            self._sql2("SELECT book FROM books_custom_column_4_link ORDER BY book"),
+            [(1,), (2,)],
+        )
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#myrat", 0))  # clear
+            self.assertFalse(wdb.set_custom_column(1, "#myrat", 0))
+        # Book 2's link (and its shared value row) survive.
+        self.assertEqual(
+            self._sql2("SELECT book FROM books_custom_column_4_link"), [(2,)]
+        )
+
+    def test_custom_datetime_column_normalizes_like_set_pubdate(self):
+        # Datetime columns store the same ISO-in-UTC TEXT set_pubdate
+        # writes; a naive datetime used to land as str() without an offset.
+        self._add_datetime_column()
+        with self._wdb() as wdb:
+            # A naive spelling is taken as UTC, exactly like set_pubdate.
+            self.assertTrue(wdb.set_custom_column(1, "#when", "2014-03-01T12:30:00"))
+            self.assertTrue(
+                wdb.set_custom_column(2, "#when", datetime(1991, 10, 1, tzinfo=UTC))
+            )
+        self.assertEqual(
+            self._sql2("SELECT book, value FROM custom_column_5 ORDER BY book"),
+            [
+                (1, "2014-03-01 12:30:00+00:00"),
+                (2, "1991-10-01 00:00:00+00:00"),
+            ],
+        )
+
+    def test_custom_column_unknown_datatype_raises(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_6 (
+                id INTEGER PRIMARY KEY, book INTEGER UNIQUE, value TEXT
+            );
+            INSERT INTO custom_columns VALUES
+                (6,'weird','Weird','weird',1,'{}',0,0);
+            """
+        )
+        conn.commit()
+        conn.close()
+        # Unknown datatypes used to be silently accepted and stringified.
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.set_custom_column(1, "#weird", "anything")
+
+    def test_custom_enumeration_empty_values_rejects_everything(self):
+        # An enumeration whose enum_values is empty accepts nothing; the
+        # validation used to be skipped entirely for that shape (upstream
+        # silently drops the write instead, which is no better).
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_6 (
+                id INTEGER PRIMARY KEY, value TEXT UNIQUE, link TEXT DEFAULT ''
+            );
+            CREATE TABLE books_custom_column_6_link (
+                book INTEGER, value INTEGER, UNIQUE(book, value)
+            );
+            INSERT INTO custom_columns VALUES
+                (6,'gap','Gap','enumeration',1,'{}',0,1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.set_custom_column(1, "#gap", "Read")
+
+    def test_none_entries_are_skipped_not_stringified(self):
+        # A None inside a value list used to become the literal string
+        # 'None' in both the replace and the append path.
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#audience", ["Rin", None]))
+            self.assertEqual(
+                wdb.add_custom_column_values(1, "#audience", ["Brandon", None]), 1
+            )
+        self.assertEqual(
+            self._sql2(
+                "SELECT c.value FROM books_custom_column_3_link l "
+                "JOIN custom_column_3 c ON c.id = l.value WHERE l.book = 1 "
+                "ORDER BY c.id"
+            ),
+            [("Rin",), ("Brandon",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT COUNT(*) FROM custom_column_3 WHERE value = 'None'"),
+            [(0,)],
+        )
 
     def test_add_remove_format_and_has_cover(self):
         with self._wdb() as wdb:
