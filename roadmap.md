@@ -903,7 +903,7 @@ closing the connection, never mentioning commit-on-exit.*
       set on any failing inner level, outermost exit rolls back when
       poisoned and clears it; witness test pins the caught-inner-failure
       rollback plus the next-batch-commits recovery.)*
-- [ ] **Decide remove_book's filesystem story (P2).** It deletes the rows
+- [x] **Decide remove_book's filesystem story (P2).** It deletes the rows
       but leaves the book's directory and format files on disk, untraceable
       from the DB afterwards (`write.py:1651-1704`); API.md:313 says "Full
       book removal" without qualification. Either a `delete_files=True`
@@ -925,7 +925,14 @@ closing the connection, never mentioning commit-on-exit.*
       tool, and the sweep showed phase-2 imports are exactly this shape.
       Also recorded: the CLAUDE.md dirty-queue carve-out should be reworded
       -- remove_book DELETING the removed book's queue entries is correct
-      and the "never DELETE" wording is about living books.)*
+      and the "never DELETE" wording is about living books.
+      DECIDED same day (Brandon): Option B, the richer one -- shipped in
+      1.17.0 as `remove_book(book_id, delete_files=None)` accepting
+      `"trash"` (library-local `.caltrash/b/<id>/`, upstream's own trash
+      layout, exact stdlib parity via shutil.move) and `"permanent"`
+      (rmtree), default `None` = rows-only. The fs step lands only after
+      the rows COMMIT and defers to the outermost batch commit inside a
+      `batch()`, so a rollback never leaves resurrected rows fileless.)*
 - [x] **Upstream-fidelity papercuts (P3, decide-don't-drift):**
       `set_languages` never writes `item_order` (all rows land at 0;
       insertion order survives only via the read side's tiebreaker);
@@ -1118,28 +1125,49 @@ closing the connection, never mentioning commit-on-exit.*
 
 ### Promotion candidates (consumers are waiting on these)
 
-- [ ] **`find_candidate_duplicates(...)` / `add_book(..., on_duplicate=)`:**
+- [x] **`find_candidate_duplicates(...)` / `add_book(..., on_duplicate=)`:**
       duplicate screening for the creation path; CalibreQuarry already
       hand-rolled `screen_duplicate.py`, and bindery's phase1 needs the
       same logic next.
       *(Carve-out note 2026-09-09: the minimal slice shipped in 1.15.0,
-      e8a6812, as a hard floor only — add_book raises on a byte-identical
-      format-seed re-import, dry runs included, under any title. The
-      metadata-based screening API (find_candidate_duplicates /
-      on_duplicate= policy) remains gated and untouched; this box stays
-      open for that decision.)*
-- [ ] **Batch-scoped filesystem compensation:** the P1 fix above, exposed
+      e8a6812, as a hard floor only -- add_book raises on a byte-identical
+      format-seed re-import, dry runs included, under any title.
+      APPROVED 2026-09-09 (Brandon) and SHIPPED in 1.17.0:
+      `CalibreDB.find_candidate_duplicates(title, authors, isbn=None)` --
+      ISBN rule first, then normalized title plus folded first author,
+      mirroring the frontend screener's library half. The `on_duplicate=`
+      policy parameter on add_book itself was NOT built: callers consult
+      the screening API first, the same confirmation-before-act pattern
+      remove_book uses.)*
+- [x] **Batch-scoped filesystem compensation:** the P1 fix above, exposed
       so every consumer's importer stops hand-rolling rmtree accounting.
-- [ ] **`set_format(book_id, fmt, name, size)`:** sanctioned remove+add in
+      *(SATISFIED 2026-09-09 (Brandon): the 1.15.0 fix (edf841e) makes the
+      compensation automatic for any consumer calling add_book inside its
+      own batch(); nothing further to expose.)*
+- [x] **`set_format(book_id, fmt, name, size)`:** sanctioned remove+add in
       one transaction; bindery's `install_format` composes it by hand
       today.
+      *(APPROVED 2026-09-09 (Brandon) and SHIPPED in 1.17.0: remove+add in
+      one transaction, honest no-op when the identical row exists; the
+      file swap stays the caller's atomic-replace job.)*
 - [ ] **Write-side datatype/label chokepoint:** explicit dispatch raising
       on unhandled datatypes plus an opt-in banned-labels policy; retires
       per-consumer copies of both.
-- [ ] **A flat export-row provider and `CalibreDB.refresh()`:** kill
+      *(DISPOSITIONED 2026-09-09: the datatype-dispatch half SHIPPED in
+      1.15.0 (9a109b4 -- unknown datatypes and layout mismatches raise).
+      The banned-labels policy is DEFERRED (Brandon: "should we?" answered
+      no for now): it would be a cquarry-original API with no upstream
+      anchor, and no consumer has specified which labels or what matching
+      semantics -- revisit when CalibreQuarry's lane brings a concrete
+      policy.)*
+- [x] **A flat export-row provider and `CalibreDB.refresh()`:** kill
       CalibreQuarry's inline export SQL and give long-lived holders a
       coherence boundary; `find_identifierless()` would retire Hermitage's
       last inline predicate.
+      *(APPROVED 2026-09-09 (Brandon) and SHIPPED: `refresh()` in 1.16.0
+      (0727c7f); `export_rows(*, ids=None, include_custom=True)` --
+      researched against CalibreQuarry's `modes/librarything.py` inline
+      SQL -- and `find_identifierless()` in 1.17.0.)*
 
 ### Completeness verdict from the sweep
 
