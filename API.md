@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.14.0
+**Version:** 1.15.0
 
 ## Public API
 
@@ -258,7 +258,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.14.0"
+print(cquarry.__version__)  # "1.15.0"
 ```
 
 ### Writes (from `cquarry.write`)
@@ -292,7 +292,7 @@ print(cquarry.__version__)  # "1.14.0"
 | `set_languages(book_id, codes)` | `bool` | Replace languages (supports `list[str]` or comma-separated `str`); English names canonicalized to ISO 639-2 via the search engine's map. |
 | `set_comments(book_id, text)` | `bool` | 1:1 upsert/clear of the comments HTML row. |
 | `set_pubdate(book_id, value)` | `bool` | Publication-date setter accepting `str` / `date` / `datetime` / `None` (sentinel); stored as Calibre TEXT in UTC. |
-| `set_custom_column(book_id, label, value)` | `bool` | Generic custom-column writer: storage layout auto-detected (link-table vs direct) with a datatype dispatch — unknown datatypes (or a datatype on the wrong layout) raise instead of being stringified. Enumerations validate against `display.enum_values` (an empty `enum_values` rejects every value), tristate bools accepted, rating-typed columns take 0-5 stars (stored x2 on Calibre's internal 0-10 scale like `set_rating`; 0 stars clears), datetime-typed columns normalize like `set_pubdate` (ISO text in UTC), non-editable/composite columns raise. |
+| `set_custom_column(book_id, label, value)` | `bool` | Generic custom-column writer: storage layout auto-detected (link-table vs direct) with a datatype dispatch; unknown datatypes (or a datatype on the wrong layout) raise instead of being stringified. Enumerations validate against `display.enum_values` (an empty `enum_values` rejects every value), tristate bools accepted, rating-typed columns take 0-5 stars (stored x2 on Calibre's internal 0-10 scale like `set_rating`; 0 stars clears), datetime-typed columns normalize like `set_pubdate` (ISO text in UTC), non-editable/composite columns raise. |
 | `add_custom_column_values(book_id, label, values)` | `int` | Append semantics for multi-valued (Pattern A) columns (since 1.13.0): dedupes against the book's existing values (the link table is `UNIQUE(book, value)`) and within the input, inserts only the new links, returns the honest count; a no-op bumps nothing. Single-valued and direct-storage columns raise toward `set_custom_column`; a bare string raises `TypeError` rather than being comma-split; `None` entries inside `values` are skipped (never stringified into `'None'`); enumeration-typed columns validate each appended value. |
 | `add_format(book_id, fmt, name, size)` / `remove_format(book_id, fmt)` | `bool` | Register/drop `data` rows (the file itself is the caller's responsibility). |
 | `set_has_cover(book_id, has_cover)` | `bool` | Toggle the catalogued flag. |

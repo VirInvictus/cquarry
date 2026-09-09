@@ -1,3 +1,84 @@
+## v1.15.0 (2026-09-09)
+
+### Write-module hardening: the two confirmed holes closed
+
+- **No more torn writes on Ctrl-C.** `WritableCalibreDB.__exit__` used
+  to commit unconditionally, and every setter's rollback caught only
+  `Exception`, so a `KeyboardInterrupt` between a setter's SQL
+  statements escaped the rollback and was committed on context exit: a
+  link row without its `metadata_dirtied` row, a publisher change
+  queued but unmarked. Rollback paths now catch `BaseException`, the
+  context-manager exit rolls back whenever an exception is in flight,
+  and its commit failures propagate instead of silently discarding the
+  transaction (matching `batch()`'s exit). The class docstring's
+  "nothing is written unless a method returns normally" is now honored
+  rather than aspirational.
+- **A failed batch no longer strands orphan book directories.**
+  `add_book`'s directory removal was per-call only: when a later book
+  in a shared `batch()` failed, the SQL rolled back but the earlier
+  books' directories stayed behind, looking like real books no row
+  pointed at. Directories created inside the outermost batch are now
+  tracked and a failed exit removes them all; adds made outside any
+  batch never register, so a later failed batch cannot touch committed
+  books.
+- **Nested-batch failure sticks.** An inner `batch()` exception caught
+  by the outer block used to be swallowed into a commit (the local
+  success flag only saw the outer's clean yield). A failure now poisons
+  the pass: the outermost exit rolls back, and the flag clears on exit
+  so the next batch on the same handle commits normally.
+- **add_book refuses byte-identical re-imports.** The "never imported
+  twice" invariant is enforced with a data-table check: a format seed
+  whose bytes match an already-catalogued file (same format and size
+  pre-filter, then content compare) raises before anything is written,
+  dry runs included, under any title or author. Metadata-based
+  duplicate screening (ISBN/title/author fuzz-matching) stays a
+  frontend concern and remains the gated promotion candidate.
+
+### Custom-column writers dispatch by datatype
+
+- **Unknown datatypes raise instead of being stringified.** The writers
+  now dispatch against Calibre's own datatype set: `text`,
+  `enumeration`, `series`, and `rating` write through link-table
+  storage, `int`, `float`, `bool`, `datetime`, and `comments` write
+  direct; anything unknown, or a known datatype on the wrong layout,
+  raises `ValueError`.
+- **Rating-typed custom columns take 0-5 stars** and store x2 on the
+  same internal 0-10 scale as `set_rating` (verified against upstream:
+  its writer takes internal values and the x2 lives only in the GUI;
+  cquarry's API takes stars so one library never carries two
+  conventions). 0 stars means unrated and clears, matching upstream's
+  purge of 0-rating rows. On the read side, `field()` surfaces rating
+  custom columns as stars, so `#myrat:4` means 4 stars exactly like
+  `rating:4`; the sweep's two-scales-in-one-library search gap closes
+  with it.
+- **Datetime-typed custom columns normalize like `set_pubdate`**: ISO
+  text in UTC, never a naive `str()` without the offset.
+- **Empty enumerations accept nothing.** Validation used to be skipped
+  when `display.enum_values` was empty (upstream silently drops such
+  writes instead); cquarry raises with a message that says so.
+- **`None` entries in value lists are skipped**, never stringified into
+  the literal string `'None'`, in both `set_custom_column` and
+  `add_custom_column_values`.
+
+### Tests for the sharpest untested edges
+
+- `remove_book` had zero tests despite dynamic-table DELETEs, orphan
+  pruning, and irreversibility: a dedicated fixture now carries the
+  real `books_delete_trg` cascade and pins the upstream-faithful
+  residue (an unreferenced Pattern-A value row survives removal, since
+  no trigger purges it and upstream leaves it too).
+- The locked-database snapshot fallback, a README headline feature, has
+  its first witness: an `EXCLUSIVE` lock forces the snapshot path, the
+  stderr notice fires, and the copy plus its `-wal`/`-shm` sidecars are
+  cleaned up on `close()`.
+- Six documented read APIs get their first tests
+  (`get_format_stats`, `get_identifiers`, `count_books` raw-then-
+  cached, `get_virtual_libraries`, `get_all_tags`, `get_tag_counts`
+  with zero-count tags), the `~` regex match kind gains its first
+  exercise including the malformed-pattern-to-`ParseException` path,
+  and `format_path_index` pins the honest POSIX case semantics.
+- Suite: 306 collected items at 1.14.0 to 360 here.
+
 ## v1.14.0 (2026-09-06)
 
 ### `add_book`: the creation path

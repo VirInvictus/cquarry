@@ -70,7 +70,8 @@ with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:
     wdb.set_identifier(42, "isbn", "9780123456789")
     wdb.clear_identifier(42, "mobi-asin")  # honest no-op when absent
 
-# A multi-book curation pass commits exactly once:
+# A multi-book curation pass commits exactly once; any failure (a Ctrl-C
+# included) rolls the whole pass back, directories created inside it too:
 with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:
     with wdb.batch():
         wdb.set_pubdate(42, "1991-10-01")
@@ -78,7 +79,7 @@ with WritableCalibreDB("~/Calibre Library/metadata.db") as wdb:
 
 # Every mutation queues an OPF regeneration; check what Calibre will resync:
 with CalibreDB("~/Calibre Library/metadata.db") as db:
-print(db.get_dirtied_books())  # e.g. [42, 43]
+    print(db.get_dirtied_books())  # e.g. [42, 43]
 ```
 
 ## Installation

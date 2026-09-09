@@ -841,7 +841,7 @@ closing the connection, never mentioning commit-on-exit.*
 
 ### Write module
 
-- [ ] **Roll back instead of commit when an exception is in flight (P1).**
+- [x] **Roll back instead of commit when an exception is in flight (P1).**
       `__exit__` ignores the exception info and commits unconditionally
       (`write.py:290-293`) while every setter's rollback catches only
       `Exception` (e.g. `write.py:447-449`), so a KeyboardInterrupt mid-set
@@ -851,7 +851,12 @@ closing the connection, never mentioning commit-on-exit.*
       returns normally" (`write.py:257-260`) and is the exact hole the
       CalibreQuarry frontend hit from above. Roll back when `exc[0] is not
       None`; catch BaseException in the setter rollback paths.
-- [ ] **Compensate the whole batch's filesystem side effects (P1).**
+      *(SHIPPED 2026-09-09 as 1.15.0, commit 7c798a3: setters and the
+      add_book compensation catch BaseException, `__exit__` rolls back
+      whenever an exception unwinds and propagates commit failures like
+      batch()'s exit does, docstring trued up, CQ Phase 18 carve-out
+      closed; 4 witness tests incl. the Ctrl-C-mid-set torn write.)*
+- [x] **Compensate the whole batch's filesystem side effects (P1).**
       `add_book`'s directory removal is per-call (`write.py:1570-1575`);
       when a later book in a shared `batch()` fails, the SQL rolls back but
       earlier books' directories and files stay behind as orphans that
@@ -860,7 +865,11 @@ closing the connection, never mentioning commit-on-exit.*
       directory" without the qualification). Track directories created
       inside the outermost batch on the instance; remove them all when the
       batch exits failed.
-- [ ] **Harden the custom-column writers (P2).** Rating-typed custom
+      *(SHIPPED 2026-09-09 as 1.15.0, commit edf841e: batch-scoped
+      `_batch_dirs` registry, failed outermost exit removes them all,
+      adds outside any batch never register, API.md qualification added;
+      witness test plus the committed-book safety pin.)*
+- [x] **Harden the custom-column writers (P2).** Rating-typed custom
       columns are stored raw (`set_custom_column(1, "myrat", 4)` stores 4
       where Calibre's scale is 0-10, inviting a silent 2x error);
       unknown datatypes are silently accepted and stringified; enum
@@ -871,12 +880,27 @@ closing the connection, never mentioning commit-on-exit.*
       raises on unhandled types, plus `if v is None: continue`, closes all
       of it. (The banned-label chokepoint CalibreQuarry wants belongs in
       the same dispatch.)
-- [ ] **Make nested-batch failure stick (P2).** `batch()` records success
+      *(SHIPPED 2026-09-09 as 1.15.0, commit 9a109b4: dispatch gates both
+      patterns (text/enumeration/series/rating vs int/float/bool/datetime/
+      comments; unknown or mismatched raises), rating columns take 0-5
+      stars stored x2 with 0 clearing (upstream verified: GUI-only
+      conversion, writer takes internal; cquarry's API takes stars like
+      set_rating so one convention holds), datetime columns normalize like
+      set_pubdate, empty enum_values rejects everything (upstream
+      silently drops; cquarry raises), None entries skipped everywhere
+      (CQ Phase 18 carve-out closed), and the read side surfaces rating
+      custom columns as stars so both rating kinds search alike; the
+      banned-label policy stays gated.)*
+- [x] **Make nested-batch failure stick (P2).** `batch()` records success
       in a local `ok` and rolls back only at depth 0, so an inner batch's
       exception, caught by the outer block, is swallowed into a commit:
       reproduced with an inner add_tag followed by an outer catch
       (`write.py:301-326`), contradicting CLAUDE.md's "any failure inside
       rolls the whole pass back". Instance-level poisoned flag.
+      *(SHIPPED 2026-09-09 as 1.15.0, commit 1bf3bbe: `_batch_poisoned`
+      set on any failing inner level, outermost exit rolls back when
+      poisoned and clears it; witness test pins the caught-inner-failure
+      rollback plus the next-batch-commits recovery.)*
 - [ ] **Decide remove_book's filesystem story (P2).** It deletes the rows
       but leaves the book's directory and format files on disk, untraceable
       from the DB afterwards (`write.py:1651-1704`); API.md:313 says "Full
@@ -966,7 +990,7 @@ closing the connection, never mentioning commit-on-exit.*
 
 ### Tests, API.md, docs
 
-- [ ] **Test the sharpest untested edges:** `remove_book` has zero tests
+- [x] **Test the sharpest untested edges:** `remove_book` has zero tests
       (dynamic-table DELETEs, orphan pruning, irreversible); the
       BaseException commit window (the P1 above) has no witness; the
       locked-DB snapshot fallback including WAL copy and temp cleanup is
@@ -977,6 +1001,13 @@ closing the connection, never mentioning commit-on-exit.*
       `get_tag_counts`) have zero tests, and `get_virtual_libraries` feeds
       the vl cache; the `~` regex-to-ParseException path has never been
       exercised.
+      *(SHIPPED 2026-09-09 as 1.15.0, commit 7975719: TestRemoveBook on a
+      real-cascade fixture (pins the upstream-faithful residue: an
+      unreferenced Pattern-A value row survives removal), the locked-DB
+      snapshot witness incl. sidecar copies and cleanup, the six read
+      APIs, the ~ match kind incl. malformed-pattern raise, and the POSIX
+      case-semantics pin for format_path_index. The BaseException witness
+      rode 7c798a3.)*
 - [ ] **Deflate the inherited-test inflation:** 306 collected items are 252
       distinct tests; `TestWriteSideExpansion`'s 13 tests re-run in four
       subclasses with byte-identical fixtures (39 items). Convert to a
@@ -1003,6 +1034,12 @@ closing the connection, never mentioning commit-on-exit.*
       duplicate screening for the creation path; CalibreQuarry already
       hand-rolled `screen_duplicate.py`, and bindery's phase1 needs the
       same logic next.
+      *(Carve-out note 2026-09-09: the minimal slice shipped in 1.15.0,
+      e8a6812, as a hard floor only — add_book raises on a byte-identical
+      format-seed re-import, dry runs included, under any title. The
+      metadata-based screening API (find_candidate_duplicates /
+      on_duplicate= policy) remains gated and untouched; this box stays
+      open for that decision.)*
 - [ ] **Batch-scoped filesystem compensation:** the P1 fix above, exposed
       so every consumer's importer stops hand-rolling rmtree accounting.
 - [ ] **`set_format(book_id, fmt, name, size)`:** sanctioned remove+add in
