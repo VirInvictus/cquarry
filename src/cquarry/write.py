@@ -284,6 +284,10 @@ class WritableCalibreDB:
         # batch(); a failed outermost exit removes them all so earlier
         # books in the pass cannot strand orphan directories behind.
         self._batch_dirs: list[str] = []
+        # Set when any batch level exits with an exception and cleared at
+        # the outermost exit: an inner failure caught by the caller must
+        # still roll the whole pass back, never commit it.
+        self._batch_poisoned = False
 
     # -- lifecycle --
 
@@ -325,6 +329,11 @@ class WritableCalibreDB:
         join the outer transaction. Individual setters keep their signatures
         and return values — only their commit boundary moves.
 
+        An inner batch's exception poisons the pass for its lifetime: even
+        if the caller catches it, the outermost exit rolls back instead of
+        committing, because the failed inner segment may have left partial
+        writes pending in the shared transaction.
+
         Filesystem compensation is batch-scoped too: directories created by
         ``add_book`` inside the pass are tracked on the instance, and a
         failed outermost exit removes every one of them (the SQL rollback
@@ -344,7 +353,7 @@ class WritableCalibreDB:
         finally:
             self._batch_depth -= 1
             if self._batch_depth == 0:
-                if ok:
+                if ok and not self._batch_poisoned:
                     self.conn.commit()
                 else:
                     with contextlib.suppress(sqlite3.Error):
@@ -357,6 +366,13 @@ class WritableCalibreDB:
                     for orphan in self._batch_dirs:
                         shutil.rmtree(orphan, ignore_errors=True)
                 self._batch_dirs.clear()
+                self._batch_poisoned = False
+            elif not ok:
+                # An inner batch's exception must stick even when the caller
+                # catches it: the inner segment's partial writes are still
+                # pending in the shared transaction, so letting the outer
+                # block commit would land a half-finished pass.
+                self._batch_poisoned = True
 
     def transaction(self) -> contextlib.AbstractContextManager[Self]:
         """Pre-1.7.0 name for :meth:`batch`, kept as an exact alias.

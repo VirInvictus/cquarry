@@ -722,6 +722,41 @@ class TestBatchContext(TestWriteSideExpansion):
                 wdb.add_tag(1, "B")
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(2,)])
 
+    def test_inner_failure_caught_by_outer_still_rolls_back(self):
+        # An inner batch's exception, caught by the outer block, used to be
+        # swallowed into a commit (the local ok flag only saw the outer's
+        # clean yield). The poisoned flag makes the failure stick: the whole
+        # pass rolls back, including writes made before and after the inner
+        # segment, because that segment's partial writes are still pending.
+        with self._wdb() as wdb, wdb.batch():
+            wdb.add_tag(1, "Keep")
+            try:
+                with wdb.batch():
+                    wdb.add_tag(1, "Temp")
+                    raise ValueError("inner gave up")
+            except ValueError:
+                pass
+            wdb.update_title(1, "Renamed")  # must not survive the outer exit
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(0,)])
+        self.assertEqual(
+            self._sql2("SELECT title FROM books WHERE id=1"), [("Old Title",)]
+        )
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
+
+    def test_batch_recovers_after_a_rolled_back_pass(self):
+        # The poisoned flag clears at the outermost exit: the NEXT batch on
+        # the same handle commits normally.
+        with self._wdb() as wdb:
+            with wdb.batch():
+                try:
+                    with wdb.batch():
+                        raise ValueError("poison once")
+                except ValueError:
+                    pass
+            with wdb.batch():
+                wdb.add_tag(1, "Fine")
+        self.assertEqual(self._sql2("SELECT name FROM tags ORDER BY id"), [("Fine",)])
+
     def test_setter_outside_batch_unchanged(self):
         # The commit boundary only moves inside batch(); bare calls commit
         # per method exactly as before (update_title returns None by design).
