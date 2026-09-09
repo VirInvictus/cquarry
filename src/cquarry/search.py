@@ -933,10 +933,13 @@ class SearchEngine:
             return matches
 
         # Multi-valued count operator: tags:#>3, authors:#=2, identifiers:#<5.
-        if query.startswith("#") and datatype in (
-            DT_TEXT_MULTI,
-            DT_HIER,
-            DT_IDENTIFIERS,
+        # A bare '#N' (no relop) is literal text, exactly like upstream's
+        # query[1] in '=<>!' gate.
+        if (
+            len(query) > 1
+            and query[0] == "#"
+            and query[1] in "=<>!"
+            and datatype in (DT_TEXT_MULTI, DT_HIER, DT_IDENTIFIERS)
         ):
             pred = _count_predicate(query)
             out = set()
@@ -976,7 +979,13 @@ class SearchEngine:
         # the bare true/false presence test (Calibre's contains special case)
         if kind == CONTAINS and q.lower() in (_BOOL_TRUE | _BOOL_FALSE):
             want = q.lower() in _BOOL_TRUE
-            return {b for b in candidates if bool(self._values(b, location)) == want}
+            # Whitespace-only values are absent, exactly like upstream's
+            # val.strip() check.
+            return {
+                b
+                for b in candidates
+                if any(v.strip() for v in self._values(b, location)) == want
+            }
         matcher = _match_hier if datatype == DT_HIER else _match_text
         return {b for b in candidates if matcher(q, self._values(b, location), kind)}
 
@@ -1043,7 +1052,10 @@ class SearchEngine:
             keyq, keyq_kind = "", CONTAINS
             valq_kind, valq = _matchkind(query.strip())
 
-        if valq in (_BOOL_TRUE | _BOOL_FALSE):
+        # Upstream's keypair search: only the exact words 'true'/'false'
+        # are presence tests (the wider yes/no/checked vocabulary does not
+        # leak into identifier values).
+        if valq.lower() in ("true", "false"):
             found = set()
             for b in candidates:
                 ids = self.provider.field(b, "identifiers") or {}
@@ -1168,7 +1180,7 @@ class SearchEngine:
     def _match_saved_search(
         self, name: str, candidates: set[int], seen: set[str]
     ) -> set[int]:
-        name = name.strip().strip('"')
+        name = name.strip().removeprefix("=").strip().strip('"')
         key = "ss:" + name.lower()
         if key in seen:
             raise ParseException(f"Recursive saved search reference: {name!r}")

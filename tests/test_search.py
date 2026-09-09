@@ -589,9 +589,12 @@ class TestCountOperator(unittest.TestCase):
         self.assertEqual(self.s("identifiers:#>=1"), {1, 2})
         self.assertEqual(self.s("identifiers:#=0"), {3, 4})
 
-    def test_invalid_count_raises(self):
-        with self.assertRaises(ParseException):
-            self.s("formats:#abc")
+    def test_bare_hash_is_literal_text_not_a_count(self):
+        # '#abc' carries no relop: upstream text-searches the literal string
+        # instead of raising an invalid-count error (a 2026-09-09 parity fix;
+        # this used to raise ParseException).
+        self.assertEqual(self.s("formats:#abc"), set())
+        self.assertEqual(self.s("formats:#>1"), {2})  # real counts still work
 
 
 class TestRecursionGuard(unittest.TestCase):
@@ -694,6 +697,33 @@ class TestSearchParityFixes(unittest.TestCase):
         # id/size fields; the real view probes id, series_index, pages and
         # size the same way).
         self.assertEqual(self.s("3"), {4})
+
+    def test_search_with_exact_prefix_resolves_saved_search(self):
+        # Upstream removeprefix's the '=' before the saved-search lookup;
+        # cquarry used to report a KNOWN search as unknown.
+        self.assertEqual(self.s("search:=HF"), {1, 2})
+        self.assertEqual(self.s('search:="HF"'), {1, 2})
+
+    def test_identifier_presence_uses_exact_true_false_only(self):
+        # yes/no/checked are literal values in identifier search, not
+        # presence tests (upstream's keypair set is exactly true/false).
+        self.assertEqual(self.s("isbn:true"), {1, 2})
+        self.assertEqual(self.s("isbn:yes"), set())
+        self.assertEqual(self.s("identifiers:goodreads:true"), {2})
+
+    def test_whitespace_only_value_is_not_present(self):
+        class WSProvider(_FakeProvider):
+            def all_ids(self):
+                return {1, 5}
+
+            def field(self, book_id, location):
+                if book_id == 5 and location == "title":
+                    return "   "
+                return BOOKS[book_id].get(location)
+
+        e = SearchEngine(WSProvider())
+        self.assertEqual(e.search("title:true"), {1})
+        self.assertEqual(e.search("title:false"), {5})
 
     def test_rating_scale_single_convention(self):
         # The builtin rating is star-scaled in the engine; custom rating

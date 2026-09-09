@@ -177,6 +177,9 @@ These are permanent, dependency- or GUI-bound limitations, not bugs.
 4. **GUI-state locations.** `marked`, `ondevice`, and `in_tag_browser` reflect state that only exists inside Calibre's own UI session; they are not implemented.
 5. **Tag matching default.** `tags:Foo` uses anchored prefix matching (matches `Foo` and `Foo.*`), not Calibre's raw substring matching (which would also match `BarFoo`). This is a deliberate project invariant, not a porting gap; it matches how every consumer in the ecosystem has always treated tags.
 6. **`series_sort` format.** Computed as `"Series [index]"`; Calibre builds an equivalent sort string internally but does not expose its exact formatting contract.
+7. **Date parsing and comparison leniency** (dated 2026-09-09). cquarry parses dates with `datetime.fromisoformat` and compares calendar dates at the query's stated precision; upstream parses with `dateutil` (more input shapes accepted) and compares datetime instants against local-time `now`, so `today`/`Ndaysago` boundaries can differ by hours around midnight when timestamps carry times. cquarry also accepts a few query shapes upstream rejects (e.g. `field:="Quoted Value"`). Dependency-bound (no `dateutil` in the stdlib) and result-compatible for the day-precision queries users actually write.
+
+8. **Composite custom columns match nothing in search** (dated 2026-09-09). Upstream computes composite values through its template engine and searches them; implementing that means implementing the GPM template language, which §7 puts out of scope. cquarry registers no location for composite columns, so `#composite:query` is an empty match rather than an error.
 
 *(Former item 7; "`pages` sourcing"; was resolved in v1.3.0: Calibre now maintains page counts natively in `books_pages_link`, which cquarry reads first with the `#pages` custom column kept as an older-schema fallback. It is no longer a deviation.)*
 
