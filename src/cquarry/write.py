@@ -1237,7 +1237,10 @@ class WritableCalibreDB:
                     if s:
                         items.append(s)
             else:
-                items = [x.strip() for x in str(value).split(",")]
+                # A bare string is ONE value: comma-splitting it made
+                # "Last, First" round-trip as two phantom values. Callers
+                # with multiple values pass a list (both writers do).
+                items = [str(value).strip()]
             new_vals = [x for x in items if x]
         else:  # text (single-valued) and series: one text value
             new_vals = [str(value)]

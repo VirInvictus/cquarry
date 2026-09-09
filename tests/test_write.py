@@ -970,6 +970,20 @@ class TestWriteSideExpansion(unittest.TestCase):
             [(0,)],
         )
 
+    def test_bare_string_is_one_value_not_a_comma_split(self):
+        # "Doe, John" used to round-trip as two phantom values: the write
+        # side comma-split bare strings and the read side comma-joined and
+        # re-split. A bare string is now exactly one stored value; lists
+        # carry multiple values.
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#audience", "Doe, John"))
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_3"), [("Doe, John",)]
+        )
+        self.assertEqual(
+            self._sql2("SELECT COUNT(*) FROM books_custom_column_3_link"), [(1,)]
+        )
+
     def test_add_remove_format_and_has_cover(self):
         with self._wdb() as wdb:
             self.assertTrue(wdb.add_format(1, "EPUB", "oldtitle", 2048))

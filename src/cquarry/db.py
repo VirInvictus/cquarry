@@ -922,11 +922,10 @@ class CalibreDB:
                 for row in cur.fetchall():
                     grouped.setdefault(row["book"], []).append(row["value"])
                 if col["is_multiple"]:
-                    # Join to a comma-separated string for parity with other fields.
-                    return {
-                        k: ", ".join(str(v) for v in vals)
-                        for k, vals in grouped.items()
-                    }
+                    # Native lists, never a comma-joined string: a stored
+                    # value like "Doe, John" is ONE value, and re-splitting
+                    # on commas used to turn it into phantom values.
+                    return {k: list(vals) for k, vals in grouped.items()}
                 # Single-valued normalized column (text, enumeration): one value.
                 return {k: vals[0] for k, vals in grouped.items()}
             # Stored directly (int, float, bool, datetime, comments).
@@ -1616,6 +1615,4 @@ class CalibreDB:
             # as the builtin rating; surface stars so both compare alike in
             # the engine (the writer's star input mirrors set_rating).
             return calibre_rating_to_stars(int(val))
-        if col["is_multiple"] and isinstance(val, str):
-            return [p.strip() for p in val.split(",") if p.strip()]
         return val

@@ -671,6 +671,10 @@ CREATE TABLE custom_column_9 (
     id INTEGER PRIMARY KEY, value INTEGER UNIQUE, link TEXT DEFAULT ''
 );
 CREATE TABLE books_custom_column_9_link (book INT, value INT);
+CREATE TABLE custom_column_3 (
+    id INTEGER PRIMARY KEY, value TEXT UNIQUE, link TEXT DEFAULT ''
+);
+CREATE TABLE books_custom_column_3_link (book INT, value INT);
 """
 
 
@@ -728,6 +732,17 @@ class TestReadSideV14(unittest.TestCase):
         )
         con.execute("INSERT INTO custom_column_9 (value) VALUES (8)")
         con.execute("INSERT INTO books_custom_column_9_link VALUES (1,1)")
+        # Multi-valued text column: a comma inside a stored value is part
+        # of the value, not a separator.
+        con.execute(
+            "INSERT INTO custom_columns VALUES (3,'crew','Crew','text',1,'{}',1,1)"
+        )
+        con.execute("INSERT INTO custom_column_3 (value) VALUES ('Doe, John')")
+        con.execute("INSERT INTO custom_column_3 (value) VALUES ('Rin')")
+        con.executemany(
+            "INSERT INTO books_custom_column_3_link (book, value) VALUES (?, ?)",
+            [(1, 1), (1, 2)],
+        )
         # Annotations feed the annotations: location.
         con.execute(
             "INSERT INTO annotations (book, format, searchable_text, annot_data) "
@@ -795,6 +810,19 @@ class TestReadSideV14(unittest.TestCase):
         self.assertIsNone(self.db.field(2, "#myrat"))
         self.assertEqual(self.db.search("#myrat:4"), {1})
         self.assertEqual(self.db.search("#myrat:false"), {2})
+
+    def test_multi_valued_custom_column_keeps_native_lists(self):
+        # "Doe, John" is ONE stored value; the old join-on-load and
+        # re-split-on-use round-trip turned it into phantom values Doe and
+        # John, and count/exact searches lied about the stored data.
+        self.assertEqual(self.db.load_custom_column("#crew"), {1: ["Doe, John", "Rin"]})
+        self.assertEqual(self.db.field(1, "#crew"), ["Doe, John", "Rin"])
+        # Count operator sees two values, not three phantom ones.
+        self.assertEqual(self.db.search("#crew:#=2"), {1})
+        # Exact match against the full stored value; "=Doe" matches nothing.
+        self.assertEqual(self.db.search('#crew:"=Doe, John"'), {1})
+        self.assertEqual(self.db.search('#crew:"=Doe"'), set())
+        self.assertEqual(self.db.search("#crew:Doe"), {1})  # substring still works
 
     def test_custom_column_dual_resolution(self):
         # #label, bare label, and display name all reach the same record and
