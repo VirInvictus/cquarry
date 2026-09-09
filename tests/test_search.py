@@ -604,9 +604,7 @@ class TestRecursionGuard(unittest.TestCase):
                 for i in range(400):
                     if low == f"chain{i}".lower():
                         return f"vl:chain{i + 1}"
-                return next(
-                    (v for k, v in VLS.items() if k.lower() == low), None
-                )
+                return next((v for k, v in VLS.items() if k.lower() == low), None)
 
         with self.assertRaises(ParseException):
             SearchEngine(ChainProvider()).search("vl:chain0")
@@ -618,9 +616,7 @@ class TestRecursionGuard(unittest.TestCase):
                 for i in range(400):
                     if low == f"link{i}":
                         return f"search:link{i + 1}"
-                return next(
-                    (v for k, v in SAVED.items() if k.lower() == low), None
-                )
+                return next((v for k, v in SAVED.items() if k.lower() == low), None)
 
         with self.assertRaises(ParseException):
             SearchEngine(SSChainProvider()).search("search:link0")
