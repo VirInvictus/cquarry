@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.16.0
+**Version:** 1.16.1
 
 ## Public API
 
@@ -259,7 +259,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.16.0"
+print(cquarry.__version__)  # "1.16.1"
 ```
 
 ### Writes (from `cquarry.write`)

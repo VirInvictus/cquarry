@@ -469,9 +469,11 @@ cquarry's caches/row shapes), never a verbatim code move.
   strictness). CalibreQuarry's exporter maps None back to its current "" output
   so the CSV stays byte-identical.
 - [x] **helpers; `tag_rollup(counts: dict[str, int]) -> dict[str, int]`**: *(v1.8.0. EXAMPLE CORRECTION: the frozen example showed the keyed `Fic.Fantasy` keeping its bare 3 while implied `Fic` got 5; a mixed rule no consumer renders. The shipped rule is subtree totals (own + descendants: `Fic.Fantasy` becomes 5), which is what Hermitage's `_total_count` and Carrel's union already display, so adoption is render-identical. Flagged to Brandon in the 2026-08-30 session.)*
-  leaf/partial dot-path counts in, every node including implied ancestors
-  rolled up (`{"Fic.Fantasy": 3, "Fic.Fantasy.Epic": 2}` → `{"Fic": 5,
-  "Fic.Fantasy": 3, "Fic.Fantasy.Epic": 2}`). Hermitage's `genres.py` and
+  leaf/partial dot-path counts in, every node carrying subtree totals --
+  its own count plus everything below it (`{"Fic.Fantasy": 3,
+  "Fic.Fantasy.Epic": 2}` → `{"Fic": 5, "Fic.Fantasy": 5,
+  "Fic.Fantasy.Epic": 2}`; the example beside the ship note above once
+  taught the dead mixed rule, corrected 2026-09-09). Hermitage's `genres.py` and
   Carrel's `cps/categories.py` independently built this; the tree itself stays
   `tags_to_tree`.
 - [x] **db; Bindery's gap**: `format_path_index() -> dict[str, int]` *(v1.8.0, plus `find_book_by_path()`.)* (every
@@ -1089,7 +1091,7 @@ closing the connection, never mentioning commit-on-exit.*
       replace the `transaction()` success twin with an identity assert,
       lift the triple-pasted DDL, pin the `_now()` timestamp shape, fold
       the near-tautological search integration count.
-- [ ] **Docs and hygiene:** fix the tag_rollup example at `roadmap.md:473`
+- [x] **Docs and hygiene:** fix the tag_rollup example at `roadmap.md:473`
       (still teaches the pre-correction mixed rule its own ship note
       declares dead); add the annotations deviation (no FTS
       stemming/ranking) to spec §5 so the canonical deviation list matches
@@ -1100,6 +1102,19 @@ closing the connection, never mentioning commit-on-exit.*
       committed working notes (`database_report.md`, `research.md`) and the
       stale `dist/` 1.9.0 artifacts; consider a version-pin test (six
       copies of 1.14.0 currently agree, nothing guards it).
+      *(SHIPPED 2026-09-09 as 1.16.1: the tag_rollup example now teaches
+      the shipped subtree-totals rule; the annotations no-FTS deviation is
+      spec section 5 item 9; "8-JOIN" corrected to 6 joins plus Python
+      hydration in spec.md and CLAUDE.md; the 1.13.0 patchnotes baseline
+      repaired to 258 so same-day entries agree; both README
+      IndentationError snippets repaired (the get_dirtied_books one rode
+      1.15.0, the quickstart's mid-block dedent this release); and
+      tests/test_version_sync.py now guards all six carriers. RECORDED,
+      NOT DECIDED: the working notes and dist/ -- database_report.md
+      (6.1 KB) and research.md (4.8 KB) are committed early-research
+      snapshots superseded in substance by the docs, and dist/ holds
+      gitignored 1.9.0 build artifacts on disk only; deleting committed
+      history is Brandon's call, so no option was taken.)*
 
 ### Promotion candidates (consumers are waiting on these)
 

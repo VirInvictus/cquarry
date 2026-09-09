@@ -31,7 +31,7 @@ with CalibreDB("~/Calibre Library/metadata.db") as db:
 
     # Search using Calibre's native grammar
     sci_fi = db.search("tags:Fic.SciFi and rating:>=4")
-print(f"Found {len(sci_fi)} highly rated Sci-Fi books.")
+    print(f"Found {len(sci_fi)} highly rated Sci-Fi books.")
 
     # Resolve a virtual library to a set of book IDs
     wing = db.resolve_vl("To Read")

@@ -1,3 +1,39 @@
+## v1.16.1 (2026-09-09)
+
+### Tests and docs hygiene (the sweep's Batch C)
+
+- **Test inflation deflated: 415 collected items down to 326 distinct.**
+  The phase-6 expansion suite re-ran in full inside every subclass
+  (`TestBatchContext`, `TestSetPubdate`, `TestSetWriteConveniences`,
+  `TestAddBook` each inherited all of `TestWriteSideExpansion`'s tests).
+  The fixture plumbing is now `_WriteSideFixture` and the expansion tests
+  live in `_WriteSideTests`; plain mixins carry no `TestCase` base, so
+  each suite runs exactly once, and the one variant whose schema genuinely
+  differs (`TestAddBook`'s trigger schema) keeps its own re-run variant.
+  Also: the triple-pasted simple DDL lifted into `_make_simple_db`, the
+  `transaction()` success twin replaced with an identity assert (the
+  failure twin still exercises the alias end to end), the near-
+  tautological search-integration count folded into the first real
+  assertion, the duplicated get-entities unknown-kind assertion deduped,
+  and the `_now()` timestamp shape pinned by regex.
+- **Docs repaired.** The `tag_rollup` example in the roadmap now teaches
+  the shipped subtree-totals rule (its own ship note had declared the old
+  mixed rule dead); the annotations no-FTS deviation is spec section 5
+  item 9, so the canonical list matches API.md's; "8-JOIN" corrected to
+  the real 6 joins plus Python hydration in spec.md and CLAUDE.md; the
+  1.13.0 patchnotes baseline repaired to 258 so same-day entries agree;
+  both README IndentationError snippets fixed (the `get_dirtied_books`
+  one rode 1.15.0, the quickstart's mid-block dedent this release).
+- **Version-sync guard.** `tests/test_version_sync.py` asserts all six
+  version carriers agree (VERSION, pyproject.toml, `__init__.py`,
+  `config.py`, spec.md, API.md); nothing guarded them before, and
+  carriers had drifted once (1.12.0 shipped with `config.py` and API.md
+  stale).
+- **Recorded, not decided** (Brandon's call): the committed working notes
+  (`database_report.md`, `research.md`) and the gitignored `dist/` 1.9.0
+  build artifacts stay until he decides; the state and options are in the
+  roadmap box.
+
 ## v1.16.0 (2026-09-09)
 
 ### Search parity: the upstream-fidelity batch
@@ -266,7 +302,9 @@
   skill's `UNIQUE(book, value)` gotcha now teaches the setters instead of
   raw delete-then-insert, and the phase-1 skill was swept clean.
 - The test fixture's link tables now carry the real `UNIQUE(book, value)`
-  shape plus an is_multiple `#audience` column; suite 255 → 280.
+  shape plus an is_multiple `#audience` column; suite 258 → 280 (the
+  255 baseline here was a typo; the same-day 1.12.0 entry below says
+  255 → 258 -- repaired 2026-09-09 so the two agree).
 
 ## v1.12.0 (2026-09-06)
 

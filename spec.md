@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.16.0
+**Version:** 1.16.1
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -30,7 +30,7 @@ These are invariants. Violating any of them is a spec breach.
 
 **Connection management.** The constructor takes a path to `metadata.db`, opens it read-only via a percent-encoded `file:` URI (§3.4), and issues a `SELECT 1 FROM books LIMIT 1` probe. If the probe raises `OperationalError` with "locked" in the message, the constructor copies the database (and its `-wal`/`-shm` sidecars) to a temp file and opens the copy instead, printing a notice to stderr. The temp path is stored and cleaned up by `close()`.
 
-**Caching.** `get_all_books()` executes an 8-JOIN query and caches the result list. `get_virtual_libraries()` reads the `preferences` table once and caches the dict. `count_books()` uses the books cache or the all-IDs cache if either is populated, falling back to a raw `COUNT(*)`. All caches are populated lazily on first access and are otherwise never invalidated (the database is read-only and the connection is short-lived); `refresh()` (cquarry >= 1.16) clears them all in one call, giving long-lived holders a coherence boundary after an external write. To prevent memory exhaustion on large libraries, massive text blocks like `comments` and custom columns of type `comments` are strictly lazy-loaded on-demand per book ID rather than eager-loaded during search view construction.
+**Caching.** `get_all_books()` executes a 6-JOIN query over `books` (series, ratings, publishers) and hydrates the list-type fields in Python from per-table reads; the result is cached. `get_virtual_libraries()` reads the `preferences` table once and caches the dict. `count_books()` uses the books cache or the all-IDs cache if either is populated, falling back to a raw `COUNT(*)`. All caches are populated lazily on first access and are otherwise never invalidated (the database is read-only and the connection is short-lived); `refresh()` (cquarry >= 1.16) clears them all in one call, giving long-lived holders a coherence boundary after an external write. To prevent memory exhaustion on large libraries, massive text blocks like `comments` and custom columns of type `comments` are strictly lazy-loaded on-demand per book ID rather than eager-loaded during search view construction.
 
 **Custom column dispatch.** `load_custom_column()` checks `sqlite_master` for the existence of `books_custom_column_N_link` to decide between the normalized path (text, enumeration, series, rating: value table joined through a link table) and the direct path (int, float, bool, datetime, comments: value table with a `book` column). This is safer than keying off `is_multiple`, because a single-valued enumeration is normalized but not multi-valued. Multi-valued columns yield native `list[str]` values end to end (cquarry >= 1.16): the old comma-join-on-load, re-split-on-use round-trip turned stored values like `Doe, John` into phantom values.
 
@@ -180,6 +180,7 @@ These are permanent, dependency- or GUI-bound limitations, not bugs.
 7. **Date parsing and comparison leniency** (dated 2026-09-09). cquarry parses dates with `datetime.fromisoformat` and compares calendar dates at the query's stated precision; upstream parses with `dateutil` (more input shapes accepted) and compares datetime instants against local-time `now`, so `today`/`Ndaysago` boundaries can differ by hours around midnight when timestamps carry times. cquarry also accepts a few query shapes upstream rejects (e.g. `field:="Quoted Value"`). Dependency-bound (no `dateutil` in the stdlib) and result-compatible for the day-precision queries users actually write.
 
 8. **Composite custom columns match nothing in search** (dated 2026-09-09). Upstream computes composite values through its template engine and searches them; implementing that means implementing the GPM template language, which §7 puts out of scope. cquarry registers no location for composite columns, so `#composite:query` is an empty match rather than an error.
+9. **`annotations:` matching** (dated 2026-09-09, aligning spec with API.md's existing note). Calibre searches annotations through its FTS tables, with stemming and rank ordering; cquarry matches the concatenated `searchable_text` with ordinary text semantics. Same result set for typical queries, no stemming or ranking.
 
 *(Former item 7; "`pages` sourcing"; was resolved in v1.3.0: Calibre now maintains page counts natively in `books_pages_link`, which cquarry reads first with the `#pages` custom column kept as an older-schema fallback. It is no longer a deviation.)*
 
