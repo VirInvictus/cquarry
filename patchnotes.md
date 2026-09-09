@@ -1,3 +1,52 @@
+## v1.17.0 (2026-09-09)
+
+### The approved promotion candidates
+
+- **`set_format(book_id, fmt, name, size)`.** The sanctioned remove+add of
+  one `data` row in a single transaction -- the row half of swapping a
+  repaired file into place. Honest no-op (`False`) when the identical row
+  already exists; `True` when written. Retires bindery's hand-rolled
+  `remove_format` + `add_format` composition.
+- **`remove_book(book_id, delete_files=None)`.** The file story is decided:
+  `"trash"` moves the book's directory into the library-local
+  `.caltrash/b/<id>/` (upstream's own trash layout, exact stdlib parity via
+  `shutil.move`), `"permanent"` deletes it outright, and the default `None`
+  keeps rows-only semantics for callers that sweep themselves. File removal
+  lands only after the rows COMMIT; inside a `batch()` it defers to the
+  outermost commit, so a rollback never leaves resurrected rows fileless.
+- **`CalibreDB.find_candidate_duplicates(title, authors, isbn=None)`.** The
+  library half of duplicate screening: the ISBN rule first (separator- and
+  case-insensitive against the book's `isbn` identifier), then normalized
+  title (folded, subtitle and leading article scrubbed) plus folded first
+  author, both exact. Returns `{"id", "matched_by": "isbn" |
+  "title_author"}` entries sorted by id; the file half stays in the
+  frontend where the embedded-metadata readers live.
+- **`CalibreDB.export_rows(*, ids=None, include_custom=True)`.** Flat
+  one-dict-per-book rows: the hydrated row with every non-composite custom
+  column flattened in as a `#label` key (`None` when the book has no
+  value, so the key set is uniform). `rating` stays the raw internal 0-10
+  and `pubdate` the raw TEXT; conversion is the renderer's job. Researched
+  against CalibreQuarry's inline exporter SQL, which this retires.
+- **`integrity.find_identifierless(db)`.** Books with an empty identifiers
+  store; promoted from Hermitage's inline Insights predicate and joining
+  the `find_*` family.
+
+### Decisions recorded, decisions made
+
+- **Q2 (notes and dist):** `database_report.md` and `research.md` are
+  deleted; the three facts that existed nowhere else moved into CLAUDE.md
+  (asymmetric link-table uniqueness, the FTS5 sibling table names, the
+  identifiers EAV pseudo-type note). The gitignored `dist/` 1.9.0 build
+  artifacts are gone.
+- **3.2 satisfied:** batch-scoped filesystem compensation needs no further
+  exposure -- 1.15.0 made it automatic inside any consumer's `batch()`.
+- **3.4 deferred:** the banned-labels policy stays unbuilt -- no upstream
+  anchor, no consumer has specified labels or semantics; revisit when
+  CalibreQuarry's lane brings a concrete policy.
+- The `on_duplicate=` policy parameter on `add_book` was not built: callers
+  consult `find_candidate_duplicates` first, the same
+  confirmation-before-act pattern `remove_book` uses.
+
 ## v1.16.1 (2026-09-09)
 
 ### Tests and docs hygiene (the sweep's Batch C)
