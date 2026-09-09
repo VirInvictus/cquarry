@@ -639,6 +639,69 @@ class TestRecursionGuard(unittest.TestCase):
         self.assertEqual(self.e.search("vl:Fantasy"), {1, 2})
 
 
+class TestSearchParityFixes(unittest.TestCase):
+    """The 2026-09-08 parity-gap batch, each behavior checked against the
+    upstream search_query_parser.py / db/search.py."""
+
+    def setUp(self):
+        self.e = _engine()
+
+    def s(self, q):
+        return self.e.search(q)
+
+    def test_empty_location_query_matches_nothing(self):
+        # `title:` used to match presence (all books) while upstream and
+        # cquarry's own `tags:` returned nothing; upstream returns the empty
+        # set for an empty query after ANY location.
+        self.assertEqual(self.s("title:"), set())
+        self.assertEqual(self.s("tags:"), set())
+        self.assertEqual(self.s("vl:"), set())
+        self.assertEqual(self.s("pubdate:"), set())  # was the dateless set
+        # The top-level empty query still returns everything.
+        self.assertEqual(self.s(""), {1, 2, 3, 4})
+
+    def test_invalid_boolean_query_raises(self):
+        # Upstream's BooleanSearch raises instead of silently matching
+        # nothing.
+        with self.assertRaises(ParseException):
+            self.s("cover:maybe")
+        self.assertEqual(self.s("cover:true"), {1, 2, 4})
+
+    def test_two_letter_language_codes_canonicalize(self):
+        self.assertEqual(self.s("languages:fr"), {4})
+        self.assertEqual(self.s("languages:ja"), set())  # no jpn books
+        self.assertEqual(self.s("languages:jpn"), set())  # nor any codes
+
+    def test_component_exact_match_strips_components(self):
+        # The component list upstream matches against is STRIPPED; cquarry
+        # compared raw split parts, so "..Cherryh" missed "C.J. Cherryh"-shaped
+        # values whose later components carry a leading space.
+        self.assertEqual(self.s('tags:"=..Fantasy"'), {1, 2})
+        self.assertEqual(self.s('tags:"=..Epic"'), {1})
+        self.assertEqual(self.s('authors:"=..Author"'), {4})  # 'A. Author'
+        self.assertEqual(self.s('authors:"=..Sanderson"'), set())
+
+    def test_all_sweep_covers_formats_languages_and_numeric(self):
+        # Upstream's bare-term sweep includes formats, languages (with
+        # canonicalization) and exact-equality probes on numeric fields;
+        # dates match nothing in the sweep.
+        self.assertEqual(self.s("EPUB"), {1, 2, 4})
+        self.assertEqual(self.s("french"), {4})  # languages canonicalized
+        self.assertEqual(self.s("Sanderson"), {2})  # authors via text
+        self.assertEqual(self.s("1965"), set())  # dates are not swept
+        self.assertEqual(self.s("5"), {1})  # book 1 rated 5 stars
+        # "3" matches book 4 via the rating probe (the fake provider has no
+        # id/size fields; the real view probes id, series_index, pages and
+        # size the same way).
+        self.assertEqual(self.s("3"), {4})
+
+    def test_rating_scale_single_convention(self):
+        # The builtin rating is star-scaled in the engine; custom rating
+        # columns join it (covered end-to-end in test_db, pinned here via
+        # the builtin to keep the fake provider honest).
+        self.assertEqual(self.s("rating:5"), {1})
+
+
 class TestSlashDateSeparators(unittest.TestCase):
     def setUp(self):
         self.s = lambda q: _engine().search(q)

@@ -11,12 +11,15 @@ Coverage:
   - Candidate-set boolean evaluation (matches Calibre's and/or/not semantics).
   - Match kinds: contains (default), ``=`` exact, ``~`` regex, ``^`` accent.
   - Exact-match modifiers on every text field: leading ``.`` (subtree) and
-    ``..`` (component) matching under ``=``, e.g. ``author:=..Cj. Cherryh``.
+    ``..`` (component) matching under ``=``, e.g. ``tags:=..SciFi`` matches
+    the ``Fic.SciFi`` component exactly (components are stripped, so
+    ``authors:=..Cherryh`` matches ``C.J. Cherryh``'s last component too).
   - Multi-valued count operator: ``tags:#>3``, ``authors:#=2``, and
     ``identifiers:#<5`` compare the number of values in a multi-valued field.
   - Field locations: title, title_sort, authors/author, author_sort, series,
     publisher, series_sort, tags/tag (hierarchical), rating, formats/format,
-    languages/language (canonicalized: ``languages:English`` matches ``eng``),
+    languages/language (canonicalized: ``languages:English`` matches ``eng``,
+    and two-letter codes work: ``languages:ja`` matches ``jpn``),
     pubdate, timestamp/date, last_modified, size (bytes with k/m/g suffixes),
     pages, identifiers/identifier/isbn, comments/comment, annotations (the
     book's concatenated annotation text; presence via ``true``/``false``),
@@ -420,8 +423,13 @@ def _match_text(query: str, values: list[str], kind: int) -> bool:
         fv = _fold(v)
         if kind == EQUALS:
             if q.startswith(".."):
+                # Upstream's component form: '.X' compares the value with a
+                # literal leading dot; '..X' matches a stripped dot-component
+                # exactly ('..SciFi' matches 'Fic.SciFi').
+                if fv == q[1:]:
+                    return True
                 sq = q[2:]
-                if fv == q or sq in [c for c in fv.split(".") if c]:
+                if sq in (c.strip() for c in fv.split(".") if c.strip()):
                     return True
             elif q.startswith("."):
                 qq = q[1:]
@@ -456,8 +464,11 @@ def _match_hier(query: str, values: list[str], kind: int) -> bool:
         fv = _fold(v)
         if kind == EQUALS:
             if q.startswith(".."):
+                # Same component rules as _match_text (upstream parity).
+                if fv == q[1:]:
+                    return True
                 sq = q[2:]
-                if fv == q or sq in [c for c in fv.split(".") if c]:
+                if sq in (c.strip() for c in fv.split(".") if c.strip()):
                     return True
             elif q.startswith("."):
                 qq = q[1:]
@@ -550,9 +561,75 @@ def _canonical_languages(query: str) -> str:
         mapped = _LANG_MAP.get(low)
         if mapped is None and low.startswith("="):
             mapped = _LANG_MAP.get(low[1:])
+        if mapped is None and len(low) == 2:
+            mapped = _LANG_2TO3.get(low)
         return mapped if mapped is not None else token
 
     return ",".join(canon(t) for t in query.split(","))
+
+
+# ISO 639-1 two-letter codes for the same languages as _LANG_MAP: upstream
+# canonicalizes two-letter input too (canonicalize_lang), so `languages:ja`
+# matches books stored with `jpn`.
+_LANG_2TO3: dict[str, str] = {
+    "af": "afr",
+    "sq": "sqi",
+    "ar": "ara",
+    "hy": "hye",
+    "eu": "eus",
+    "be": "bel",
+    "bn": "ben",
+    "bs": "bos",
+    "bg": "bul",
+    "ca": "cat",
+    "zh": "zho",
+    "hr": "hrv",
+    "cs": "ces",
+    "da": "dan",
+    "nl": "nld",
+    "en": "eng",
+    "eo": "epo",
+    "et": "est",
+    "fi": "fin",
+    "fr": "fra",
+    "gl": "glg",
+    "ka": "kat",
+    "de": "deu",
+    "el": "ell",
+    "he": "heb",
+    "hi": "hin",
+    "hu": "hun",
+    "is": "isl",
+    "id": "ind",
+    "ga": "gle",
+    "it": "ita",
+    "ja": "jpn",
+    "ko": "kor",
+    "la": "lat",
+    "lv": "lav",
+    "lt": "lit",
+    "mk": "mkd",
+    "ms": "msa",
+    "no": "nor",
+    "fa": "fas",
+    "pl": "pol",
+    "pt": "por",
+    "ro": "ron",
+    "ru": "rus",
+    "sr": "srp",
+    "sk": "slk",
+    "sl": "slv",
+    "es": "spa",
+    "sw": "swa",
+    "sv": "swe",
+    "th": "tha",
+    "tr": "tur",
+    "uk": "ukr",
+    "ur": "urd",
+    "vi": "vie",
+    "cy": "cym",
+    "yi": "yid",
+}
 
 
 def canonical_language(name: str) -> str:
@@ -568,6 +645,8 @@ def canonical_language(name: str) -> str:
     mapped = _LANG_MAP.get(low)
     if mapped is None and low.startswith("="):
         mapped = _LANG_MAP.get(low[1:])
+    if mapped is None and len(low) == 2:
+        mapped = _LANG_2TO3.get(low)
     return mapped if mapped is not None else name.strip()
 
 
@@ -801,7 +880,9 @@ class SearchEngine:
         seen: set[str],
         allow_groups: bool = True,
     ) -> set[int]:
-        if not candidates or query is None:
+        if not candidates or not (query or "").strip():
+            # Upstream parity: `title:` (an empty query after ANY location,
+            # vl: and search: included) matches nothing, not everything.
             return set()
 
         original = location.lower().strip()
@@ -920,7 +1001,7 @@ class SearchEngine:
     def _match_date(self, location, query, candidates) -> set[int]:
         q = query.lower().strip()
         _kind, q = _matchkind(q)
-        if q in _BOOL_FALSE or q == "":
+        if q in _BOOL_FALSE:
             return {
                 b
                 for b in candidates
@@ -945,7 +1026,8 @@ class SearchEngine:
             return {b for b in candidates if bool(self.provider.field(b, location))}
         if q in _BOOL_FALSE:
             return {b for b in candidates if not bool(self.provider.field(b, location))}
-        return set()
+        # Upstream raises instead of silently matching nothing.
+        raise ParseException(f'Invalid boolean query "{q}"')
 
     def _match_identifiers(self, original, query, candidates) -> set[int]:
         # Mirrors Calibre's keypair_search. `isbn:X` is shorthand for an exact
@@ -984,24 +1066,57 @@ class SearchEngine:
                 break
         return out
 
+    # The numeric fields upstream's bare-term sweep compares by exact
+    # equality (DS:857-877): id, series_index, rating, pages, size and
+    # cover-as-0/1. Date fields take no part in the sweep upstream.
+    _ALL_NUMERIC_FIELDS = ("id", "series_index", "rating", "pages", "size", "cover")
+
     def _match_all(self, query, candidates) -> set[int]:
         kind, q = _matchkind(query)
-        fields = list(_ALL_FIELDS)
-        # Calibre's bare-term search also sweeps user text columns; numeric,
-        # date, bool and identifier columns are excluded from 'all'.
+        fields = list(_ALL_FIELDS) + ["formats", "languages"]
+        # Calibre's bare-term search also sweeps user text columns; date
+        # custom columns are excluded from 'all'.
         fields += [
             loc
             for loc, dt in self._custom.items()
             if dt in (DT_TEXT, DT_TEXT_MULTI, DT_HIER)
         ]
+        # Bare terms reach numeric fields as exact-equality probes (upstream
+        # parity); languages are canonicalized in the sweep like any other
+        # path, and identifier KEYS sweep as text (never values).
+        lang_q = _canonical_languages(q) if ":" not in q else q
+        try:
+            n = float(q)
+        except ValueError:
+            n = None
         out = set()
         for b in candidates:
             for loc in fields:
+                if loc == "languages":
+                    vals = self._values(b, loc)
+                    if _match_text(lang_q, vals, kind):
+                        out.add(b)
+                        break
+                    continue
                 vals = self._values(b, loc)
                 # 'all' treats every field as plain substring text
                 if _match_text(q, vals, kind):
                     out.add(b)
                     break
+            else:
+                if n is not None:
+                    for loc in self._ALL_NUMERIC_FIELDS:
+                        val = self.provider.field(b, loc)
+                        if val is None:
+                            continue
+                        if loc == "cover":
+                            val = 1 if val else 0
+                        try:
+                            if float(val) == n:
+                                out.add(b)
+                                break
+                        except TypeError, ValueError:
+                            continue
         return out
 
     def _match_user_category(

@@ -366,7 +366,7 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 | `^` | Accent-folded substring |
 | `\` | Escape the next character (treat literally) |
 
-*(Note: Tristate keywords `true`/`false`, `checked`/`unchecked`, `blank`/`empty`, and `_`-prefixed variants are supported for presence/absence on numeric and rating fields. Empty numeric queries match nothing. Dates accept both `-` and `/` separators, and undefined date sentinels (`0101-01-01`, `0100-01-01`) evaluate as `None`. Multi-token queries in `languages:` split on commas and canonicalize each independently.)*
+*(Note: Tristate keywords `true`/`false`, `checked`/`unchecked`, `blank`/`empty`, and `_`-prefixed variants are supported for presence/absence on numeric and rating fields; anything else on a boolean location raises `ParseException` (since 1.16.0, upstream parity). An empty query after ANY location matches nothing, never everything (since 1.16.0). Dates accept both `-` and `/` separators, and undefined date sentinels (`0101-01-01`, `0100-01-01`) evaluate as `None`. Multi-token queries in `languages:` split on commas and canonicalize each independently; two-letter ISO 639-1 codes canonicalize too (`languages:ja` matches `jpn`).)*
 
 
 ### Field locations
@@ -401,7 +401,7 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 | `vl` | | virtual library | Cross-reference: `vl:"Wing Name"` |
 | `search` | | saved search | Cross-reference: `search:"Saved Name"` |
 | `@Name` | | user category | Books holding any member value: `@Favorites:true`; leading `.` includes subcategories, `false` inverts |
-| `all` | *(bare terms)* | | Searches title, authors, author_sort, series, publisher, tags, comments + custom text columns |
+| `all` | *(bare terms)* | | Searches title, authors, author_sort, series, publisher, tags, comments, formats, languages (canonicalized) + custom text columns; identifier KEYS sweep as text; numeric fields are probed by exact equality (dates match nothing) |
 
 Multi-valued locations additionally accept the count operator: `tags:#>3`, `identifiers:#=0`, `formats:#<5`.
 
