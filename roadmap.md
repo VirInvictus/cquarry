@@ -1206,6 +1206,17 @@ lane.)*
   matches nothing, invalid booleans raise, `all` sweep widened,
   two-letter language codes) match upstream and need no consumer action
   beyond awareness.
+- **CASCADE EXECUTED 2026-09-09 (Brandon: "all four now").** bindery-cli
+  v0.31.0 (tag pushed, PyPI live): install_format retires its
+  remove+add composition for `set_format`, floor >=1.17.0. Hermitage
+  1.8.2 (pushed, CI green): Insights adopts `find_identifierless`,
+  `database.refresh_library()` exposes the coherence boundary, Flatpak
+  pin moved to ec1c6af (1.17.0). CalibreQuarry 3.31.0 (tag pushed, PyPI
+  live): exporter on `export_rows()`, native-list display normalization,
+  floor >=1.17.0, and its phase-2 test fixture made schema-faithful
+  (enumeration `#source`, distinct import payloads) so the 1.15/1.17
+  guards are exercised honestly. Carrel-calibre-web: verified UNAFFECTED
+  (single-valued enumeration + int pages; no change, no release).
 - **Consumer adoption map (researched 2026-09-09, post-decision round).**
   Precise exposures for the lanes that adopt 1.16.0+:
   - CalibreQuarry: `modes/librarything.py` `build_rows()` should migrate to
