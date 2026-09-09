@@ -283,7 +283,10 @@ class CalibreDB:
 
     def get_identifiers(self, book_id: int) -> dict[str, str]:
         cur = self.conn.cursor()
-        cur.execute("SELECT type, val FROM identifiers WHERE book = ?", (book_id,))
+        try:
+            cur.execute("SELECT type, val FROM identifiers WHERE book = ?", (book_id,))
+        except sqlite3.OperationalError:
+            return {}  # schema predates the identifiers table
         return {row["type"]: row["val"] for row in cur.fetchall()}
 
     def get_book(
@@ -957,16 +960,27 @@ class CalibreDB:
             return {}
 
     def get_virtual_libraries(self) -> dict[str, str]:
-        """Return {name: search_expression} from Calibre preferences."""
+        """Return {name: search_expression} from Calibre preferences.
+
+        A corrupt or non-dict stored payload degrades to ``{}`` (the same
+        treatment ``_preferences`` and ``get_vl_ui_state`` apply); it used
+        to crash every read that touched virtual libraries.
+        """
         if self._vl_cache is not None:
             return self._vl_cache
         cur = self.conn.cursor()
-        cur.execute("SELECT val FROM preferences WHERE key = 'virtual_libraries'")
-        row = cur.fetchone()
-        if row:
-            self._vl_cache = json.loads(row["val"])
-        else:
-            self._vl_cache = {}
+        try:
+            cur.execute("SELECT val FROM preferences WHERE key = 'virtual_libraries'")
+            row = cur.fetchone()
+        except sqlite3.OperationalError:
+            row = None  # schema predates the table
+        decoded: Any = None
+        if row and isinstance(row["val"], str) and row["val"].strip():
+            try:
+                decoded = json.loads(row["val"])
+            except json.JSONDecodeError:
+                decoded = None
+        self._vl_cache = decoded if isinstance(decoded, dict) else {}
         return self._vl_cache
 
     def get_saved_searches(self) -> dict[str, str]:
@@ -980,8 +994,14 @@ class CalibreDB:
             cur.execute("SELECT val FROM preferences WHERE key = 'saved_searches'")
             row = cur.fetchone()
         except sqlite3.OperationalError:
-            return {}
-        return json.loads(row["val"]) if row else {}
+            return {}  # schema predates the table
+        decoded: Any = None
+        if row and isinstance(row["val"], str) and row["val"].strip():
+            try:
+                decoded = json.loads(row["val"])
+            except json.JSONDecodeError:
+                decoded = None
+        return decoded if isinstance(decoded, dict) else {}
 
     def get_vl_ui_state(self) -> dict[str, Any]:
         """Return Calibre's virtual-library sidebar layout state.
@@ -1462,12 +1482,15 @@ class CalibreDB:
             if self._comments_cache is None:
                 self._comments_cache = {}
             if book_id not in self._comments_cache:
-                cur = self.conn.cursor()
-                cur.execute("SELECT text FROM comments WHERE book = ?", (book_id,))
-                row = cur.fetchone()
-                self._comments_cache[book_id] = (
-                    row["text"] if row and row["text"] else ""
-                )
+                try:
+                    cur = self.conn.cursor()
+                    cur.execute("SELECT text FROM comments WHERE book = ?", (book_id,))
+                    row = cur.fetchone()
+                    self._comments_cache[book_id] = (
+                        row["text"] if row and row["text"] else ""
+                    )
+                except sqlite3.OperationalError:
+                    self._comments_cache[book_id] = ""  # no comments table
             return self._comments_cache[book_id]
 
         if location == "pages":
@@ -1550,10 +1573,13 @@ class CalibreDB:
             }
 
         cur = self.conn.cursor()
-        for row in cur.execute("SELECT book, type, val FROM identifiers"):
-            rec = view.get(row["book"])
-            if rec is not None:
-                rec["identifiers"][row["type"]] = row["val"]
+        try:
+            for row in cur.execute("SELECT book, type, val FROM identifiers"):
+                rec = view.get(row["book"])
+                if rec is not None:
+                    rec["identifiers"][row["type"]] = row["val"]
+        except sqlite3.OperationalError:
+            pass  # schema predates the identifiers table
         try:
             for row in cur.execute("SELECT id, uuid FROM books"):
                 rec = view.get(row["id"])

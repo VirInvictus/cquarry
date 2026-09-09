@@ -1381,6 +1381,80 @@ class TestReadApis(unittest.TestCase):
         self.assertEqual(self.db.get_tag_counts(), [("Fic", 2), ("Lonesome", 0)])
 
 
+class TestCorruptPrefsAndDegradation(unittest.TestCase):
+    """The :913 sweep findings: a corrupt or non-dict preferences payload
+    used to crash every read touching it, and get_book()/search() crashed
+    on ancient schemas where get_all_books() degrades gracefully."""
+
+    def _build(self, prefs, with_identifiers=True, with_comments=True):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        tables = [
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,"
+            " series_index REAL, path TEXT, has_cover INTEGER)",
+            "CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER)",
+            "CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT)",
+            "CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER)",
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER)",
+            "CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER)",
+            "CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER)",
+            "CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER)",
+            "CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT)",
+            "CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER)",
+            "CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT,"
+            " uncompressed_size INTEGER, name TEXT)",
+            "CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT)",
+        ]
+        if with_identifiers:
+            tables.append(
+                "CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER,"
+                " type TEXT, val TEXT)"
+            )
+        if with_comments:
+            tables.append(
+                "CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER, text TEXT)"
+            )
+        for ddl in tables:
+            conn.execute(ddl)
+        conn.execute("INSERT INTO books (id, title, sort) VALUES (1, 'T', 'T')")
+        for key, val in prefs.items():
+            conn.execute("INSERT INTO preferences (key, val) VALUES (?, ?)", (key, val))
+        conn.commit()
+        conn.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_corrupt_virtual_libraries_degrades_to_empty(self):
+        self._build({"virtual_libraries": "not json {"})
+        self.assertEqual(self.db.get_virtual_libraries(), {})
+        with self.assertRaises(ValueError):
+            self.db.resolve_vl("Anything")  # unknown, not a crash
+
+    def test_non_dict_saved_searches_degrade_to_empty(self):
+        self._build({"saved_searches": "[1, 2, 3]"})
+        self.assertEqual(self.db.get_saved_searches(), {})
+
+    def test_search_works_with_corrupt_prefs(self):
+        self._build({"virtual_libraries": "corrupt", "saved_searches": "also corrupt"})
+        self.assertEqual(self.db.search("T"), {1})
+
+    def test_missing_identifiers_and_comments_tables_degrade(self):
+        self._build({}, with_identifiers=False, with_comments=False)
+        book = self.db.get_book(1)
+        self.assertEqual(book["identifiers"], {})
+        self.assertEqual(self.db.field(1, "comments"), "")
+        self.assertEqual(self.db.search("T"), {1})  # the search view builds
+        self.assertEqual(self.db.get_identifiers(1), {})
+
+
 class TestLockedDBSnapshot(unittest.TestCase):
     """The locked-database snapshot fallback: a README headline feature the
     sweep found untested, including the -wal/-shm sidecar copies and the
