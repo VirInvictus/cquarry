@@ -255,6 +255,15 @@ class TestMatching(unittest.TestCase):
     def test_accent_insensitive(self):
         self.assertEqual(self.s("Bear"), {4})  # query 'Bear' matches 'Beär'
 
+    def test_regex_matchkind_matches_and_raises(self):
+        # The `~` match kind: stdlib re, case-insensitive; a malformed
+        # pattern surfaces as a ParseException, never a raw re.error.
+        self.assertEqual(self.s("title:~^A Game"), {1})
+        self.assertEqual(self.s("title:~^mist"), {2})
+        self.assertEqual(self.s("authors:~r\\."), {1})  # George R. R. Martin
+        with self.assertRaises(ParseException):
+            self.s("title:~([unclosed")
+
     def test_vl_reference_and_recursion(self):
         self.assertEqual(self.s("vl:Fantasy"), {1, 2})
         self.assertEqual(self.s("vl:Epic"), {1})

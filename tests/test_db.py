@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -1241,6 +1243,163 @@ class TestDossierAndPathIndex(unittest.TestCase):
         # A relative spelling resolves against the process cwd only via
         # abspath — a nonexistent absolute path just misses.
         self.assertIsNone(self.db.find_book_by_path("/nowhere/thick.epub"))
+
+    def test_format_path_index_pins_posix_case_semantics(self):
+        # The docstrings' "differently-cased spellings" tolerance holds only
+        # where normcase folds case (Windows). On POSIX normcase is the
+        # identity, so a different-case spelling must NOT resolve; bindery
+        # re-normalizes with resolve().lower() for its own lookups.
+        if os.name != "posix":
+            self.skipTest("POSIX-only case semantics")
+        exact = os.path.join(self.temp_dir, "Auth", "Dossier Book (1)", "dossier.epub")
+        self.assertEqual(self.db.find_book_by_path(exact), 1)
+        wrong_case = os.path.join(
+            self.temp_dir, "auth", "DOSSIER BOOK (1)", "DOSSIER.EPUB"
+        )
+        self.assertIsNone(self.db.find_book_by_path(wrong_case))
+
+
+class TestReadApis(unittest.TestCase):
+    """Six documented read APIs the 2026-09-08 sweep found untested."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT,
+                last_modified TEXT, series_index REAL, path TEXT,
+                has_cover INTEGER
+            );
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,
+                format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY,
+                book INTEGER, tag INTEGER);
+            CREATE TABLE identifiers (id INTEGER PRIMARY KEY,
+                book INTEGER, type TEXT, val TEXT);
+            CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY,
+                book INTEGER, series INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT,
+                sort TEXT, link TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY,
+                book INTEGER, author INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY,
+                book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY,
+                book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY,
+                book INTEGER, lang_code INTEGER);
+            INSERT INTO books (id, title, sort, path) VALUES
+                (1, 'Alpha', 'Alpha', 'p1'), (2, 'Beta', 'Beta', 'p2');
+            INSERT INTO data (book, format, uncompressed_size, name) VALUES
+                (1, 'EPUB', 1000, 'a'), (1, 'MOBI', 500, 'b'),
+                (2, 'EPUB', 10, 'c');
+            INSERT INTO tags (name) VALUES ('Fic'), ('Lonesome');
+            INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (2, 1);
+            INSERT INTO identifiers (book, type, val) VALUES (1, 'isbn', '123');
+            INSERT INTO preferences (key, val) VALUES
+                ('virtual_libraries', '{"Wing": "tags:Fic"}');
+            """
+        )
+        conn.commit()
+        conn.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_get_format_stats(self):
+        self.assertEqual(
+            self.db.get_format_stats(),
+            {
+                "EPUB": {"count": 2, "bytes": 1010},
+                "MOBI": {"count": 1, "bytes": 500},
+            },
+        )
+
+    def test_get_identifiers(self):
+        self.assertEqual(self.db.get_identifiers(1), {"isbn": "123"})
+        self.assertEqual(self.db.get_identifiers(2), {})
+
+    def test_count_books_raw_then_cached(self):
+        # Before any cache populates the count comes from SQL; afterwards
+        # from the all-ids cache. Both agree.
+        self.assertEqual(self.db.count_books(), 2)
+        self.db.get_all_books()
+        self.assertEqual(self.db.count_books(), 2)
+        self.db.all_ids()
+        self.assertEqual(self.db.count_books(), 2)
+
+    def test_get_virtual_libraries(self):
+        self.assertEqual(self.db.get_virtual_libraries(), {"Wing": "tags:Fic"})
+        # Cached: the same dict comes back on the second call.
+        self.assertIs(self.db.get_virtual_libraries(), self.db.get_virtual_libraries())
+
+    def test_get_all_tags(self):
+        self.assertEqual(self.db.get_all_tags(), ["Fic", "Lonesome"])
+
+    def test_get_tag_counts_includes_zero_count_tags(self):
+        # LEFT JOIN semantics: a tag held by no book still reports 0.
+        self.assertEqual(self.db.get_tag_counts(), [("Fic", 2), ("Lonesome", 0)])
+
+
+class TestLockedDBSnapshot(unittest.TestCase):
+    """The locked-database snapshot fallback: a README headline feature the
+    sweep found untested, including the -wal/-shm sidecar copies and the
+    temp cleanup on close()."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'Committed')")
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_locked_db_falls_back_to_snapshot_and_cleans_up(self):
+        holder = sqlite3.connect(self.db_path)
+        # BEGIN EXCLUSIVE defers its lock to the first statement, so write
+        # once (to a scratch table; books must stay untouched so the
+        # snapshot holds only committed state) to actually take it.
+        holder.execute("CREATE TABLE scratch (x)")
+        holder.commit()
+        holder.execute("BEGIN EXCLUSIVE")
+        holder.execute("INSERT INTO scratch VALUES (1)")
+        # Stray sidecars, created after the lock is held (sidecars present
+        # at first open would switch SQLite's locking model): these exercise
+        # the sidecar-copy and sidecar-cleanup branches.
+        for suffix in ("-wal", "-shm"):
+            with open(self.db_path + suffix, "wb") as f:
+                f.write(b"sidecar")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            db = CalibreDB(self.db_path)
+        self.assertIn("locked", err.getvalue().lower())  # the stderr notice
+        self.assertIsNotNone(db._tmp_path)  # the snapshot exists
+        tmp = db._tmp_path
+        self.assertTrue(os.path.exists(tmp))
+        self.assertEqual(db.count_books(), 1)  # committed state only
+        db.close()
+        self.assertFalse(os.path.exists(tmp))  # main copy removed
+        self.assertFalse(os.path.exists(tmp + "-wal"))  # sidecars removed
+        self.assertFalse(os.path.exists(tmp + "-shm"))
+        self.assertIsNone(db._tmp_path)
+        holder.rollback()
+        holder.close()
 
 
 if __name__ == "__main__":

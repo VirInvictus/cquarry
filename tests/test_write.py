@@ -518,6 +518,161 @@ class TestRollbackOnBaseException(TestMetadataDirtied):
             wdb.conn.close()  # the exit commit now has nowhere to go
 
 
+class TestRemoveBook(unittest.TestCase):
+    """remove_book: rows go, orphans prune, queues clean. Zero tests existed
+    before the 2026-09-08 sweep flagged it, despite the dynamic-table DELETEs
+    and the irreversibility."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT,
+                timestamp TEXT, pubdate TEXT, series_index REAL,
+                has_cover INTEGER DEFAULT 0, uuid TEXT, path TEXT,
+                last_modified TEXT
+            );
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER UNIQUE);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT UNIQUE);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER);
+            CREATE TABLE custom_columns (
+                id INTEGER PRIMARY KEY, label TEXT UNIQUE, name TEXT, datatype TEXT,
+                editable BOOL DEFAULT 1, display TEXT DEFAULT '{}',
+                is_multiple BOOL DEFAULT 0, normalized BOOL DEFAULT 0
+            );
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT UNIQUE, link TEXT DEFAULT '');
+            CREATE TABLE books_custom_column_1_link (book INTEGER, value INTEGER, UNIQUE(book, value));
+            CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, book INTEGER UNIQUE, value INTEGER);
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            -- The cascade trigger the real schema carries; remove_book cleans
+            -- exactly what falls OUTSIDE this trigger.
+            CREATE TRIGGER books_delete_trg AFTER DELETE ON books
+            BEGIN
+                DELETE FROM books_authors_link WHERE book = OLD.id;
+                DELETE FROM books_tags_link WHERE book = OLD.id;
+                DELETE FROM books_publishers_link WHERE book = OLD.id;
+                DELETE FROM books_series_link WHERE book = OLD.id;
+                DELETE FROM books_ratings_link WHERE book = OLD.id;
+                DELETE FROM books_languages_link WHERE book = OLD.id;
+                DELETE FROM data WHERE book = OLD.id;
+            END;
+            INSERT INTO books (id, title) VALUES (1, 'Doomed'), (2, 'Kept');
+            INSERT INTO authors VALUES (1, 'Shared Author', 'Author, Shared'),
+                                       (2, 'Lone Author', 'Author, Lone');
+            INSERT INTO books_authors_link (book, author) VALUES (1, 1), (1, 2), (2, 1);
+            INSERT INTO tags (name) VALUES ('Doomed Tag');
+            INSERT INTO books_tags_link (book, tag) VALUES (1, 1);
+            INSERT INTO publishers (name) VALUES ('Doomed Pub');
+            INSERT INTO books_publishers_link (book, publisher) VALUES (1, 1);
+            INSERT INTO series (name) VALUES ('Doomed Series');
+            INSERT INTO books_series_link (book, series) VALUES (1, 1);
+            INSERT INTO ratings (rating) VALUES (8);
+            INSERT INTO books_ratings_link (book, rating) VALUES (1, 1);
+            INSERT INTO languages (lang_code) VALUES ('eng');
+            INSERT INTO books_languages_link (book, lang_code) VALUES (1, 1);
+            INSERT INTO custom_columns VALUES (1,'aud','Audience','text',1,'{}',1,1);
+            INSERT INTO custom_column_1 (value) VALUES ('Rin');
+            INSERT INTO books_custom_column_1_link (book, value) VALUES (1, 1);
+            INSERT INTO custom_columns VALUES (2,'flag','Flag','bool',1,'{}',0,0);
+            INSERT INTO custom_column_2 (book, value) VALUES (1, 1);
+            INSERT INTO metadata_dirtied (book) VALUES (1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql(self, query):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query).fetchall()]
+        finally:
+            conn.close()
+
+    def test_remove_book_cleans_rows_queues_and_prunes_orphans(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1)
+        # The book row and every per-book row are gone...
+        self.assertEqual(self._sql("SELECT id FROM books"), [(2,)])
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_authors_link WHERE book=1"), [(0,)]
+        )
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_tags_link WHERE book=1"), [(0,)]
+        )
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_publishers_link WHERE book=1"), [(0,)]
+        )
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_series_link WHERE book=1"), [(0,)]
+        )
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_ratings_link WHERE book=1"), [(0,)]
+        )
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_languages_link WHERE book=1"), [(0,)]
+        )
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_custom_column_1_link WHERE book=1"),
+            [(0,)],
+        )
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM custom_column_2 WHERE book=1"), [(0,)]
+        )
+        # ...the dirtied queue entry did not outlive its book...
+        self.assertEqual(self._sql("SELECT book FROM metadata_dirtied"), [])
+        # ...lone entities pruned, shared ones survive for book 2.
+        self.assertEqual(
+            self._sql("SELECT name FROM authors ORDER BY id"), [("Shared Author",)]
+        )
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM tags"), [(0,)])
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM publishers"), [(0,)])
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM series"), [(0,)])
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM ratings"), [(0,)])
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM languages"), [(0,)])
+        # The Pattern-A value row REMAINS: no trigger purges it on real
+        # schemas (fkc_delete_on_* guards the value table, not the links)
+        # and upstream's remove leaves it too; set_custom_column's writes
+        # prune such orphans instead.
+        self.assertEqual(self._sql("SELECT value FROM custom_column_1"), [("Rin",)])
+
+    def test_remove_book_is_irreversible_second_call_raises(self):
+        # Irreversible: the second call sees a book that is not there.
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1)
+            with self.assertRaises(ValueError):
+                wdb.remove_book(1)
+
+    def test_remove_book_failure_inside_batch_rolls_back(self):
+        with (
+            WritableCalibreDB(self.db_path) as wdb,
+            self.assertRaises(ValueError),
+            wdb.batch(),
+        ):
+            wdb.remove_book(2)  # would prune Shared Author's second link
+            wdb.remove_book(999)  # unknown book fails the pass
+        self.assertEqual(self._sql("SELECT id FROM books ORDER BY id"), [(1,), (2,)])
+        self.assertEqual(
+            self._sql("SELECT name FROM authors ORDER BY name"),
+            [("Lone Author",), ("Shared Author",)],
+        )
+
+
 class TestWriteSideExpansion(unittest.TestCase):
     """Phase-6 write-side expansion: entity setters, set_comments,
     set_custom_column, format management and remove_book."""
