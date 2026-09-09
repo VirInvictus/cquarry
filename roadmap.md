@@ -1206,6 +1206,26 @@ lane.)*
   matches nothing, invalid booleans raise, `all` sweep widened,
   two-letter language codes) match upstream and need no consumer action
   beyond awareness.
+- **Consumer adoption map (researched 2026-09-09, post-decision round).**
+  Precise exposures for the lanes that adopt 1.16.0+:
+  - CalibreQuarry: `modes/librarything.py` `build_rows()` should migrate to
+    `export_rows()` (its inline correlated-subquery SQL is exactly what the
+    provider covers; its `#translators`/`#reading_status`/`#date_read` picks
+    become dict reads); `modes/export.py:33` and `modes/catalog.py:66`
+    consume `load_custom_column()` and must expect native lists for
+    multi-valued columns; `run.py:126/594` split CLI INPUT strings, not cc
+    output (safe).
+  - Hermitage: `database.py:126` holds a module-level singleton CalibreDB --
+    `refresh()` is its coherence boundary after Calibre writes;
+    `insights.py:140`'s inline no-identifiers predicate retires via
+    `integrity.find_identifierless()`; `insights.py:220` opens a second
+    connection that could share the singleton. Its Flatpak pin
+    (`f22bbe7` = 1.9.0) moves in its adoption release.
+  - Carrel-calibre-web: `quarry_grid.py:465` (`reading_status`, single-valued)
+    and `page_count.py:47` (`pages`, int) are unaffected by the native-list
+    change; verify at lane.
+  - bindery-cli: `library.py` `install_format`'s `remove_format`+`add_format`
+    composition retires via `set_format` (1.17.0).
 - **Import skills synced 2026-09-09** (same release as the behavior):
   `phase-1-import` gained the byte-identity floor note in its duplicate
   screen; `phase-3-import` gained the Ctrl-C-safe/poisoned-batch note, the
