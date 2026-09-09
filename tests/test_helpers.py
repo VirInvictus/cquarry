@@ -235,7 +235,6 @@ class TestHtmlSanitizer(unittest.TestCase):
         self.assertEqual(strip_html(None), "")
         self.assertEqual(strip_html(""), "")
 
-
     def test_unterminated_script_block_does_not_leak(self):
         # Malformed converter HTML with no closing tag used to leak the
         # whole script body into the plain text.
@@ -244,9 +243,7 @@ class TestHtmlSanitizer(unittest.TestCase):
             strip_html("<p>Hi</p><style>p{}"),
             "Hi",
         )
-        self.assertEqual(
-            strip_html("<p>A</p><script>x()</script><p>B</p>"), "A\nB"
-        )
+        self.assertEqual(strip_html("<p>A</p><script>x()</script><p>B</p>"), "A\nB")
 
 
 class TestTitleSortQuotePairs(unittest.TestCase):

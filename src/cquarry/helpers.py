@@ -61,9 +61,11 @@ def title_sort(title: str) -> str:
     if not title:
         return ""
     stripped = title.strip()
-    if stripped and stripped[0] in _QUOTE_PAIRS and stripped[-1] in _QUOTE_PAIRS[
-        stripped[0]
-    ]:
+    if (
+        stripped
+        and stripped[0] in _QUOTE_PAIRS
+        and stripped[-1] in _QUOTE_PAIRS[stripped[0]]
+    ):
         # Upstream removes the pair without re-stripping; a space left
         # behind simply blocks the article match, exactly as upstream's
         # anchored pattern does.

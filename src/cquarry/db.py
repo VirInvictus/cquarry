@@ -742,8 +742,10 @@ class CalibreDB:
             val = row.get(row_key)
             # The undefined-date sentinel sorts as dateless (the search
             # engine already treats it that way), not as a real early date.
-            if row_key == "pubdate" and isinstance(val, str) and val.startswith(
-                ("0101-01-01", "0100-01-01")
+            if (
+                row_key == "pubdate"
+                and isinstance(val, str)
+                and val.startswith(("0101-01-01", "0100-01-01"))
             ):
                 return None
             return val
