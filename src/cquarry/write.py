@@ -31,6 +31,7 @@ Example::
 """
 
 import contextlib
+import filecmp
 import json
 import os
 import re
@@ -1583,6 +1584,10 @@ class WritableCalibreDB:
                 raise ValueError(f"Duplicate format seed: {fmt}")
             seen_fmts.add(fmt)
             fmt_entries.append((fmt, src, ext, os.path.getsize(src)))
+        # The 'never imported twice' invariant: a byte-identical re-import
+        # of a file the library already catalogues raises before anything
+        # is written (dry runs included).
+        self._reject_catalogued_duplicates(fmt_entries)
 
         cover_data: bytes | None = None
         cover_ext: str | None = None
@@ -1702,6 +1707,39 @@ class WritableCalibreDB:
             if book_dir is not None:
                 shutil.rmtree(book_dir, ignore_errors=True)
             raise
+
+    def _reject_catalogued_duplicates(
+        self, fmt_entries: list[tuple[str, str, str, int]]
+    ) -> None:
+        """Refuse a byte-identical re-import (the CQ Phase 18 carve-out).
+
+        Any catalogued ``data`` row with the same format and byte size is a
+        candidate; identical CONTENT raises, so a file that already lives in
+        the library can never be added twice. Content-agnostic duplicate
+        SCREENING (metadata-based, fuzzier) stays a frontend concern.
+        """
+        root = os.path.dirname(self.db_path)
+        for fmt, src, _ext, size in fmt_entries:
+            rows = self.conn.execute(
+                "SELECT d.name AS name, b.path AS path, d.book AS book "
+                "FROM data d JOIN books b ON b.id = d.book "
+                "WHERE d.uncompressed_size = ? AND upper(d.format) = ?",
+                (size, fmt),
+            ).fetchall()
+            for row in rows:
+                if not row["path"] or not row["name"]:
+                    continue
+                existing = os.path.join(
+                    root, row["path"], row["name"] + "." + fmt.lower()
+                )
+                if os.path.isfile(existing) and filecmp.cmp(
+                    src, existing, shallow=False
+                ):
+                    raise ValueError(
+                        f"Refusing to import a duplicate: this file is already "
+                        f"catalogued as book {row['book']}'s {fmt} "
+                        "(byte-identical re-import)"
+                    )
 
     def _author_sort_keys(self, names: list[str]) -> list[tuple[str, str, bool]]:
         """Resolve author names to (name, sort, is_new) without writing.

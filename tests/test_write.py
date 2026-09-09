@@ -1460,6 +1460,30 @@ class TestAddBook(TestWriteSideExpansion):
         with self._wdb() as wdb, self.assertRaises(ValueError):
             wdb.add_book("T", ["A"], formats=[self._epub(), self._epub(b"other")])
 
+    def test_add_book_refuses_byte_identical_reimport(self):
+        # The 'never imported twice' invariant (CQ Phase 18 carve-out): a
+        # file the library already catalogues cannot be added again, under
+        # any title, before anything is written.
+        source = self._epub(b"SAME-BYTES")
+        with self._wdb() as wdb:
+            wdb.add_book("The Fifth Head of Data", ["Ann Leckie"], formats=[source])
+            with self.assertRaises(ValueError):
+                wdb.add_book("Second Title", ["Other Author"], formats=[source])
+            with self.assertRaises(ValueError):
+                # Dry runs hit the same guard: refusal is a validation.
+                wdb.add_book(
+                    "Second Title", ["Other Author"], formats=[source], dry_run=True
+                )
+        self.assertEqual(self._count("SELECT COUNT(*) FROM books"), 3)
+
+    def test_add_book_same_size_different_bytes_is_allowed(self):
+        # The guard compares content, not just the size pre-filter.
+        with self._wdb() as wdb:
+            wdb.add_book("A Book", ["Ann Leckie"], formats=[self._epub(b"0" * 32)])
+            wdb.add_book("Another", ["Ann Leckie"], formats=[self._epub(b"1" * 32)])
+        self.assertEqual(self._count("SELECT COUNT(*) FROM books"), 4)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM data"), 2)
+
     def test_add_book_ascii_fold_is_the_documented_deviation(self):
         with self._wdb() as wdb:
             book_id = wdb.add_book("Ünicode Tëst", ["Ann Leckie"])
