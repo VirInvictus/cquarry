@@ -1391,9 +1391,11 @@ class TestCorruptPrefsAndDegradation(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir, "metadata.db")
         conn = sqlite3.connect(self.db_path)
         tables = [
-            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
-            " author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,"
-            " series_index REAL, path TEXT, has_cover INTEGER)",
+            (
+                "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+                " author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,"
+                " series_index REAL, path TEXT, has_cover INTEGER)"
+            ),
             "CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT)",
             "CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER)",
             "CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT)",
@@ -1406,8 +1408,10 @@ class TestCorruptPrefsAndDegradation(unittest.TestCase):
             "CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER)",
             "CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT)",
             "CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER)",
-            "CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT,"
-            " uncompressed_size INTEGER, name TEXT)",
+            (
+                "CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format"
+                " TEXT, uncompressed_size INTEGER, name TEXT)"
+            ),
             "CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT)",
         ]
         if with_identifiers:
