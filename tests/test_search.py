@@ -453,10 +453,9 @@ class TestIntegration(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def test_get_all_books(self):
-        self.assertEqual(len(self.db.get_all_books()), 3)
-
     def test_search_hierarchy(self):
+        # The fixture sanity check rides along with the first real assert.
+        self.assertEqual(len(self.db.get_all_books()), 3)
         self.assertEqual(self.db.search("tags:Fic.SciFi"), {1, 2, 3})
         self.assertEqual(self.db.search('tags:"=Fic.SciFi"'), {3})
 

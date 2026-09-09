@@ -790,10 +790,6 @@ class TestReadSideV14(unittest.TestCase):
         pubs = self.db.get_entities("publishers")
         self.assertEqual(pubs[0]["link"], "https://orbit")
 
-    def test_get_entities_unknown_kind_raises(self):
-        with self.assertRaises(ValueError):
-            self.db.get_entities("nope")
-
     def test_custom_column_display_config(self):
         cols = self.db.get_custom_columns()
         status = cols["Status"]

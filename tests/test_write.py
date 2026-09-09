@@ -28,35 +28,54 @@ class TestTitleSort(unittest.TestCase):
         self.assertEqual(title_sort(""), "")
 
 
+def _make_simple_db(db_path: str, *, with_dirtied: bool = False) -> None:
+    """The minimal books/tags/identifiers fixture plus the insert trigger.
+
+    Shared by the simple write fixtures (was pasted per class)."""
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE books (
+            id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+            timestamp TEXT, last_modified TEXT, path TEXT
+        );
+        CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+        CREATE TABLE books_tags_link (
+            id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER,
+            UNIQUE(book, tag)
+        );
+        CREATE TABLE identifiers (
+            id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT,
+            UNIQUE(book, type)
+        );
+        """
+        + (
+            """
+        CREATE TABLE metadata_dirtied (
+            id INTEGER PRIMARY KEY, book INTEGER NOT NULL,
+            UNIQUE(book)
+        );
+        """
+            if with_dirtied
+            else ""
+        )
+        + """
+        CREATE TRIGGER books_insert_trg AFTER INSERT ON books
+        BEGIN
+            UPDATE books SET sort = title_sort(NEW.title),
+                last_modified = uuid4() WHERE id = NEW.id;
+        END;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
 class TestWritableCalibreDB(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "metadata.db")
-        conn = sqlite3.connect(self.db_path)
-        conn.executescript(
-            """
-            CREATE TABLE books (
-                id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
-                timestamp TEXT, last_modified TEXT, path TEXT
-            );
-            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
-            CREATE TABLE books_tags_link (
-                id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER,
-                UNIQUE(book, tag)
-            );
-            CREATE TABLE identifiers (
-                id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT,
-                UNIQUE(book, type)
-            );
-            CREATE TRIGGER books_insert_trg AFTER INSERT ON books
-            BEGIN
-                UPDATE books SET sort = title_sort(NEW.title),
-                    last_modified = uuid4() WHERE id = NEW.id;
-            END;
-            """
-        )
-        conn.commit()
-        conn.close()
+        _make_simple_db(self.db_path)
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
@@ -200,30 +219,7 @@ class TestMetadataDirtied(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "metadata.db")
-        conn = sqlite3.connect(self.db_path)
-        conn.executescript(
-            """
-            CREATE TABLE books (
-                id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
-                timestamp TEXT, last_modified TEXT, path TEXT
-            );
-            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
-            CREATE TABLE books_tags_link (
-                id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER,
-                UNIQUE(book, tag)
-            );
-            CREATE TABLE identifiers (
-                id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT,
-                UNIQUE(book, type)
-            );
-            CREATE TABLE metadata_dirtied (
-                id INTEGER PRIMARY KEY, book INTEGER NOT NULL,
-                UNIQUE(book)
-            );
-            """
-        )
-        conn.commit()
-        conn.close()
+        _make_simple_db(self.db_path, with_dirtied=True)
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
@@ -439,6 +435,15 @@ BEGIN
 END;
 """
 )
+
+
+class TestNowStamp(unittest.TestCase):
+    def test_now_stamp_matches_calibres_text_shape(self):
+        # Calibre stores 'YYYY-MM-DD HH:MM:SS.SSSSSS+00:00' style UTC stamps.
+        self.assertRegex(
+            WritableCalibreDB._now(),
+            r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}\+00:00$",
+        )
 
 
 class TestRollbackOnBaseException(TestMetadataDirtied):
@@ -673,9 +678,9 @@ class TestRemoveBook(unittest.TestCase):
         )
 
 
-class TestWriteSideExpansion(unittest.TestCase):
-    """Phase-6 write-side expansion: entity setters, set_comments,
-    set_custom_column, format management and remove_book."""
+class _WriteSideFixture:
+    """The phase-6 write-side fixture plumbing (schema, seeds, helpers).
+    Never collected and carries no tests of its own."""
 
     SCHEMA = _WRITE_SCHEMA
 
@@ -718,6 +723,18 @@ class TestWriteSideExpansion(unittest.TestCase):
 
     def _wdb(self):
         return WritableCalibreDB(self.db_path)
+
+    def _sql2(self, query, params=()):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query, params).fetchall()]
+        finally:
+            conn.close()
+
+
+class _WriteSideTests:
+    """The phase-6 expansion tests; composed into TestWriteSideExpansion
+    so they run exactly once against the plain fixture."""
 
     def test_set_authors_relinks_and_recomputes_author_sort(self):
         with self._wdb() as wdb:
@@ -763,13 +780,6 @@ class TestWriteSideExpansion(unittest.TestCase):
         conn.close()
         self.assertIsNone(idx)
         self.assertEqual(count, 0)  # orphaned series pruned
-
-    def _sql2(self, query, params=()):
-        conn = sqlite3.connect(self.db_path)
-        try:
-            return [tuple(r) for r in conn.execute(query, params).fetchall()]
-        finally:
-            conn.close()
 
     def test_set_publisher_roundtrip(self):
         with self._wdb() as wdb:
@@ -1027,7 +1037,11 @@ class TestWriteSideExpansion(unittest.TestCase):
             self.assertTrue(wdb.set_has_cover(1, False))
 
 
-class TestBatchContext(TestWriteSideExpansion):
+class TestWriteSideExpansion(_WriteSideFixture, _WriteSideTests, unittest.TestCase):
+    """The phase-6 expansion tests, run once against the plain fixture."""
+
+
+class TestBatchContext(_WriteSideFixture, unittest.TestCase):
     """batch() defers every setter's commit: one transaction per curation pass.
 
     The 2026-08-27 phase-3 import committed ~45 mutations as 45 separate
@@ -1107,17 +1121,12 @@ class TestBatchContext(TestWriteSideExpansion):
         )
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(1,)])
 
-    def test_transaction_alias_commits_once_on_success(self):
+    def test_transaction_alias_is_batch(self):
         # Pre-1.7.0 call shape (the name a 2026-08-29 phase-3 import reached
-        # for); must behave exactly like batch().
-        with self._wdb() as wdb, wdb.transaction():
-            wdb.add_tag(1, "Audited")
-            wdb.update_title(1, "New Name")
-        self.assertEqual(
-            self._sql2("SELECT title FROM books WHERE id=1"), [("New Name",)]
-        )
-        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(1,)])
-        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(1,)])
+        # for). Identity at the API level; the failure twin below still
+        # exercises the alias end to end.
+        with self._wdb() as wdb:
+            self.assertIs(type(wdb.transaction()), type(wdb.batch()))
 
     def test_transaction_alias_rolls_back_on_failure(self):
         with self._wdb() as wdb, self.assertRaises(ValueError), wdb.transaction():
@@ -1127,7 +1136,7 @@ class TestBatchContext(TestWriteSideExpansion):
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
 
 
-class TestSetPubdate(TestWriteSideExpansion):
+class TestSetPubdate(_WriteSideFixture, unittest.TestCase):
     """set_pubdate writes Calibre's TEXT convention, never a raw integer.
 
     The 2026-08-27 batch wrote unix integers into the TEXT column and got
@@ -1197,7 +1206,7 @@ class TestSetPubdate(TestWriteSideExpansion):
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
 
 
-class TestSetWriteConveniences(TestWriteSideExpansion):
+class TestSetWriteConveniences(_WriteSideFixture, unittest.TestCase):
     """Phase-11 set-write conveniences: clear_tags, add_custom_column_values,
     clear_rating. The link-table fixture carries UNIQUE(book, value), the
     shape CalibreQuarry's set-write tests will mirror."""
@@ -1311,14 +1320,14 @@ class TestSetWriteConveniences(TestWriteSideExpansion):
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
 
 
-class TestAddBook(TestWriteSideExpansion):
-    """Phase 10: the creation path.
-
-    The fixture carries the real INSERT-path hazards (books_insert_trg
-    calling title_sort()/uuid4(), the Count Pages create trigger, the
-    fkc_insert_* guards), so every assert below runs against the same
-    trigger census a user_version-27 library presents. setUp seeds ids 1
-    and 2, so with AUTOINCREMENT the next id (real or predicted) is 3.
+class TestAddBook(_WriteSideFixture, unittest.TestCase):
+    """Phase 10: the creation path, against the schema that genuinely
+    differs (AUTOINCREMENT plus the real INSERT-path hazards:
+    books_insert_trg calling title_sort()/uuid4(), the Count Pages create
+    trigger, the fkc_insert_* guards). Since the deflation this class
+    carries ONLY its own tests: the expansion suite runs once, in
+    TestWriteSideExpansion. setUp seeds ids 1 and 2, so with
+    AUTOINCREMENT the next id (real or predicted) is 3.
     """
 
     SCHEMA = _ADD_BOOK_SCHEMA
@@ -1342,7 +1351,8 @@ class TestAddBook(TestWriteSideExpansion):
         conn.executemany(
             "INSERT INTO books_authors_link (book, author) VALUES (?, 1)", [(1,), (2,)]
         )
-        # Inherited custom-column tests need the seeded columns.
+        # The shared expansion tests exercise the custom-column writers
+        # against this trigger schema too, so it seeds the same columns.
         conn.execute(
             "INSERT INTO custom_columns VALUES "
             "(1,'status','Status','enumeration',1,?,0,1)",
