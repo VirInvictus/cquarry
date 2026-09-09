@@ -297,6 +297,10 @@ class WritableCalibreDB:
         # the outermost exit: an inner failure caught by the caller must
         # still roll the whole pass back, never commit it.
         self._batch_poisoned = False
+        # File removals registered by remove_book(delete_files=...) inside
+        # the current outermost batch, performed only after its COMMIT (a
+        # rollback drops them instead: resurrected rows keep their files).
+        self._pending_removals: list[tuple[int, str, str]] = []
 
     # -- lifecycle --
 
@@ -364,6 +368,7 @@ class WritableCalibreDB:
             if self._batch_depth == 0:
                 if ok and not self._batch_poisoned:
                     self.conn.commit()
+                    self._flush_pending_removals()
                 else:
                     with contextlib.suppress(sqlite3.Error):
                         self.conn.rollback()
@@ -1514,6 +1519,52 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    def set_format(self, book_id: int, fmt: str, name: str, size: int) -> bool:
+        """Sanctioned replace of one format row, remove+add in one
+        transaction. Returns True when a row was written, False when the
+        identical row (same format, name, and size) already exists.
+
+        This is the row half of swapping a repaired file into place: the
+        file itself stays the caller's atomic-replace job (Calibre's layout
+        never changes for a same-format swap), and this only keeps ``data``
+        truthful. Raises ValueError on a negative size or empty fmt/name,
+        exactly like :meth:`add_format`.
+        """
+        fmt = fmt.strip().upper()
+        name = name.strip()
+        if not fmt or not name:
+            raise ValueError("Format and name must not be empty")
+        if size < 0:
+            raise ValueError(f"Format size must not be negative, got {size}")
+        self._begin()
+        try:
+            self._require_book(book_id)
+            old = self.conn.execute(
+                "SELECT id, name, uncompressed_size FROM data "
+                "WHERE book = ? AND upper(format) = ?",
+                (book_id, fmt),
+            ).fetchone()
+            if (
+                old is not None
+                and old["name"] == name
+                and old["uncompressed_size"] == size
+            ):
+                self._rollback()
+                return False
+            if old is not None:
+                self.conn.execute("DELETE FROM data WHERE id = ?", (old["id"],))
+            self.conn.execute(
+                "INSERT INTO data (book, format, uncompressed_size, name) "
+                "VALUES (?, ?, ?, ?)",
+                (book_id, fmt, size, name),
+            )
+            self._touch_book(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
     def set_has_cover(self, book_id: int, has_cover: bool) -> bool:
         """Toggle the catalogued ``has_cover`` flag (the cover FILE itself is
         the caller's responsibility). Returns True when the flag flipped."""
@@ -1847,7 +1898,49 @@ class WritableCalibreDB:
 
     # -- Book lifecycle --
 
-    def remove_book(self, book_id: int) -> None:
+    # Upstream's library-local trash directory (constants.py TRASH_DIR_NAME);
+    # a plain shutil.move target, so stdlib-only trash is exact parity.
+    _TRASH_DIR_NAME = ".caltrash"
+
+    def _book_dir_path(self, book_id: int) -> str | None:
+        """The absolute directory of a book, or None when it has no path."""
+        row = self.conn.execute(
+            "SELECT path FROM books WHERE id = ?", (book_id,)
+        ).fetchone()
+        if row is None or not row["path"]:
+            return None
+        return os.path.join(os.path.dirname(self.db_path), row["path"])
+
+    def _flush_pending_removals(self) -> None:
+        """Perform file removals deferred by remove_book inside a batch.
+
+        Called only after the outermost COMMIT: a rollback that resurrected
+        the rows must not leave them fileless, so the removals registered
+        inside the pass are simply dropped on rollback instead.
+        """
+        for book_id, path, mode in self._pending_removals:
+            self._remove_book_dir(book_id, path, mode)
+        self._pending_removals.clear()
+
+    def _remove_book_dir(self, book_id: int, book_dir: str, mode: str) -> None:
+        if mode == "trash":
+            trash_b = os.path.join(
+                os.path.dirname(self.db_path), self._TRASH_DIR_NAME, "b"
+            )
+            os.makedirs(trash_b, exist_ok=True)
+            dest = os.path.join(trash_b, str(book_id))
+            if os.path.exists(dest):
+                shutil.rmtree(dest, ignore_errors=True)
+            shutil.move(book_dir, dest)
+        else:  # permanent
+            shutil.rmtree(book_dir, ignore_errors=True)
+        # Upstream removes an emptied parent (the author directory) too.
+        parent = os.path.dirname(book_dir)
+        if parent != os.path.dirname(self.db_path):
+            with contextlib.suppress(OSError):
+                os.rmdir(parent)  # only succeeds when empty
+
+    def remove_book(self, book_id: int, delete_files: str | None = None) -> None:
         """Remove a book and all of its satellite rows.
 
         ``books_delete_trg`` cascades the standard link tables, data,
@@ -1856,10 +1949,28 @@ class WritableCalibreDB:
         custom-column rows (both storage patterns, every column), the dirtied
         queues, and now-orphaned entity rows (pruned AFTER the cascade so the
         fkc_delete_on_* guards pass). Irreversible - callers own confirmation.
+
+        ``delete_files`` extends the removal to the book's on-disk directory
+        (``Author/Title (id)/``), matching upstream's remove flow:
+        ``"trash"`` moves it into the library-local ``.caltrash/b/<id>/``
+        (upstream's own trash layout, recoverable by hand), ``"permanent"``
+        deletes it outright, and ``None`` (default) leaves the files for the
+        caller to sweep. File removal happens only after the rows COMMIT:
+        inside a ``batch()`` it is deferred to the outermost commit, so a
+        rollback that resurrects the rows never leaves them fileless.
         """
+        if delete_files not in (None, "permanent", "trash"):
+            raise ValueError(
+                f"delete_files must be None, 'permanent', or 'trash', "
+                f"got {delete_files!r}"
+            )
         self._begin()
         try:
             self._require_book(book_id)
+            # Capture the directory before the cascade: the row (and its
+            # path) must exist to resolve it, and the fs step only runs
+            # after a commit anyway.
+            book_dir = self._book_dir_path(book_id) if delete_files else None
             # Custom columns: both patterns, for every defined column.
             col_ids = [
                 r[0]
@@ -1898,6 +2009,13 @@ class WritableCalibreDB:
             for table in self._ENTITY_TABLES:
                 self._prune_orphans(table)
             self._commit()
+            # File removal strictly after the rows commit: outside a batch
+            # this runs now; inside one it defers to the outermost commit.
+            if book_dir is not None:
+                if self._batch_depth:
+                    self._pending_removals.append((book_id, book_dir, delete_files))
+                else:
+                    self._remove_book_dir(book_id, book_dir, delete_files)
         except BaseException:
             self._rollback()
             raise

@@ -656,6 +656,67 @@ class TestRemoveBook(unittest.TestCase):
         # prune such orphans instead.
         self.assertEqual(self._sql("SELECT value FROM custom_column_1"), [("Rin",)])
 
+    def _book_dir(self, book_id, title):
+        path = os.path.join(self.temp_dir, f"{title} ({book_id})")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, f"{title} - A.epub"), "w") as f:
+            f.write("x")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE books SET path = ? WHERE id = ?", (f"{title} ({book_id})", book_id)
+        )
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_delete_files_permanent_removes_the_directory(self):
+        book_dir = self._book_dir(1, "Doomed")
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1, delete_files="permanent")
+        self.assertFalse(os.path.exists(book_dir))
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM books"), [(1,)])
+
+    def test_delete_files_trash_moves_into_calthrash(self):
+        # Upstream's own trash layout, library-local: the book directory
+        # moves whole into .caltrash/b/<id>/ and stays recoverable by hand.
+        book_dir = self._book_dir(1, "Doomed")
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1, delete_files="trash")
+        self.assertFalse(os.path.exists(book_dir))
+        trashed = os.path.join(self.temp_dir, ".caltrash", "b", "1")
+        self.assertTrue(os.path.isfile(os.path.join(trashed, "Doomed - A.epub")))
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM books"), [(1,)])
+
+    def test_delete_files_none_leaves_files_for_the_caller(self):
+        book_dir = self._book_dir(1, "Doomed")
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1)
+        self.assertTrue(os.path.isdir(book_dir))
+
+    def test_delete_files_invalid_mode_raises(self):
+        with WritableCalibreDB(self.db_path) as wdb, self.assertRaises(ValueError):
+            wdb.remove_book(1, delete_files="yes")
+
+    def test_delete_files_inside_batch_defers_until_commit(self):
+        # The removal must land only after the rows COMMIT: a rolled-back
+        # pass that deleted files would leave resurrected rows fileless.
+        book_dir = self._book_dir(1, "Doomed")
+        with (
+            self.assertRaises(ValueError),
+            WritableCalibreDB(self.db_path) as wdb,
+            wdb.batch(),
+        ):
+            wdb.remove_book(1, delete_files="trash")
+            wdb.remove_book(999)  # fails the pass
+        self.assertTrue(os.path.isdir(book_dir))
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM books"), [(2,)])
+        with WritableCalibreDB(self.db_path) as wdb, wdb.batch():
+            wdb.remove_book(1, delete_files="trash")
+        self.assertFalse(os.path.isdir(book_dir))
+        self.assertTrue(
+            os.path.isdir(os.path.join(self.temp_dir, ".caltrash", "b", "1"))
+        )
+
     def test_remove_book_is_irreversible_second_call_raises(self):
         # Irreversible: the second call sees a book that is not there.
         with WritableCalibreDB(self.db_path) as wdb:
@@ -1024,6 +1085,24 @@ class _WriteSideTests:
             self.assertFalse(wdb.set_rating(2, 0))
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM ratings"), [(0,)])
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_ratings_link"), [(0,)])
+
+    def test_set_format_replaces_in_one_transaction(self):
+        # The bindery install_format composition, promoted: remove+add of a
+        # format row with no window where the book has no data row.
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.add_format(1, "EPUB", "oldtitle", 1024))
+            self.assertTrue(wdb.set_format(1, "EPUB", "newtitle", 2048))
+            self.assertFalse(wdb.set_format(1, "EPUB", "newtitle", 2048))
+            self.assertTrue(wdb.set_format(1, "epub", "NewTitle", 4096))
+            with self.assertRaises(ValueError):
+                wdb.set_format(1, "EPUB", "x", -5)
+        self.assertEqual(
+            self._sql2(
+                "SELECT format, name, uncompressed_size FROM data WHERE book = 1"
+            ),
+            [("EPUB", "NewTitle", 4096)],
+        )
+        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(1,)])
 
     def test_add_remove_format_and_has_cover(self):
         with self._wdb() as wdb:

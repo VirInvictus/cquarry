@@ -10,7 +10,13 @@ import tempfile
 from collections.abc import Sequence
 from typing import Any, Self
 
-from cquarry.helpers import calibre_rating_to_stars, db_uri_ro, strip_html, title_sort
+from cquarry.helpers import (
+    calibre_rating_to_stars,
+    db_uri_ro,
+    isbn_normalize,
+    strip_html,
+    title_sort,
+)
 from cquarry.search import (
     DT_BOOL,
     DT_DATE,
@@ -20,10 +26,23 @@ from cquarry.search import (
     DT_TEXT,
     DT_TEXT_MULTI,
     SearchEngine,
+    _fold,
 )
 
 # Sentinel distinguishing "cache not populated" from a cached None result.
 _UNSET = object()
+
+
+_DUPLICATE_ARTICLE_RE = re.compile(r"^(the|a|an)\s+", re.IGNORECASE)
+
+
+def _duplicate_title_key(title: str) -> str:
+    """Folded title key for duplicate screening: subtitle scrubbed (the
+    segment before a colon), leading article dropped, whitespace collapsed."""
+    text = _fold(title or "")
+    text = text.split(":", 1)[0].strip()
+    text = _DUPLICATE_ARTICLE_RE.sub("", text).strip()
+    return re.sub(r"\s+", " ", text)
 
 
 def _canonical_pref_name(name: str, names) -> str | None:
@@ -575,6 +594,78 @@ class CalibreDB:
         """
         key = os.path.normcase(os.path.normpath(os.path.abspath(path)))
         return self.format_path_index().get(key)
+
+    def find_candidate_duplicates(
+        self, title: str, authors: list[str] | str, isbn: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Library-side duplicate screening for the creation path: the
+        search-parity complement of ``add_book``'s byte-identity floor.
+
+        Rules, highest confidence first (mirroring the frontend screener
+        that prompted this API): ISBN -- the book carries an ``isbn``
+        identifier equal to the given one, separator- and case-insensitive;
+        then title+author -- the normalized title (folded, subtitle and
+        leading article scrubbed) AND the first author (folded) match
+        exactly. Returns one ``{"id": ..., "matched_by": "isbn" |
+        "title_author"}`` per matching book, sorted by id; a book matching
+        both rules reports ``"isbn"``. Reads over the cached rows, so a
+        caller screening a whole import batch should hold one connection.
+        """
+        if isinstance(authors, str):
+            authors = [a.strip() for a in authors.split(",") if a.strip()]
+        want_isbn = isbn_normalize(isbn) if isbn else ""
+        want_author = _fold(authors[0]) if authors else ""
+        want_title = _duplicate_title_key(title)
+        out: list[dict[str, Any]] = []
+        for b in self.get_all_books():
+            rule = None
+            if (
+                want_isbn
+                and b["identifiers"].get("isbn")
+                and (isbn_normalize(b["identifiers"]["isbn"]) == want_isbn)
+            ):
+                rule = "isbn"
+            elif (
+                want_title
+                and want_author
+                and b["authors"]
+                and _duplicate_title_key(b["title"]) == want_title
+                and _fold(b["authors"][0]) == want_author
+            ):
+                rule = "title_author"
+            if rule is not None:
+                out.append({"id": b["id"], "matched_by": rule})
+        return out
+
+    def export_rows(
+        self, *, ids: set[int] | None = None, include_custom: bool = True
+    ) -> list[dict[str, Any]]:
+        """Flat one-dict-per-book rows for exporters and CSV writers.
+
+        Composes the hydrated rows with every custom column flattened in as
+        a ``#label`` key (values exactly as :meth:`field` yields; ``None``
+        when the book has no value, so the key set is uniform across rows;
+        composite columns omitted -- computed, not stored), so a frontend
+        needs no SQL of its own. ``rating`` stays the raw internal 0-10 row value and
+        ``pubdate`` the raw TEXT (sentinel included): conversion and
+        formatting are the renderer's job. ``ids`` restricts the result;
+        rows are ordered as ``get_all_books()`` orders them.
+        """
+        out: list[dict[str, Any]] = []
+        for b in self.get_all_books():
+            if ids is not None and b["id"] not in ids:
+                continue
+            row = dict(b)
+            if include_custom:
+                for meta in self.get_custom_columns().values():
+                    datatype = (meta.get("datatype") or "").lower()
+                    if datatype == "composite":
+                        continue
+                    row["#" + (meta.get("label") or "")] = self.field(
+                        b["id"], "#" + (meta.get("label") or "")
+                    )
+            out.append(row)
+        return out
 
     def get_book_dossier(
         self, book_id: int, *, include_comments: bool = False

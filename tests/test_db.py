@@ -1514,6 +1514,107 @@ class TestReadSidePapercuts(unittest.TestCase):
         self.assertIsNone(self.db.get_all_books()[0]["rating"])
 
 
+class TestDupScreeningAndExport(unittest.TestCase):
+    """find_candidate_duplicates and export_rows: the promoted APIs the
+    2026-09-09 decision round approved."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT,
+                last_modified TEXT, series_index REAL, path TEXT,
+                has_cover INTEGER
+            );
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT,
+                uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT);
+            CREATE TABLE custom_columns (
+                id INTEGER PRIMARY KEY, label TEXT UNIQUE, name TEXT, datatype TEXT,
+                editable BOOL DEFAULT 1, display TEXT DEFAULT '{}',
+                is_multiple BOOL DEFAULT 0, normalized BOOL DEFAULT 0
+            );
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT UNIQUE, link TEXT DEFAULT '');
+            CREATE TABLE books_custom_column_1_link (book INTEGER, value INTEGER, UNIQUE(book, value));
+            INSERT INTO books (id, title, sort, path) VALUES
+                (1, 'The Capital: A Critique', 'Capital, The', 'p1'),
+                (2, 'capital', 'capital', 'p2'),
+                (3, 'Other Work', 'Other Work', 'p3');
+            INSERT INTO authors (name) VALUES ('Karl Marx'), ('Someone Else');
+            INSERT INTO books_authors_link (book, author) VALUES (1, 1), (2, 1), (3, 2);
+            INSERT INTO identifiers (book, type, val) VALUES (1, 'isbn', '978-0-00-000000-0');
+            INSERT INTO custom_columns VALUES (1,'crew','Crew','text',1,'{}',1,1);
+            INSERT INTO custom_column_1 (value) VALUES ('Doe, John');
+            INSERT INTO books_custom_column_1_link VALUES (1, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_isbn_rule_wins_and_tolerates_separators(self):
+        self.assertEqual(
+            self.db.find_candidate_duplicates(
+                "Unrelated", ["Nobody"], isbn="9780000000000"
+            ),
+            [{"id": 1, "matched_by": "isbn"}],
+        )
+        # Hyphenated query against the hyphenated stored value.
+        self.assertEqual(
+            self.db.find_candidate_duplicates("X", ["Y"], isbn="978-0-00-000000-0"),
+            [{"id": 1, "matched_by": "isbn"}],
+        )
+
+    def test_title_author_rule_normalizes(self):
+        # Article and subtitle scrubbing: 'The Capital: A Critique' and
+        # 'capital' normalize to the same key; first author must match too.
+        self.assertEqual(
+            self.db.find_candidate_duplicates("Capital: Reviewed", ["Karl Marx"]),
+            [
+                {"id": 1, "matched_by": "title_author"},
+                {"id": 2, "matched_by": "title_author"},
+            ],
+        )
+        self.assertEqual(
+            self.db.find_candidate_duplicates("capital", ["Someone Else"]),
+            [],
+        )
+
+    def test_export_rows_flatten_custom_columns(self):
+        rows = {r["id"]: r for r in self.db.export_rows()}
+        self.assertEqual(rows[1]["#crew"], ["Doe, John"])
+        # Uniform key set: a book without a value carries None, not a
+        # missing key, so CSV writers get stable columns.
+        self.assertIsNone(rows[2]["#crew"])
+        # The standard flat fields ride along.
+        self.assertEqual(rows[1]["title"], "The Capital: A Critique")
+        self.assertEqual(rows[1]["identifiers"], {"isbn": "978-0-00-000000-0"})
+        # ids filter and custom-column opt-out.
+        filtered = self.db.export_rows(ids={3}, include_custom=False)
+        self.assertEqual([r["id"] for r in filtered], [3])
+        self.assertNotIn("#crew", filtered[0])
+
+
 class TestRefreshBoundary(TestReadApis):
     """refresh(): the coherence boundary for long-lived holders (the :919
     sweep repro -- caches populate at different moments, so one connection

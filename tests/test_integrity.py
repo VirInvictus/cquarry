@@ -17,6 +17,7 @@ from cquarry.integrity import (
     find_deprecated_formats,
     find_duplicate_books,
     find_formatless,
+    find_identifierless,
     find_low_res_covers,
     find_missing_cover_files,
     find_series_gaps,
@@ -45,6 +46,10 @@ class TestIntegrity(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir, "metadata.db")
         self.conn = sqlite3.connect(self.db_path)
         c = self.conn
+        c.execute(
+            "CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER,"
+            " type TEXT, val TEXT)"
+        )
         c.execute(
             "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
             " author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,"
@@ -141,6 +146,13 @@ class TestIntegrity(unittest.TestCase):
         c.execute("UPDATE books SET series_index = 1 WHERE id = 1")
         c.execute("UPDATE books SET series_index = 3 WHERE id = 4")
         c.execute("UPDATE books SET series_index = 1.5 WHERE id = 5")
+        # Identifiers on books 1 and 4 only: 2/3/5 are identifierless.
+        c.execute(
+            "INSERT INTO identifiers (book, type, val) VALUES (1, 'isbn', '9780000000000')"
+        )
+        c.execute(
+            "INSERT INTO identifiers (book, type, val) VALUES (4, 'goodreads', '42')"
+        )
         for path, blob in [("p1", _png(600, 800)), ("p4", _png(100, 100))]:
             os.makedirs(os.path.join(self.temp_dir, path), exist_ok=True)
             with open(os.path.join(self.temp_dir, path, "cover.jpg"), "wb") as f:
@@ -193,6 +205,10 @@ class TestIntegrity(unittest.TestCase):
         self.assertEqual(
             find_duplicate_books(self.db), {("shared title", "alice"): [1, 4, 5]}
         )
+
+    def test_find_identifierless(self):
+        # Books 1 and 4 carry identifiers; 2/3/5 carry none.
+        self.assertEqual(find_identifierless(self.db), [2, 3, 5])
 
     def test_find_series_gaps(self):
         self.assertEqual(find_series_gaps(self.db), {"Gap Series": [2]})

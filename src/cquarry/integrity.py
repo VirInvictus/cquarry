@@ -33,6 +33,7 @@ __all__ = [
     "find_deprecated_formats",
     "find_duplicate_books",
     "find_formatless",
+    "find_identifierless",
     "find_low_res_covers",
     "find_missing_cover_files",
     "find_series_gaps",
@@ -157,6 +158,13 @@ def find_duplicate_books(
         key = (title, primary.strip().lower())
         groups.setdefault(key, []).append(b["id"])
     return {k: sorted(v) for k, v in groups.items() if len(v) > 1}
+
+
+def find_identifierless(db: CalibreDB) -> list[int]:
+    """Books carrying no identifiers at all (the ISBN/GoodReads/ASIN EAV
+    store). The curation-facing opposite of :meth:`CalibreDB.get_identifiers`;
+    promoted from Hermitage's inline Insights predicate."""
+    return sorted(b["id"] for b in db.get_all_books() if not b["identifiers"])
 
 
 def find_series_gaps(db: CalibreDB) -> dict[str, list[int]]:
