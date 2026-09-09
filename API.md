@@ -89,8 +89,8 @@ All eight return `[]`/`{}` on databases whose schema predates the tables.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `search(query)` | `set[int]` | Parse and evaluate a Calibre search expression, returning matching book IDs. An empty query returns all IDs. Raises `ParseException` for unknown virtual libraries or saved searches. |
-| `resolve_vl(vl_name)` | `set[int]` | Resolve a virtual library by name to its set of book IDs. Case-insensitive; raises `ValueError` if the name is not found. |
-| `resolve_saved_search(name)` | `set[int]` | Resolve a saved-search name to its set of book IDs. Case-insensitive; raises `ValueError` if the name is not found. |
+| `resolve_vl(vl_name)` | `set[int]` | Resolve a virtual library by name to its set of book IDs. Case-insensitive, with surrounding padding and quotes stripped (since 1.16.0, matching the `vl_expression()` lookup); raises `ValueError` if the name is not found. |
+| `resolve_saved_search(name)` | `set[int]` | Resolve a saved-search name to its set of book IDs. Case-insensitive, with surrounding padding and quotes stripped (since 1.16.0, matching the `saved_search()` lookup); raises `ValueError` if the name is not found. |
 
 #### Lifecycle
 

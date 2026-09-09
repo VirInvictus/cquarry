@@ -25,6 +25,22 @@ from cquarry.search import (
 # Sentinel distinguishing "cache not populated" from a cached None result.
 _UNSET = object()
 
+
+def _canonical_pref_name(name: str, names) -> str | None:
+    """Match a preference name (VL or saved search) to its stored spelling.
+
+    Case-, padding-, and surrounding-quote-insensitive: the same
+    normalization :meth:`vl_expression` and :meth:`saved_search` apply, so
+    ``" My VL "`` and ``'"My VL"'`` resolve to a KNOWN ``My VL`` instead of
+    raising as unknown after the guard already blessed them.
+    """
+    low = name.lower().strip().strip('"')
+    for n in names:
+        if n.lower().strip().strip('"') == low:
+            return n
+    return None
+
+
 # The hydrated book-row contract (spec §3.1): get_all_books() and get_book()
 # MUST select the identical column set so row shapes stay identical. They
 # drifted once — get_book() silently lacked `size` — hence the shared
@@ -1382,30 +1398,34 @@ class CalibreDB:
 
         Parses Calibre's VL search expressions (tags, vl cross-references,
         boolean operators, and all other field locations the engine supports).
-        Name matching is case-insensitive; unknown names raise ValueError.
+        Name matching is case-insensitive, with surrounding padding and
+        quotes stripped (cquarry >= 1.16, matching the lookup
+        :meth:`vl_expression` already did); unknown names raise ValueError.
         """
         vls = self.get_virtual_libraries()
-        expr = self.vl_expression(vl_name)
-        if expr is None:
+        canonical = _canonical_pref_name(vl_name, vls)
+        if canonical is None:
             raise ValueError(
                 f"Unknown virtual library: '{vl_name}'. "
                 f"Available: {', '.join(sorted(vls.keys()))}"
             )
-        return self._engine()._match_vl(
-            next(n for n in vls if n.lower() == vl_name.lower()),
-            self.all_ids(),
-            set(),
-        )
+        return self._engine()._match_vl(canonical, self.all_ids(), set())
 
     def resolve_saved_search(self, name: str) -> set[int]:
-        """Resolve a saved search name to a set of book IDs (case-insensitive)."""
+        """Resolve a saved search name to a set of book IDs.
+
+        Name matching is case-insensitive, with surrounding padding and
+        quotes stripped (cquarry >= 1.16, matching the lookup
+        :meth:`saved_search` already did); unknown names raise ValueError.
+        """
         sss = self.get_saved_searches()
-        if name.lower() not in {n.lower() for n in sss}:
+        canonical = _canonical_pref_name(name, sss)
+        if canonical is None:
             raise ValueError(
                 f"Unknown saved search: '{name}'. "
                 f"Available: {', '.join(sorted(sss.keys()))}"
             )
-        return self._engine()._match_saved_search(name, self.all_ids(), set())
+        return self._engine()._match_saved_search(canonical, self.all_ids(), set())
 
     # --- search.MetadataProvider interface ---
 

@@ -521,6 +521,19 @@ class TestIntegration(unittest.TestCase):
         self.assertEqual(self.db.resolve_vl("scifi"), {1, 2, 3})
         self.assertEqual(self.db.vl_expression("SCIFI"), 'tags:"Fic.SciFi"')
 
+    def test_resolve_vl_and_saved_search_strip_quotes_and_padding(self):
+        # A quoted or padded KNOWN name used to raise bare StopIteration /
+        # ValueError because the guard and the lookup normalized differently.
+        self.assertEqual(self.db.resolve_vl('"SciFi"'), {1, 2, 3})
+        self.assertEqual(self.db.resolve_vl("  Hugo  "), {1})
+        self.assertEqual(self.db.resolve_saved_search('"Award Winners"'), {1})
+        self.assertEqual(self.db.resolve_saved_search("  award winners  "), {1})
+        # Unknown names (quoted or not) still raise ValueError.
+        with self.assertRaises(ValueError):
+            self.db.resolve_vl('"Nope"')
+        with self.assertRaises(ValueError):
+            self.db.resolve_saved_search('"Nope"')
+
     def test_get_saved_searches(self):
         sss = self.db.get_saved_searches()
         self.assertIn("Award Winners", sss)
