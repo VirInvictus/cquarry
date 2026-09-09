@@ -169,7 +169,16 @@ class CalibreDB:
             return self._books_cache
         cur = self.conn.cursor()
         cur.execute(_BOOK_SELECT + " ORDER BY b.author_sort, b.sort")
-        books = [dict(row) for row in cur.fetchall()]
+        # First row wins per book: odd schemas carry duplicate
+        # books_ratings_link rows, and the LEFT JOIN would fan a book out
+        # into one row per duplicate link.
+        books: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        for row in cur.fetchall():
+            if row["id"] in seen_ids:
+                continue
+            seen_ids.add(row["id"])
+            books.append(dict(row))
 
         # Book UUIDs (per-book; the library-level UUID lives in library_id).
         # Ancient schemas without the column degrade to empty strings.
@@ -528,8 +537,10 @@ class CalibreDB:
 
         One ``data ⋈ books`` query; each path is built exactly as
         :meth:`get_format_path` builds it (library root from the original DB
-        location), with ``normcase(normpath())`` keys so the same file spelled
-        differently (case, redundant separators) collapses to one entry.
+        location), keyed ``normcase(normpath())``: redundant separators and
+        dot segments collapse, but ``normcase`` is the identity on POSIX, so
+        differently-CASED spellings do NOT resolve (callers needing caseless
+        lookup re-normalize, as bindery does with ``resolve().lower()``).
         Cached like the row cache: the database is read-only and the
         connection short-lived. Bindery's id resolver was the seed consumer;
         anything reverse-looking-up a file belongs here.
@@ -557,9 +568,10 @@ class CalibreDB:
     def find_book_by_path(self, path: str) -> int | None:
         """Reverse :meth:`format_path_index`: the book id owning this file.
 
-        Accepts relative or differently-cased spellings of the same file
-        (``normcase``/``normpath`` on the lookup side). Returns None when no
-        catalogued format resolves there.
+        Accepts relative spellings and redundant separators/dot segments
+        (``normcase``/``normpath`` on the lookup side); on POSIX ``normcase``
+        is the identity, so differently-cased spellings do not resolve.
+        Returns None when no catalogued format resolves there.
         """
         key = os.path.normcase(os.path.normpath(os.path.abspath(path)))
         return self.format_path_index().get(key)
@@ -726,9 +738,19 @@ class CalibreDB:
         for key in keys:
             specs.append((self._ROW_KEY_ALIASES.get(key, key), descending))
 
+        def _sort_value(row: dict[str, Any], row_key: str) -> Any:
+            val = row.get(row_key)
+            # The undefined-date sentinel sorts as dateless (the search
+            # engine already treats it that way), not as a real early date.
+            if row_key == "pubdate" and isinstance(val, str) and val.startswith(
+                ("0101-01-01", "0100-01-01")
+            ):
+                return None
+            return val
+
         def _cmp(ra: dict[str, Any], rb: dict[str, Any]) -> int:
             for row_key, desc in specs:
-                a, b = ra.get(row_key), rb.get(row_key)
+                a, b = _sort_value(ra, row_key), _sort_value(rb, row_key)
                 if a is None and b is None:
                     continue
                 if a is None:

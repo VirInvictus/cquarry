@@ -20,6 +20,7 @@ from cquarry.helpers import (
     strip_html,
     tag_rollup,
     tags_to_tree,
+    title_sort,
     to_isbn13,
 )
 
@@ -233,6 +234,40 @@ class TestHtmlSanitizer(unittest.TestCase):
     def test_empty_and_none(self):
         self.assertEqual(strip_html(None), "")
         self.assertEqual(strip_html(""), "")
+
+
+    def test_unterminated_script_block_does_not_leak(self):
+        # Malformed converter HTML with no closing tag used to leak the
+        # whole script body into the plain text.
+        self.assertEqual(strip_html("<script>alert(1)"), "")
+        self.assertEqual(
+            strip_html("<p>Hi</p><style>p{}"),
+            "Hi",
+        )
+        self.assertEqual(
+            strip_html("<p>A</p><script>x()</script><p>B</p>"), "A\nB"
+        )
+
+
+class TestTitleSortQuotePairs(unittest.TestCase):
+    """Calibre strips a wrapping quote pair before the article move
+    (ebooks/metadata.py quote_pairs); cquarry missed that until the
+    2026-09-09 sweep."""
+
+    def test_straight_quote_pair_strips_then_moves_article(self):
+        self.assertEqual(title_sort('"The Foo"'), "Foo, The")
+        self.assertEqual(title_sort("'Foo'"), "Foo")
+
+    def test_curly_pairs(self):
+        self.assertEqual(title_sort("“Foo”"), "Foo")
+        self.assertEqual(title_sort("„Foo“"), "Foo")
+
+    def test_unpaired_quote_stays(self):
+        self.assertEqual(title_sort('Foo"'), 'Foo"')
+
+    def test_plain_titles_unchanged(self):
+        self.assertEqual(title_sort("The Foo"), "Foo, The")
+        self.assertEqual(title_sort("Foo"), "Foo")
 
 
 class TestTagTree(unittest.TestCase):

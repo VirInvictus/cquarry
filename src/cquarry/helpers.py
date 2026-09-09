@@ -30,11 +30,44 @@ def db_uri_ro(path: str) -> str:
     return f"file:{quote(path)}?mode=ro"
 
 
+# Calibre's quote pairs: a title wrapped in a matching pair loses both
+# marks before the article move (ebooks/metadata.py ``quote_pairs``).
+_QUOTE_PAIRS: dict[str, tuple[str, ...]] = {
+    '"': ('"',),
+    "'": ("'",),
+    "“": ("”", "“"),
+    "”": ("”", "”"),
+    "„": ("”", "“"),
+    "‚": ("’", "‘"),
+    "’": ("’", "‘"),
+    "‘": ("’", "‘"),
+    "‹": ("›",),
+    "›": ("‹",),
+    "《": ("》",),
+    "〈": ("〉",),
+    "»": ("«", "»"),
+    "«": ("«", "»"),
+    "「": ("」",),
+    "『": ("』",),
+}
+
+
 def title_sort(title: str) -> str:
-    """Calibre's title sort key: leading articles move to the end."""
+    """Calibre's title sort key: leading articles move to the end.
+
+    A wrapping quote pair is stripped first, exactly like upstream
+    (``"The Foo"`` sorts as ``Foo, The``, not as a quote-leading title).
+    """
     if not title:
         return ""
     stripped = title.strip()
+    if stripped and stripped[0] in _QUOTE_PAIRS and stripped[-1] in _QUOTE_PAIRS[
+        stripped[0]
+    ]:
+        # Upstream removes the pair without re-stripping; a space left
+        # behind simply blocks the article match, exactly as upstream's
+        # anchored pattern does.
+        stripped = stripped[1:-1]
     lowered = stripped.lower()
     for art in ("the ", "a ", "an "):
         if lowered.startswith(art):
@@ -169,6 +202,9 @@ def strip_html(html: str | None) -> str:
     from html import unescape
 
     text = re.sub(r"(?is)<(script|style)\b.*?>.*?</\1>", " ", html)
+    # Malformed converter HTML: an unterminated script/style block leaks its
+    # whole body if only the paired-tag form is removed.
+    text = re.sub(r"(?is)<(script|style)\b[^>]*>.*\Z", " ", text)
     text = re.sub(r"(?i)<\s*(br|/p|/div|/h[1-6]|/li|/tr)\s*/?\s*>", "\n", text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = unescape(text)

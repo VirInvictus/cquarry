@@ -1459,6 +1459,65 @@ class TestCorruptPrefsAndDegradation(unittest.TestCase):
         self.assertEqual(self.db.get_identifiers(1), {})
 
 
+class TestReadSidePapercuts(unittest.TestCase):
+    """The :925 sweep list: sentinel pubdate sorts dateless, duplicate
+    ratings links do not fan rows out."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT,
+                last_modified TEXT, series_index REAL, path TEXT,
+                has_cover INTEGER
+            );
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT,
+                uncompressed_size INTEGER, name TEXT);
+            INSERT INTO books (id, title, sort, pubdate) VALUES
+                (1, 'Sentinel', 'Sentinel', '0101-01-01 00:00:00+00:00'),
+                (2, 'Real', 'Real', '1990-06-01 00:00:00+00:00');
+            INSERT INTO ratings (rating) VALUES (8);
+            -- duplicate links: the shape old schemas allow
+            INSERT INTO books_ratings_link (book, rating) VALUES (1, 1), (1, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_sentinel_pubdate_sorts_as_dateless(self):
+        # The 0101-01-01 sentinel used to sort as a real early date, so
+        # undated books came FIRST on descending pubdate.
+        rows = self.db.list_books(sort="pubdate")
+        self.assertEqual([r["id"] for r in rows], [2, 1])
+        rows = self.db.list_books(sort="pubdate", descending=True)
+        self.assertEqual([r["id"] for r in rows], [2, 1])
+
+    def test_duplicate_ratings_links_do_not_fan_out_rows(self):
+        self.assertEqual(len(self.db.get_all_books()), 2)
+        self.assertIsNone(self.db.get_all_books()[0]["rating"])
+
+
 class TestRefreshBoundary(TestReadApis):
     """refresh(): the coherence boundary for long-lived holders (the :919
     sweep repro -- caches populate at different moments, so one connection
