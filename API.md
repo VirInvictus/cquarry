@@ -273,7 +273,7 @@ print(cquarry.__version__)  # "1.14.0"
 |--------|---------|-------------|
 | `WritableCalibreDB(db_path)` | `Handle` | Read/write handle. Registers Calibre's trigger dependencies (`title_sort()`, `uuid4()`, `PYNOCASE`) before any statement; context-manager supported. |
 | `__enter__()` | `Self` | Context manager entry. |
-| `__exit__(*exc)` | `None` | Context manager exit (closes connection). |
+| `__exit__(*exc)` | `None` | Context manager exit: commits on a clean exit; rolls back when an exception is in flight (`BaseException` included, so Ctrl-C unwinds instead of committing a torn edit); commit failures propagate; then closes the connection. |
 | `close()` | `None` | Close the database connection and context. |
 | `register_udfs(conn)` | `None` | Register the trigger-required SQL functions/collations on any read-write connection. |
 | `uuid4([_arg])` | `str` | SQL-callable UUID generator matching Calibre's `uuid4()` UDF. |

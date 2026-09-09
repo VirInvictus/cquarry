@@ -254,10 +254,12 @@ class WritableCalibreDB:
     Transaction control is pinned to sqlite3's legacy mode so every mutating
     method can open ``BEGIN IMMEDIATE`` itself: take the write lock up front
     (``busy_timeout`` applies to acquisition), commit on success, roll back
-    on any error. Nothing is written unless a method returns normally. A
-    ``batch()`` block moves the commit boundary to the end of the block so a
-    multi-book, multi-field pass commits exactly once; any failure inside
-    rolls the whole pass back.
+    on any error. Nothing is written unless a method returns normally; the
+    rollback paths catch ``BaseException`` so a ``KeyboardInterrupt`` mid-set
+    unwinds instead of committing a torn edit, and the context manager's exit
+    rolls back whenever an exception is in flight. A ``batch()`` block moves
+    the commit boundary to the end of the block so a multi-book, multi-field
+    pass commits exactly once; any failure inside rolls the whole pass back.
     """
 
     def __init__(self, db_path: str):
@@ -288,9 +290,20 @@ class WritableCalibreDB:
         return self
 
     def __exit__(self, *exc) -> None:
-        with contextlib.suppress(sqlite3.Error):
-            self._commit()
-        self.close()
+        try:
+            if exc[0] is not None:
+                # An exception is unwinding (KeyboardInterrupt and friends
+                # included): nothing still uncommitted may survive. Committing
+                # through the unwind is what turned a mid-write Ctrl-C into a
+                # torn edit (a link row without its metadata_dirtied row).
+                with contextlib.suppress(sqlite3.Error):
+                    self._rollback()
+            else:
+                # A commit failure propagates, exactly as batch()'s exit does;
+                # suppressing it used to discard the transaction silently.
+                self._commit()
+        finally:
+            self.close()
 
     def _begin(self) -> None:
         """BEGIN IMMEDIATE unless inside a batch() — the batch opened it."""
@@ -405,7 +418,7 @@ class WritableCalibreDB:
             )
             self._mark_dirty(book_id)
             self._commit()
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -444,7 +457,7 @@ class WritableCalibreDB:
                 self._touch_book(book_id)
             self._commit()
             return changed
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -478,7 +491,7 @@ class WritableCalibreDB:
                 self._touch_book(book_id)
             self._commit()
             return changed
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -503,7 +516,7 @@ class WritableCalibreDB:
                 self._touch_book(book_id)
             self._commit()
             return removed
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -547,7 +560,7 @@ class WritableCalibreDB:
                 self._touch_book(book_id)
             self._commit()
             return changed
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -585,7 +598,7 @@ class WritableCalibreDB:
                 changed = True
             self._commit()
             return changed
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -705,7 +718,7 @@ class WritableCalibreDB:
             self._mark_dirty(book_id)
             self._commit()
             return True
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -782,7 +795,7 @@ class WritableCalibreDB:
             self._mark_dirty(book_id)
             self._commit()
             return True
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -822,7 +835,7 @@ class WritableCalibreDB:
             self._touch_book(book_id)
             self._commit()
             return True
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -875,7 +888,7 @@ class WritableCalibreDB:
             self._touch_book(book_id)
             self._commit()
             return True
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -949,7 +962,7 @@ class WritableCalibreDB:
             self._touch_book(book_id)
             self._commit()
             return True
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -990,7 +1003,7 @@ class WritableCalibreDB:
                 self._touch_book(book_id)
             self._commit()
             return changed
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -1018,7 +1031,7 @@ class WritableCalibreDB:
             self._touch_book(book_id)
             self._commit()
             return True
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -1086,7 +1099,7 @@ class WritableCalibreDB:
                 self._touch_book(book_id)
             self._commit()
             return changed
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -1298,7 +1311,7 @@ class WritableCalibreDB:
                 self._touch_book(book_id)
             self._commit()
             return added
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -1333,7 +1346,7 @@ class WritableCalibreDB:
             self._touch_book(book_id)
             self._commit()
             return True
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -1352,7 +1365,7 @@ class WritableCalibreDB:
                 self._touch_book(book_id)
             self._commit()
             return changed
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -1376,7 +1389,7 @@ class WritableCalibreDB:
             self._mark_dirty(book_id)
             self._commit()
             return True
-        except Exception:
+        except BaseException:
             self._rollback()
             raise
 
@@ -1567,7 +1580,7 @@ class WritableCalibreDB:
                     self.set_identifiers(book_id, clean_identifiers)
                 self._touch_book(book_id)
             return book_id
-        except Exception:
+        except BaseException:
             # Failure compensation for the filesystem half: the SQL undoes
             # itself via the batch above; the created directory goes too.
             if book_dir is not None:
@@ -1699,6 +1712,6 @@ class WritableCalibreDB:
             for table in self._ENTITY_TABLES:
                 self._prune_orphans(table)
             self._commit()
-        except Exception:
+        except BaseException:
             self._rollback()
             raise

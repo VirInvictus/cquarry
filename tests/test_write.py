@@ -441,6 +441,83 @@ END;
 )
 
 
+class TestRollbackOnBaseException(TestMetadataDirtied):
+    """The commit window: BaseException mid-write must not commit a torn edit.
+
+    Setters used to self-heal only on ``Exception`` and ``__exit__`` committed
+    unconditionally, so a ``KeyboardInterrupt`` between a setter's SQL
+    statements escaped the setter's rollback and was then committed on
+    context-manager exit: a link row without its ``metadata_dirtied`` row.
+    """
+
+    def _link_count(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM books_tags_link").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_keyboardinterrupt_mid_setter_writes_nothing(self):
+        # The interrupt lands after the link INSERT but inside _touch_book:
+        # exactly the window the old except-Exception paths left open.
+        # assertRaises stays outermost so wdb.__exit__ sees the unwind.
+        with (
+            self.assertRaises(KeyboardInterrupt),
+            WritableCalibreDB(self.db_path) as wdb,
+        ):
+            self._seed_books(wdb, 1)
+
+            def boom(book_id):
+                raise KeyboardInterrupt
+
+            wdb._mark_dirty = boom
+            wdb.add_tag(1, "Audited")
+        self.assertEqual(self._link_count(), 0)
+        self.assertEqual(self._dirtied(), [])
+
+    def test_keyboardinterrupt_inside_batch_rolls_back(self):
+        # batch()'s finally already rolled back on any exception; pinned now
+        # that the setters' own rollback paths see BaseException too.
+        with (
+            self.assertRaises(KeyboardInterrupt),
+            WritableCalibreDB(self.db_path) as wdb,
+            wdb.batch(),
+        ):
+            self._seed_books(wdb, 1)
+            wdb.add_tag(1, "Audited")
+            raise KeyboardInterrupt
+        self.assertEqual(self._link_count(), 0)
+        self.assertEqual(self._dirtied(), [])
+
+    def test_exit_rolls_back_when_an_exception_is_in_flight(self):
+        # An exception in the with-body (after a committed setter) must not
+        # be turned into a commit, and must propagate out of __exit__.
+        with (
+            self.assertRaises(RuntimeError),
+            WritableCalibreDB(self.db_path) as wdb,
+        ):
+            self._seed_books(wdb, 1)
+            wdb.add_tag(1, "Committed")  # returned normally: stands
+            wdb.conn.execute(
+                "INSERT INTO books_tags_link (book, tag) VALUES (1, 999)"
+            )  # pending, uncommitted
+            raise RuntimeError("caller gave up")
+        # The committed setter survives; the pending statement does not.
+        self.assertEqual(self._link_count(), 1)
+        self.assertEqual(self._dirtied(), [1])
+
+    def test_exit_commit_failure_propagates(self):
+        # __exit__ used to suppress sqlite3 errors, silently discarding the
+        # transaction; it now propagates like batch()'s exit does.
+        with (
+            self.assertRaises(sqlite3.ProgrammingError),
+            WritableCalibreDB(self.db_path) as wdb,
+        ):
+            self._seed_books(wdb, 1)
+            wdb.update_title(1, "Uncommittable")
+            wdb.conn.close()  # the exit commit now has nowhere to go
+
+
 class TestWriteSideExpansion(unittest.TestCase):
     """Phase-6 write-side expansion: entity setters, set_comments,
     set_custom_column, format management and remove_book."""
