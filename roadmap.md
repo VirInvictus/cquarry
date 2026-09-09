@@ -809,3 +809,221 @@ genuine gaps.*
 
 Non-goals: no CLI verbs here (frontend-only split; CalibreQuarry ships the
 verbs); no bulk/many-book APIs (the frontend loops over ids).
+
+## Phase 12: hardening backlog from the 2026-09-08 audit sweep (proposed 2026-09-08, digging only)
+
+*Context: a five-agent adversarial sweep (write module, read side, search
+parity, tests and API.md, docs), run alongside sweeps of the consumer repos;
+the leads CalibreQuarry's same-day sweep surfaced upstream were verified
+here first. No code was changed; findings were demonstrated on synthetic
+/tmp fixtures grounded against the upstream calibre clone, and the 306-item
+suite is green. The headline: this is the healthiest of the swept repos
+(the docs verdict was "spot-on where it matters", API.md is complete and
+signature-accurate, the batch machine and metadata_dirtied coverage held
+under everything), but the write module has one confirmed torn-write hole
+and one confirmed filesystem-compensation gap, and the search engine has a
+parity gap list the spec's own discipline ("documented deviations only")
+says must be either fixed or written into §5.*
+
+*Verification postscript (2026-09-08, an independent batch re-derived the
+five sharpest claims; all five CONFIRMED). Refinements: the add_book orphan
+window is already acknowledged in a shipped test comment
+(`test_add_book_nested_failure_rolls_back_together`), so that item is a
+doc/fix gap rather than an unknown. The comma assumption also lives on the
+WRITE side (`_write_pattern_a` comma-splits bare strings), so even cquarry's
+own list writes round-trip lossily and "Last, First" custom-column data hits
+it directly; `field()`'s API.md contract promises `list[str]` with no comma
+caveat. The RecursionError escape is at parse (`search.py:288-294`; the wall
+sits between 200 and 400 nesting depths), not evaluate. Two bonus findings:
+`resolve_saved_search` has the mirror bug, reporting KNOWN quoted/padded
+names as unknown ValueError, and API.md documents `__exit__` as merely
+closing the connection, never mentioning commit-on-exit.*
+
+### Write module
+
+- [ ] **Roll back instead of commit when an exception is in flight (P1).**
+      `__exit__` ignores the exception info and commits unconditionally
+      (`write.py:290-293`) while every setter's rollback catches only
+      `Exception` (e.g. `write.py:447-449`), so a KeyboardInterrupt mid-set
+      commits a torn edit: reproduced twice (link row without its
+      metadata_dirtied row; publisher change queued-but-unmarked). This
+      falsifies the class docstring's "nothing is written unless a method
+      returns normally" (`write.py:257-260`) and is the exact hole the
+      CalibreQuarry frontend hit from above. Roll back when `exc[0] is not
+      None`; catch BaseException in the setter rollback paths.
+- [ ] **Compensate the whole batch's filesystem side effects (P1).**
+      `add_book`'s directory removal is per-call (`write.py:1570-1575`);
+      when a later book in a shared `batch()` fails, the SQL rolls back but
+      earlier books' directories and files stay behind as orphans that
+      look like real books (reproduced; the shipped phase-2 import is
+      exactly this shape, and API.md:299 claims "removes the created
+      directory" without the qualification). Track directories created
+      inside the outermost batch on the instance; remove them all when the
+      batch exits failed.
+- [ ] **Harden the custom-column writers (P2).** Rating-typed custom
+      columns are stored raw (`set_custom_column(1, "myrat", 4)` stores 4
+      where Calibre's scale is 0-10, inviting a silent 2x error);
+      unknown datatypes are silently accepted and stringified; enum
+      validation is skipped when `display.enum_values` is empty
+      (`write.py:1122-1138`); and None values become the literal string
+      `'None'` in both `add_custom_column_values` (`1252-1255`) and
+      `_write_pattern_a` (`1131-1136`). A datatype dispatch table that
+      raises on unhandled types, plus `if v is None: continue`, closes all
+      of it. (The banned-label chokepoint CalibreQuarry wants belongs in
+      the same dispatch.)
+- [ ] **Make nested-batch failure stick (P2).** `batch()` records success
+      in a local `ok` and rolls back only at depth 0, so an inner batch's
+      exception, caught by the outer block, is swallowed into a commit:
+      reproduced with an inner add_tag followed by an outer catch
+      (`write.py:301-326`), contradicting CLAUDE.md's "any failure inside
+      rolls the whole pass back". Instance-level poisoned flag.
+- [ ] **Decide remove_book's filesystem story (P2).** It deletes the rows
+      but leaves the book's directory and format files on disk, untraceable
+      from the DB afterwards (`write.py:1651-1704`); API.md:313 says "Full
+      book removal" without qualification. Either a `delete_files=True`
+      flag or documented semantics, plus the CLAUDE.md carve-out (the
+      module deletes the removed book's dirty-queue entries, which the
+      blanket "never DELETE from them" wording forbids).
+- [ ] **Upstream-fidelity papercuts (P3, decide-don't-drift):**
+      `set_languages` never writes `item_order` (all rows land at 0;
+      insertion order survives only via the read side's tiebreaker);
+      `set_rating(book_id, 0)` stores a 0-rating row where Calibre maps
+      0/None to unrated (spurious Tag Browser entry); datetime custom
+      columns via `datetime` objects store naive `str()` without the UTC
+      offset; `author_sort` is stored unflipped while the docstring claims
+      upstream parity (a document-it-or-flip decision, never silent, since
+      it changes visible data); `__exit__` suppresses commit failures and
+      silently discards the transaction while the batch path propagates
+      them; `_write_pattern_a`'s no-op detection has no ORDER BY and can
+      report spurious `changed`; `add_format` accepts negative sizes.
+
+### Read side
+
+- [ ] **Stop the comma round-trip in multi-valued custom columns (P1).**
+      `load_custom_column` joins Pattern-A values with `", "` (`db.py:926`)
+      and `_custom_value` re-splits on commas (`db.py:1614-1615`), so a
+      value like `Doe, John` becomes phantom values `Doe` and `John` in
+      `field()` and the dossier, and count/exact searches lie about the
+      stored data (reproduced). Keep native lists end to end.
+- [ ] **Canonicalize before the vl lookup (P1).** `resolve_vl` guards with
+      the quote/pad-stripping `vl_expression` but then looks the raw string
+      up (`db.py:1396`, `1418`), so `"My VL"` and `" My VL "` raise bare
+      `StopIteration` for KNOWN libraries while `search('vl:"My VL"')`
+      works. Look up through the same canonicalization.
+- [ ] **Guard the preference JSON and finish schema degradation (P2).**
+      Corrupt or non-dict `virtual_libraries`/`saved_searches` rows crash
+      every read that touches them (`db.py:952`, `969`; the same hazard is
+      guarded two functions over), and on ancient schemas `get_book()` and
+      `search()` crash where `get_all_books()` degrades (`db.py:1534`,
+      `1447`, `353`). Same suppress + isinstance treatment as `_preferences`.
+- [ ] **Give long-lived holders a refresh boundary (P2).** There is no
+      invalidation API, and caches populate at different moments, so one
+      connection contradicts itself after an external write: `count_books`
+      says 1, `all_ids` says 2, search sees neither (reproduced). A
+      `refresh()` that clears the caches, or one shared snapshot boundary,
+      matters for Hermitage/Carrel holding connections.
+- [ ] **Read-side papercuts (P3):** `list_books` sorts the 0101-01-01
+      pubdate sentinel as a real date (undated books first on descending
+      pubdate; the search engine already treats it as dateless);
+      `format_path_index`/`find_book_by_path` docstrings overclaim (normcase
+      is identity on POSIX: no case folding, no symlink resolution; bindery
+      already re-normalizes with `resolve().lower()`); `strip_html` leaks
+      script bodies when the closing tag is absent (malformed converter
+      HTML is the primary input); `title_sort` misses Calibre's quote-pair
+      stripping; duplicate `books_ratings_link` rows fan out
+      `get_all_books()`.
+
+### Search parity
+
+- [ ] **Convert RecursionError to ParseException (P1).** Grammar-valid
+      adversarial queries (400-deep nesting, 5000-term chains, deep VL
+      chains) escape as raw RecursionError from parse, evaluate, and the
+      vl/saved-search matchers; upstream converts exactly this at two sites
+      (`search.py:288-294`, `761-772`, `1025-1046`; calibre
+      search_query_parser.py:383-384). One try/except RuntimeError around
+      `search()` closes the family.
+- [ ] **Close the user-visible parity gaps (P2), or write each into spec §5
+      per the "documented deviations only" rule:** empty query after a
+      location matches presence (`title:` returns all books; upstream and
+      cquarry's own `tags:` return nothing); `=..` component matching
+      doesn't strip, so the docstring's own flagship
+      `authors:=..Cj. Cherryh` shape fails; invalid boolean keywords match
+      nothing silently where upstream raises; custom rating columns
+      compare the raw 0-10 scale while builtin rating is star-scaled (same
+      library, two scales for one datatype); two-letter language codes are
+      not canonicalized (`languages:ja` misses `jpn`); the `all` sweep
+      omits `formats`, `languages`, and numeric exact-matches that
+      upstream sweeps.
+- [ ] **Smaller parity papercuts (P3):** `search:=Name` fails on an
+      existing saved search (upstream removeprefix's the `=`); bare `#N`
+      is treated as a count where upstream text-searches (undocumented
+      extension); the extended bool vocabulary leaks into identifier value
+      search; whitespace-only values count as present; `field:="Quoted"`
+      is a silent extension; date parsing is more lenient than upstream
+      and compares UTC wall clock instead of local; composite custom
+      columns silently match nothing (upstream searches them) and §5
+      doesn't say so.
+
+### Tests, API.md, docs
+
+- [ ] **Test the sharpest untested edges:** `remove_book` has zero tests
+      (dynamic-table DELETEs, orphan pruning, irreversible); the
+      BaseException commit window (the P1 above) has no witness; the
+      locked-DB snapshot fallback including WAL copy and temp cleanup is
+      untested despite being a README headline feature; `format_path_index`
+      case semantics are unpinned (the honest test fails today on POSIX);
+      six documented read APIs (`get_format_stats`, `get_identifiers`,
+      `count_books`, `get_virtual_libraries`, `get_all_tags`,
+      `get_tag_counts`) have zero tests, and `get_virtual_libraries` feeds
+      the vl cache; the `~` regex-to-ParseException path has never been
+      exercised.
+- [ ] **Deflate the inherited-test inflation:** 306 collected items are 252
+      distinct tests; `TestWriteSideExpansion`'s 13 tests re-run in four
+      subclasses with byte-identical fixtures (39 items). Convert to a
+      fixture mixin, keep the variant only where the schema genuinely
+      differs (TestAddBook). Also: dedupe the unknown-kind assertion,
+      replace the `transaction()` success twin with an identity assert,
+      lift the triple-pasted DDL, pin the `_now()` timestamp shape, fold
+      the near-tautological search integration count.
+- [ ] **Docs and hygiene:** fix the tag_rollup example at `roadmap.md:473`
+      (still teaches the pre-correction mixed rule its own ship note
+      declares dead); add the annotations deviation (no FTS
+      stemming/ranking) to spec §5 so the canonical deviation list matches
+      API.md's seven; correct "8-JOIN" to the real 6 joins + Python
+      hydration in spec.md:33 and CLAUDE.md:12; fix the 1.13.0 suite
+      baseline (255 → 258) so same-day patchnotes agree; repair the two
+      IndentationError README usage snippets; decide the fate of the
+      committed working notes (`database_report.md`, `research.md`) and the
+      stale `dist/` 1.9.0 artifacts; consider a version-pin test (six
+      copies of 1.14.0 currently agree, nothing guards it).
+
+### Promotion candidates (consumers are waiting on these)
+
+- [ ] **`find_candidate_duplicates(...)` / `add_book(..., on_duplicate=)`:**
+      duplicate screening for the creation path; CalibreQuarry already
+      hand-rolled `screen_duplicate.py`, and bindery's phase1 needs the
+      same logic next.
+- [ ] **Batch-scoped filesystem compensation:** the P1 fix above, exposed
+      so every consumer's importer stops hand-rolling rmtree accounting.
+- [ ] **`set_format(book_id, fmt, name, size)`:** sanctioned remove+add in
+      one transaction; bindery's `install_format` composes it by hand
+      today.
+- [ ] **Write-side datatype/label chokepoint:** explicit dispatch raising
+      on unhandled datatypes plus an opt-in banned-labels policy; retires
+      per-consumer copies of both.
+- [ ] **A flat export-row provider and `CalibreDB.refresh()`:** kill
+      CalibreQuarry's inline export SQL and give long-lived holders a
+      coherence boundary; `find_identifierless()` would retire Hermitage's
+      last inline predicate.
+
+### Completeness verdict from the sweep
+
+*This is the closest to complete of the swept repos, and the docs are the
+best in the workspace: API.md is complete and signature-accurate, all nine
+consumer-relied behaviors verified exactly, version synced six ways. The
+distance to "done" is small and nameable: the write module needs its two
+confirmed holes closed (commit-on-Ctrl-C, batch filesystem compensation),
+the search engine needs its recursion guard and a §5 hygiene pass over the
+newly-found deviations, and the read side needs the comma round-trip and
+the preference-JSON guards. Nothing here is architecture; it is one focused
+hardening release.*
