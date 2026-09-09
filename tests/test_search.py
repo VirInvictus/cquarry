@@ -581,6 +581,55 @@ class TestCountOperator(unittest.TestCase):
             self.s("formats:#abc")
 
 
+class TestRecursionGuard(unittest.TestCase):
+    """Grammar-valid adversarial queries escape as ParseException, never as
+    a raw RecursionError (upstream converts RuntimeError at its parse site
+    and its VL site)."""
+
+    def setUp(self):
+        self.e = _engine()
+
+    def test_deep_nesting_raises_parseexception(self):
+        with self.assertRaises(ParseException):
+            self.e.search("(" * 1000 + "tags:Fic" + ")" * 1000)
+
+    def test_long_or_chain_raises_parseexception(self):
+        with self.assertRaises(ParseException):
+            self.e.search(" OR ".join(["tags:Fic"] * 5000))
+
+    def test_deep_vl_chain_raises_parseexception(self):
+        class ChainProvider(_FakeProvider):
+            def vl_expression(self, name):
+                low = name.lower()
+                for i in range(400):
+                    if low == f"chain{i}".lower():
+                        return f"vl:chain{i + 1}"
+                return next(
+                    (v for k, v in VLS.items() if k.lower() == low), None
+                )
+
+        with self.assertRaises(ParseException):
+            SearchEngine(ChainProvider()).search("vl:chain0")
+
+    def test_deep_saved_search_chain_raises_parseexception(self):
+        class SSChainProvider(_FakeProvider):
+            def saved_search(self, name):
+                low = name.lower()
+                for i in range(400):
+                    if low == f"link{i}":
+                        return f"search:link{i + 1}"
+                return next(
+                    (v for k, v in SAVED.items() if k.lower() == low), None
+                )
+
+        with self.assertRaises(ParseException):
+            SearchEngine(SSChainProvider()).search("search:link0")
+
+    def test_normal_queries_still_work(self):
+        self.assertEqual(self.e.search("tags:Fic.Fantasy"), {1, 2})
+        self.assertEqual(self.e.search("vl:Fantasy"), {1, 2})
+
+
 class TestSlashDateSeparators(unittest.TestCase):
     def setUp(self):
         self.s = lambda q: _engine().search(q)

@@ -754,8 +754,18 @@ class SearchEngine:
         all_ids = self.provider.all_ids()
         if not expr:
             return set(all_ids)
-        tree = _Parser(self.locations).parse(expr)
-        return self._evaluate(tree, set(all_ids), set())
+        try:
+            tree = _Parser(self.locations).parse(expr)
+            return self._evaluate(tree, set(all_ids), set())
+        except RuntimeError as e:
+            # Grammar-valid adversarial queries (400-deep nesting, 5000-term
+            # chains) surface as RecursionError from the recursive-descent
+            # parser and the candidate-set evaluator; a raw RuntimeError is
+            # not API. Upstream converts exactly this at its parse site
+            # (search_query_parser.py: catch RuntimeError -> ParseException).
+            raise ParseException(
+                f"Failed to parse query, recursion limit reached: {expr!r}"
+            ) from e
 
     # -- boolean evaluation with candidate-set semantics --
     def _evaluate(self, node, candidates: set[int], seen: set[str]) -> set[int]:
@@ -1029,8 +1039,16 @@ class SearchEngine:
         expr = self.provider.vl_expression(name)
         if expr is None:
             raise ParseException(f"Unknown virtual library: {name!r}")
-        tree = _Parser(self.locations).parse(expr.strip())
-        return candidates & self._evaluate(tree, self.provider.all_ids(), seen | {key})
+        try:
+            tree = _Parser(self.locations).parse(expr.strip())
+            return candidates & self._evaluate(
+                tree, self.provider.all_ids(), seen | {key}
+            )
+        except RuntimeError as e:
+            # Deep vl: chains overflow through the recursion guard's own
+            # recursion; upstream converts at its VL site too (db/search.py:
+            # "Virtual library search is recursive").
+            raise ParseException(f"Virtual library search is recursive: {name}") from e
 
     def _match_saved_search(
         self, name: str, candidates: set[int], seen: set[str]
@@ -1042,5 +1060,12 @@ class SearchEngine:
         expr = self.provider.saved_search(name)
         if expr is None:
             raise ParseException(f"Unknown saved search: {name!r}")
-        tree = _Parser(self.locations).parse(expr.strip())
-        return candidates & self._evaluate(tree, self.provider.all_ids(), seen | {key})
+        try:
+            tree = _Parser(self.locations).parse(expr.strip())
+            return candidates & self._evaluate(
+                tree, self.provider.all_ids(), seen | {key}
+            )
+        except RuntimeError as e:
+            raise ParseException(
+                f"Saved search chain is too deep to evaluate: {name}"
+            ) from e
