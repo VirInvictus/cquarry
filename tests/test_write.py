@@ -1226,3 +1226,33 @@ class TestAddBook(TestWriteSideExpansion):
         self.assertEqual(self._count("SELECT COUNT(*) FROM authors"), 1)
         self.assertEqual(self._count("SELECT COUNT(*) FROM metadata_dirtied"), 0)
         self.assertFalse(os.path.isdir(book_dir))
+
+    def test_batch_failure_after_add_removes_earlier_directories(self):
+        # Two books in one shared batch; the second one fails on its format
+        # placement. The SQL rollback used to strand the FIRST book's
+        # directory on disk as an orphan that looks like a real book while
+        # no row points at it; the outermost failed exit now removes every
+        # directory created inside the pass.
+        kept_dir = os.path.join(self.temp_dir, "Ann Leckie", "Kept (3)")
+        doomed_dir = os.path.join(self.temp_dir, "Ann Leckie", "Doomed (4)")
+        os.makedirs(os.path.join(doomed_dir, "Doomed - Ann Leckie.epub"))
+        with self._wdb() as wdb, self.assertRaises(OSError), wdb.batch():
+            wdb.add_book("Kept", ["Ann Leckie"])
+            wdb.add_book("Doomed", ["Ann Leckie"], formats=[self._epub()])
+        self.assertEqual(self._count("SELECT COUNT(*) FROM books"), 2)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM metadata_dirtied"), 0)
+        self.assertFalse(os.path.isdir(kept_dir))
+        self.assertFalse(os.path.isdir(doomed_dir))
+
+    def test_failed_batch_never_touches_committed_books(self):
+        # Only directories created INSIDE the failed batch compensate; a
+        # book added (and committed) before the batch stays untouched.
+        with self._wdb() as wdb:
+            kept = wdb.add_book("Kept", ["Ann Leckie"])
+            with self.assertRaises(ValueError), wdb.batch():
+                wdb.add_tag(999, "Never")  # unknown book fails the pass
+        kept_dir = os.path.join(self.temp_dir, "Ann Leckie", f"Kept ({kept})")
+        self.assertTrue(os.path.isdir(kept_dir))
+        self.assertEqual(self._count("SELECT COUNT(*) FROM books"), 3)
+        # The kept add's OPF queue entry survives the later failed batch.
+        self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(3,)])

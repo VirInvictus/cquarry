@@ -280,6 +280,10 @@ class WritableCalibreDB:
         register_udfs(self.conn)
         self._dirtied_supported: bool | None = None
         self._batch_depth = 0
+        # Directories created by add_book inside the current outermost
+        # batch(); a failed outermost exit removes them all so earlier
+        # books in the pass cannot strand orphan directories behind.
+        self._batch_dirs: list[str] = []
 
     # -- lifecycle --
 
@@ -320,6 +324,14 @@ class WritableCalibreDB:
         inside rolls the whole pass back. Nesting is allowed: inner batches
         join the outer transaction. Individual setters keep their signatures
         and return values — only their commit boundary moves.
+
+        Filesystem compensation is batch-scoped too: directories created by
+        ``add_book`` inside the pass are tracked on the instance, and a
+        failed outermost exit removes every one of them (the SQL rollback
+        alone would strand the earlier books' directories as orphans that
+        look like real books no row points at). A committed batch clears the
+        registry without touching the directories; adds made OUTSIDE any
+        batch never register, so a later failed batch cannot touch them.
         """
         self._batch_depth += 1
         ok = False
@@ -337,6 +349,14 @@ class WritableCalibreDB:
                 else:
                     with contextlib.suppress(sqlite3.Error):
                         self.conn.rollback()
+                    # The SQL is undone; directories created inside the
+                    # batch would survive as orphans that look like real
+                    # books no row points at. add_book's own failure path
+                    # already removed its directory; rmtree of a missing
+                    # path is a no-op (ignore_errors).
+                    for orphan in self._batch_dirs:
+                        shutil.rmtree(orphan, ignore_errors=True)
+                self._batch_dirs.clear()
 
     def transaction(self) -> contextlib.AbstractContextManager[Self]:
         """Pre-1.7.0 name for :meth:`batch`, kept as an exact alias.
@@ -1551,6 +1571,10 @@ class WritableCalibreDB:
                 # attempt fails).
                 book_dir = os.path.join(os.path.dirname(self.db_path), rel_path)
                 os.makedirs(book_dir, exist_ok=True)
+                if self._batch_depth:
+                    # Batch-scoped compensation: the outermost batch's failed
+                    # exit removes every directory created inside the pass.
+                    self._batch_dirs.append(book_dir)
                 for fmt, src, ext, _size in fmt_entries:
                     stem = _construct_file_name(title, first_author, len(ext) + 1)
                     placed = _place_stream(
