@@ -341,7 +341,7 @@ CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publis
 CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER UNIQUE, link TEXT DEFAULT '');
 CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
 CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT UNIQUE, link TEXT DEFAULT '');
-CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER);
+CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
 CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, text TEXT, UNIQUE(book));
 CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
 CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT, UNIQUE(book, type));
@@ -797,9 +797,25 @@ class TestWriteSideExpansion(unittest.TestCase):
             self.assertTrue(wdb.set_languages(1, ["English", "fre"]))
         codes = self._sql2(
             "SELECT l.lang_code FROM books_languages_link bl "
-            "JOIN languages l ON l.id=bl.lang_code WHERE bl.book=1"
+            "JOIN languages l ON l.id=bl.lang_code WHERE bl.book=1 "
+            "ORDER BY bl.item_order"
         )
         self.assertEqual(codes, [("eng",), ("fre",)])
+
+    def test_set_languages_writes_item_order(self):
+        # Calibre orders a book's languages by item_order; the writer used
+        # to leave every row at 0 and hand ordering to the tiebreaker.
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_languages(1, ["English", "fre"]))
+            self.assertTrue(wdb.set_languages(1, ["fre", "English"]))  # reorder
+        self.assertEqual(
+            self._sql2(
+                "SELECT l.lang_code, bl.item_order FROM books_languages_link bl "
+                "JOIN languages l ON l.id=bl.lang_code WHERE bl.book=1 "
+                "ORDER BY bl.item_order"
+            ),
+            [("fre", 0), ("eng", 1)],
+        )
 
     def test_set_comments_upsert_and_clear(self):
         with self._wdb() as wdb:
@@ -983,6 +999,21 @@ class TestWriteSideExpansion(unittest.TestCase):
         self.assertEqual(
             self._sql2("SELECT COUNT(*) FROM books_custom_column_3_link"), [(1,)]
         )
+
+    def test_add_format_negative_size_raises(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.add_format(1, "EPUB", "oldtitle", -1)
+
+    def test_set_rating_zero_is_unrated_not_a_zero_row(self):
+        # Calibre maps 0 to unrated (no row); a 0-rating link used to land
+        # and show up as a spurious Tag Browser entry.
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_rating(1, 4))
+            self.assertTrue(wdb.set_rating(1, 0))  # clears
+            self.assertFalse(wdb.set_rating(1, 0))  # already unrated
+            self.assertFalse(wdb.set_rating(2, 0))
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM ratings"), [(0,)])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_ratings_link"), [(0,)])
 
     def test_add_remove_format_and_has_cover(self):
         with self._wdb() as wdb:

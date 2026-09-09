@@ -909,26 +909,36 @@ class WritableCalibreDB:
                 internal = round(float(stars) * 2)
                 if not 0 <= internal <= 10:
                     raise ValueError(f"Rating must be within 0-5 stars, got {stars}")
-                row = self.conn.execute(
-                    "SELECT id FROM ratings WHERE rating = ?", (internal,)
-                ).fetchone()
-                rid = (
-                    row["id"]
-                    if row is not None
-                    else self.conn.execute(
-                        "INSERT INTO ratings (rating) VALUES (?)", (internal,)
-                    ).lastrowid
-                )
-                if old is not None and old["rating"] == rid:
-                    self._rollback()
-                    return False
-                self.conn.execute(
-                    "DELETE FROM books_ratings_link WHERE book = ?", (book_id,)
-                )
-                self.conn.execute(
-                    "INSERT INTO books_ratings_link (book, rating) VALUES (?, ?)",
-                    (book_id, rid),
-                )
+                if internal == 0:
+                    # Calibre maps 0 to unrated: no row (upstream purges
+                    # 0-rating rows), so 0 stars clears like None.
+                    if old is None:
+                        self._rollback()
+                        return False
+                    self.conn.execute(
+                        "DELETE FROM books_ratings_link WHERE book = ?", (book_id,)
+                    )
+                else:
+                    row = self.conn.execute(
+                        "SELECT id FROM ratings WHERE rating = ?", (internal,)
+                    ).fetchone()
+                    rid = (
+                        row["id"]
+                        if row is not None
+                        else self.conn.execute(
+                            "INSERT INTO ratings (rating) VALUES (?)", (internal,)
+                        ).lastrowid
+                    )
+                    if old is not None and old["rating"] == rid:
+                        self._rollback()
+                        return False
+                    self.conn.execute(
+                        "DELETE FROM books_ratings_link WHERE book = ?", (book_id,)
+                    )
+                    self.conn.execute(
+                        "INSERT INTO books_ratings_link (book, rating) VALUES (?, ?)",
+                        (book_id, rid),
+                    )
             self._prune_orphans("ratings")
             self._touch_book(book_id)
             self._commit()
@@ -997,12 +1007,28 @@ class WritableCalibreDB:
                 self.conn.execute(
                     "DELETE FROM books_languages_link WHERE book=?", (book_id,)
                 )
-                for lid in new_ids:
-                    self.conn.execute(
-                        "INSERT INTO books_languages_link (book, lang_code) "
-                        "VALUES (?, ?)",
-                        (book_id, lid),
+                # item_order is written when the schema carries it: Calibre
+                # orders a book's languages by it, and leaving every row at
+                # 0 handed ordering to the link-id tiebreaker instead.
+                has_item_order = "item_order" in {
+                    r[1]
+                    for r in self.conn.execute(
+                        "PRAGMA table_info(books_languages_link)"
                     )
+                }
+                for pos, lid in enumerate(new_ids):
+                    if has_item_order:
+                        self.conn.execute(
+                            "INSERT INTO books_languages_link "
+                            "(book, lang_code, item_order) VALUES (?, ?, ?)",
+                            (book_id, lid, pos),
+                        )
+                    else:
+                        self.conn.execute(
+                            "INSERT INTO books_languages_link (book, lang_code) "
+                            "VALUES (?, ?)",
+                            (book_id, lid),
+                        )
             self._prune_orphans("languages")
             self._touch_book(book_id)
             self._commit()
@@ -1195,7 +1221,8 @@ class WritableCalibreDB:
             r["v"]
             for r in self.conn.execute(
                 f"SELECT c.value AS v FROM {link_table} l "
-                f"JOIN {value_table} c ON c.id = l.value WHERE l.book = ?",
+                f"JOIN {value_table} c ON c.id = l.value WHERE l.book = ? "
+                f"ORDER BY l.rowid",
                 (book_id,),
             ).fetchall()
         ]
@@ -1445,6 +1472,8 @@ class WritableCalibreDB:
         name = name.strip()
         if not fmt or not name:
             raise ValueError("Format and name must not be empty")
+        if size < 0:
+            raise ValueError(f"Format size must not be negative, got {size}")
         self._begin()
         try:
             self._require_book(book_id)
