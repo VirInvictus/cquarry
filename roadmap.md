@@ -1241,4 +1241,11 @@ lane.)*
   `phase-1-import` gained the byte-identity floor note in its duplicate
   screen; `phase-3-import` gained the Ctrl-C-safe/poisoned-batch note, the
   one-value-per-bare-string custom-column rule, and the add_book
-  double-import clause.
+  double-import clause. Second sweep (post-1.17, same day):
+  `phase-1-import` gained the `find_candidate_duplicates` primitive note
+  and the sanctioned `remove_book(delete_files=...)` removal path on its
+  approved-deletion rule; `phase-3-import` gained the native-lists
+  read-side contract on its custom-column note. Remaining 1.16/1.17
+  surfaces verified not skill-facing (search-grammar parity changes touch
+  no taught query; refresh/set_format/export_rows/find_identifierless
+  belong to Hermitage/bindery/CQ surfaces the skills do not teach).
