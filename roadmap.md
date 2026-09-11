@@ -1098,6 +1098,11 @@ closing the connection, never mentioning commit-on-exit.*
       replace the `transaction()` success twin with an identity assert,
       lift the triple-pasted DDL, pin the `_now()` timestamp shape, fold
       the near-tautological search integration count.
+      *(Shipped in 1.16.1, 2026-09-09, cad9eda: 415 collected deflated
+      to 326 distinct. The box's 306/252 figures were the sweep-time
+      count; Phase 12's own tests raised the collection before the
+      deflation landed. Ticked 2026-09-10 in the main-thread double-check
+      after the verifier caught the work shipping unticked.)*
 - [x] **Docs and hygiene:** fix the tag_rollup example at `roadmap.md:473`
       (still teaches the pre-correction mixed rule its own ship note
       declares dead); add the annotations deviation (no FTS
