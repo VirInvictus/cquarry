@@ -38,7 +38,9 @@ Coverage:
     nested references with cycle detection.
   - Numeric relational (``= > < >= <= !=`` and ``true``/``false``), date
     relational (incl. ``today``/``yesterday``/``thismonth``/``N daysago``),
-    boolean columns, tristate boolean keywords (``checked``, ``blank``, ...).
+    boolean columns with the tristate keywords (``checked``, ``blank``, ...;
+    numeric and date locations take exactly ``true``/``false`` as presence
+    words, upstream parity).
 
 Deliberate, documented deviations from Calibre (dependency-bound):
   - ``~`` regex uses the stdlib ``re`` engine, not Calibre's third-party
@@ -532,12 +534,14 @@ _SIZE_MULT = {"k": 1024.0, "m": 1024.0**2, "g": 1024.0**3}
 def _num_predicate(query: str, datatype: str):
     """Return a value predicate for a numeric query.
 
-    ``true``/``false`` test value presence/absence; otherwise a relational
-    comparison against the parsed number.
+    Exactly 'true'/'false' test value presence/absence (upstream
+    NumericSearch, DS:245-290: the wider tristate vocabulary is a bool-only
+    thing, and a non-numeric word is a ParseException, never a lenient
+    match); otherwise a relational comparison against the parsed number.
     """
-    if query in _BOOL_TRUE:
+    if query == "true":
         return lambda v: v is not None and (datatype != DT_RATING or v > 0)
-    if query in _BOOL_FALSE:
+    if query == "false":
         return lambda v: v is None or (datatype == DT_RATING and not v)
 
     op = _NUM_RELOPS[3][1]  # '='
@@ -867,7 +871,7 @@ class SearchEngine:
         self.locations = (
             set(_BUILTIN_DATATYPES)
             | set(_ALIASES)
-            | {"isbn", "search"}
+            | {"isbn", "search", "template"}
             | set(self._custom)
             | set(self._grouped)
             | {f"@{name}" for name in self._user_cats}
@@ -938,6 +942,17 @@ class SearchEngine:
 
         if location == "search":
             return self._match_saved_search(query, candidates, seen)
+
+        if location == "template":
+            # Upstream evaluates template: searches inside its GUI and
+            # raises TemplatesNotAllowed where templates are disallowed
+            # (DS:715-717); the template engine is out of scope here (spec
+            # §7), so the location is a clear parse error, never a silent
+            # empty match.
+            raise ParseException(
+                "Template searches (template:) are not supported: they "
+                "require Calibre's template engine (out of scope)"
+            )
 
         if location == "all":
             return self._match_all(query, candidates)
@@ -1021,9 +1036,11 @@ class SearchEngine:
 
     def _match_textlike(self, location, datatype, query, candidates) -> set[int]:
         kind, q = _matchkind(query)
-        # the bare true/false presence test (Calibre's contains special case)
-        if kind == CONTAINS and q.lower() in (_BOOL_TRUE | _BOOL_FALSE):
-            want = q.lower() in _BOOL_TRUE
+        # the bare true/false presence test (Calibre's contains special
+        # case, DS:849-855: exactly these two words; 'yes'/'checked' etc.
+        # stay ordinary text to match)
+        if kind == CONTAINS and q.lower() in ("true", "false"):
+            want = q.lower() == "true"
             # Whitespace-only values are absent, exactly like upstream's
             # val.strip() check.
             return {
@@ -1054,14 +1071,18 @@ class SearchEngine:
 
     def _match_date(self, location, query, candidates) -> set[int]:
         q = query.lower().strip()
-        _kind, q = _matchkind(q)
-        if q in _BOOL_FALSE:
+        # Upstream's DateSearch knows exactly 'true'/'false' as presence
+        # words and takes no match-kind prefixes (DS:153-176); everything
+        # else must parse as a date or the query is a ParseException, like
+        # upstream's "Date conversion error". (Pre-1.18 this accepted the
+        # wider tristate vocabulary and stripped ~/^/= prefixes.)
+        if q == "false":
             return {
                 b
                 for b in candidates
                 if _parse_date(self.provider.field(b, location)) is None
             }
-        if q in _BOOL_TRUE:
+        if q == "true":
             return {
                 b
                 for b in candidates

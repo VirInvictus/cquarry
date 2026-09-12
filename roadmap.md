@@ -1344,10 +1344,14 @@ candidates at :1131-1175 except where a box says promotion candidate.
   at-least-one-character idiom (..*?), so a one-character span IS
   super-quoted and only an empty span falls through -- pinned in
   tests.)*
-- [ ] **`template:` raises a clear unsupported-location ParseException**
+- [x] **`template:` raises a clear unsupported-location ParseException**
   (model: upstream TemplatesNotAllowed, DS:716-717) instead of silently
   matching nothing; record it in spec §5.
-- [ ] **§5 honesty pass**: date fields over-accept the
+  *(SHIPPED 2026-09-12 in 1.18.0: the location is registered so the
+  routing recognizes it, then raises a ParseException naming the
+  template engine as the reason; spec §5 item 3 updated. The optional
+  template-subset implementation stays shut -- no consumer demand.)*
+- [x] **§5 honesty pass**: date fields over-accept the
   blank/empty/`~`/numeric vocabulary upstream rejects (DS:153-176);
   numeric fields over-accept tristate words (DS:245-290); the
   all-sweep probes `id` and numeric-`cover` upstream excludes (DS:811)
@@ -1357,6 +1361,21 @@ candidates at :1131-1175 except where a box says promotion candidate.
   benign extensions (`lang`, `ids`, timestamp token, case-insensitive
   VL names, ignored prefs). For each: fix-to-parity or a dated §5
   entry. Never silent.
+  *(DISPOSITIONED 2026-09-12 in 1.18.0, every item pinned by tests:
+  FIXES -- dates take exactly true/false and no match-kind prefixes,
+  anything else raises like upstream's date-conversion error; numerics
+  take exactly true/false, tristate words raise like upstream's
+  non-numeric error; text fields' presence words narrowed to exact
+  true/false (yes/no are substring text again, upstream DS:849-855);
+  the all-sweep presence branch + identifiers/cover participation and
+  the id/cover probe removal shipped with B.2. DATED §5 ENTRIES (new
+  items 9-11) -- tristate bool fidelity (twostate collapse, English
+  vocabulary, upstream's False-matches-true quirk not reproduced);
+  lexer strictness (cquarry raises on garbage tails and absorbs quoted
+  queries after =-suffixed locations, upstream truncates silently);
+  the benign-extension set (`lang`, `ids`, timestamp token,
+  case-insensitive VL/SS names, `search:=` prefix, corrupt-pref
+  tolerance). The B.4 optional template implementation stays shut.)*
 - [ ] **(optional, only on consumer demand)** implement `template:`
   searches over a minimal template subset.
 

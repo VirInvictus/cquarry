@@ -903,9 +903,98 @@ class TestBooleanKeywords(unittest.TestCase):
         self.assertEqual(self.s("cover:_blank"), {3})
 
     def test_tristate_rating_keywords(self):
-        # rating uses the numeric path; checked/blank must work there too.
-        self.assertEqual(self.s("rating:checked"), {1, 2, 4})
-        self.assertEqual(self.s("rating:blank"), {3})
+        # 1.18 parity pin: numerics take exactly true/false as presence
+        # words (upstream NumericSearch, DS:245-290); the tristate
+        # vocabulary is bool-only and raises on a numeric field, like
+        # upstream's "Non-numeric value" error.
+        self.assertEqual(self.s("rating:true"), {1, 2, 4})
+        self.assertEqual(self.s("rating:false"), {3})
+        self.assertRaises(ParseException, self.s, "rating:checked")
+        self.assertRaises(ParseException, self.s, "rating:blank")
+
+
+class TestTemplateLocation(unittest.TestCase):
+    """template: is a clear parse error, never a silent empty match."""
+
+    def setUp(self):
+        self.s = lambda q: _engine().search(q)
+
+    def test_template_raises_parse_exception(self):
+        self.assertRaises(ParseException, self.s, "template:foo")
+        self.assertRaises(ParseException, self.s, "template:'#authors#@#:t:xy'")
+        # The error says why.
+        with self.assertRaises(ParseException) as cm:
+            self.s("template:foo")
+        self.assertIn("template", str(cm.exception).lower())
+
+
+class TestHonestyParity(unittest.TestCase):
+    """The 1.18 spec §5 honesty pass: each formerly lenient behavior now
+    matches upstream exactly (or raises where upstream raises)."""
+
+    def setUp(self):
+        self.s = lambda q: _engine().search(q)
+
+    def test_date_presence_is_exact_true_false(self):
+        books = {
+            1: {
+                "pubdate": "2020-01-01",
+                "title": "Dated",
+                "authors": [],
+                "tags": [],
+                "comments": "",
+                "identifiers": {},
+                "cover": False,
+            },
+            2: {
+                "pubdate": None,
+                "title": "Undated",
+                "authors": [],
+                "tags": [],
+                "comments": "",
+                "identifiers": {},
+                "cover": False,
+            },
+        }
+
+        class _DProvider:
+            def all_ids(self):
+                return set(books)
+
+            def field(self, book_id, location):
+                return books[book_id].get(location)
+
+            def vl_expression(self, name):
+                return None
+
+            def saved_search(self, name):
+                return None
+
+            def custom_locations(self):
+                return {}
+
+        engine = SearchEngine(_DProvider())
+        self.assertEqual(engine.search("pubdate:true"), {1})
+        self.assertEqual(engine.search("pubdate:false"), {2})
+
+    def test_date_vocabulary_no_longer_over_accepts(self):
+        # Upstream raises "Date conversion error" for these; cquarry used to
+        # match the tristate words against dateless books and strip ~/= as
+        # match kinds.
+        self.assertRaises(ParseException, self.s, "pubdate:blank")
+        self.assertRaises(ParseException, self.s, "pubdate:empty")
+        self.assertRaises(ParseException, self.s, "pubdate:~2020")
+        self.assertRaises(ParseException, self.s, "pubdate:notadate")
+
+    def test_text_presence_words_are_exact_true_false(self):
+        # 'yes' is ordinary substring text now, not a presence test
+        # (upstream DS:849-855 knows only true/false). No fixture title
+        # contains 'yes'.
+        self.assertEqual(self.s("title:yes"), set())
+        # 'true' itself is still the presence test on a direct location
+        # (upstream's branch runs there too): every fixture book has a title.
+        self.assertEqual(self.s("title:true"), {1, 2, 3, 4})
+        self.assertEqual(self.s("authors:true"), {1, 2, 3, 4})  # presence works
 
 
 class TestComponentMatchingTextFields(unittest.TestCase):
