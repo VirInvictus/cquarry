@@ -828,6 +828,224 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    # -- Entity-wide renames and removals (1.19; the approved C.2) --
+
+    # The many-one/many-many entity kinds a rename/removal can address.
+    # Ratings have no name to rename; languages are out of scope (no
+    # consumer names them).
+    _ENTITY_NAME_TABLES = {
+        "authors": ("authors", "name", "author"),
+        "series": ("series", "name", "series"),
+        "publishers": ("publishers", "name", "publisher"),
+        "tags": ("tags", "name", "tag"),
+    }
+
+    def rename_entity(self, kind: str, old: str, new: str) -> int:
+        """Rename an author, series, publisher, or tag everywhere.
+
+        The fix-the-misspelled-name verb (upstream ``rename_items``,
+        cache.py:2758-2862). ``old`` resolves case-insensitively; ``new``
+        is the row's new spelling. When ``new`` already exists as another
+        row (a case-variant or duplicate spelling) the rows MERGE: the old
+        row's links move to the survivor, duplicate links are dropped, and
+        the old row is deleted. Every affected book is touched and queued
+        for OPF resync. For authors, ``books.author_sort`` is recomputed
+        from the surviving authors' sort keys and each affected book's
+        on-disk layout re-lays (the directory carries the author name; the
+        fs half lands after the commit, riding the batch machinery). For a
+        series MERGE, incoming books get the next free series index
+        (``max + 1`` over the survivor's books); an in-place series rename
+        keeps every index. Returns the number of affected books; renaming
+        to the row's current spelling is an honest 0.
+
+        Raises ValueError for an unknown kind, an empty name, or when no
+        row matches ``old``.
+        """
+        table, name_col, fk = self._entity_name_table(kind)
+        old = old.strip() if isinstance(old, str) else ""
+        new = new.strip() if isinstance(new, str) else ""
+        if not old or not new:
+            raise ValueError("Entity names must not be empty")
+        affected: list[int] = []
+        with self.batch():
+            # Exact spelling wins; the NOCASE fallback (lowest id) only
+            # fires when no exact match exists, so a library with several
+            # case variants resolves deterministically.
+            row = self.conn.execute(
+                f"SELECT id, {name_col} AS name FROM {table} WHERE {name_col} = ?",
+                (old,),
+            ).fetchone()
+            if row is None:
+                row = self.conn.execute(
+                    f"SELECT id, {name_col} AS name FROM {table} "
+                    f"WHERE {name_col} = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+                    (old,),
+                ).fetchone()
+            if row is None:
+                raise ValueError(f"No {kind} row matching {old!r}")
+            if row["name"] == new:
+                return 0  # identical spelling: honest no-op
+            other = self.conn.execute(
+                f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
+                f"AND id != ?",
+                (new, row["id"]),
+            ).fetchone()
+            affected = [
+                r["book"]
+                for r in self.conn.execute(
+                    f"SELECT book FROM books_{table}_link WHERE {fk} = ? ORDER BY book",
+                    (row["id"],),
+                )
+            ]
+            merge = other is not None
+            if merge:
+                survivor = other["id"]
+                # Drop links that would collide with the survivor's
+                # UNIQUE(book, fk), then move the rest.
+                self.conn.execute(
+                    f"DELETE FROM books_{table}_link WHERE {fk} = ? AND book IN "
+                    f"(SELECT book FROM books_{table}_link WHERE {fk} = ?)",
+                    (row["id"], survivor),
+                )
+                self.conn.execute(
+                    f"UPDATE OR IGNORE books_{table}_link SET {fk} = ? WHERE {fk} = ?",
+                    (survivor, row["id"]),
+                )
+                self.conn.execute(f"DELETE FROM {table} WHERE id = ?", (row["id"],))
+                if kind == "series":
+                    for book_id in affected:
+                        # Next free index over the survivor's OTHER books
+                        # (the moving book's stale index must not count).
+                        nxt = self.conn.execute(
+                            "SELECT COALESCE(MAX(series_index), 0) + 1 AS nxt "
+                            "FROM books_series_link l JOIN books b ON b.id = l.book "
+                            "WHERE l.series = ? AND b.id != ?",
+                            (survivor, book_id),
+                        ).fetchone()["nxt"]
+                        self.conn.execute(
+                            "UPDATE books SET series_index = ? WHERE id = ?",
+                            (nxt, book_id),
+                        )
+            else:
+                self.conn.execute(
+                    f"UPDATE {table} SET {name_col} = ? WHERE id = ?",
+                    (new, row["id"]),
+                )
+            for book_id in affected:
+                if kind == "authors":
+                    # Recompute the book's author_sort from the surviving
+                    # authors' sort keys, exactly like set_authors does.
+                    sorts = [
+                        r["s"] or r["name"]
+                        for r in self.conn.execute(
+                            "SELECT a.sort AS s, a.name AS name "
+                            "FROM books_authors_link bal JOIN authors a "
+                            "ON a.id = bal.author WHERE bal.book = ? "
+                            "ORDER BY bal.id",
+                            (book_id,),
+                        )
+                    ]
+                    self.conn.execute(
+                        "UPDATE books SET author_sort = ? WHERE id = ?",
+                        (" & ".join(sorts), book_id),
+                    )
+                self._touch_book(book_id)
+            if kind == "authors":
+                for book_id in affected:
+                    title = self.conn.execute(
+                        "SELECT title FROM books WHERE id = ?", (book_id,)
+                    ).fetchone()
+                    self._relayout_book_path(
+                        book_id,
+                        title["title"] or "",
+                        self._first_author_name(book_id),
+                    )
+        return len(affected)
+
+    def remove_entity_everywhere(self, kind: str, name: str) -> int:
+        """Remove an author, series, publisher, or tag from every book.
+
+        Resolves ``name`` case-insensitively, deletes the entity's links
+        (the fkc_delete_on_* order), then the row itself, and touches +
+        queues OPF resync for every affected book. For a series the
+        affected books' ``series_index`` is nulled too, matching
+        :meth:`set_series`'s clear semantics; for authors the books'
+        ``author_sort`` is recomputed from the remaining authors and the
+        on-disk layout re-lays (fs after the commit). Returns the number
+        of affected books; a name matching no row is an honest 0.
+        """
+        table, name_col, fk = self._entity_name_table(kind)
+        name = name.strip() if isinstance(name, str) else ""
+        if not name:
+            raise ValueError("Entity name must not be empty")
+        affected: list[int] = []
+        with self.batch():
+            row = self.conn.execute(
+                f"SELECT id FROM {table} WHERE {name_col} = ?", (name,)
+            ).fetchone()
+            if row is None:
+                row = self.conn.execute(
+                    f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
+                    f"ORDER BY id LIMIT 1",
+                    (name,),
+                ).fetchone()
+            if row is None:
+                return 0
+            affected = [
+                r["book"]
+                for r in self.conn.execute(
+                    f"SELECT book FROM books_{table}_link WHERE {fk} = ? ORDER BY book",
+                    (row["id"],),
+                )
+            ]
+            self.conn.execute(
+                f"DELETE FROM books_{table}_link WHERE {fk} = ?", (row["id"],)
+            )
+            if kind == "series" and affected:
+                self.conn.execute(
+                    f"UPDATE books SET series_index = NULL WHERE id IN "
+                    f"({','.join('?' * len(affected))})",
+                    affected,
+                )
+            self.conn.execute(f"DELETE FROM {table} WHERE id = ?", (row["id"],))
+            for book_id in affected:
+                if kind == "authors":
+                    sorts = [
+                        r["s"] or r["name"]
+                        for r in self.conn.execute(
+                            "SELECT a.sort AS s, a.name AS name "
+                            "FROM books_authors_link bal JOIN authors a "
+                            "ON a.id = bal.author WHERE bal.book = ? "
+                            "ORDER BY bal.id",
+                            (book_id,),
+                        )
+                    ]
+                    self.conn.execute(
+                        "UPDATE books SET author_sort = ? WHERE id = ?",
+                        (" & ".join(sorts), book_id),
+                    )
+                self._touch_book(book_id)
+            if kind == "authors":
+                for book_id in affected:
+                    title = self.conn.execute(
+                        "SELECT title FROM books WHERE id = ?", (book_id,)
+                    ).fetchone()
+                    self._relayout_book_path(
+                        book_id,
+                        title["title"] or "",
+                        self._first_author_name(book_id),
+                    )
+        return len(affected)
+
+    def _entity_name_table(self, kind: str) -> tuple[str, str, str]:
+        kind = (kind or "").strip().lower()
+        if kind not in self._ENTITY_NAME_TABLES:
+            raise ValueError(
+                f"Unknown entity kind {kind!r}. Available: "
+                + ", ".join(sorted(self._ENTITY_NAME_TABLES))
+            )
+        return self._ENTITY_NAME_TABLES[kind]
+
     def set_series(
         self, book_id: int, name: str | None, index: float | None = None
     ) -> bool:

@@ -1424,10 +1424,18 @@ candidates at :1131-1175 except where a box says promotion candidate.
   fileless-resurrection the design forbids. The rollback path now
   clears both deferred queues (removals + re-lays); pinned by
   test_failed_batch_drops_pending_removals_too.
-- [ ] **Promotion candidate: `rename_entity(field, old, new)` +
+- [x] **Promotion candidate: `rename_entity(field, old, new)` +
   `remove_entity_everywhere`** (upstream `cache.py:2758-2862`): author
   renames recompute sorts and re-lay paths; series renumber; case-change
   merges. M.
+  *(APPROVED 2026-09-12 (Brandon, "four loop-closers") and SHIPPED in
+  1.19.0: rename_entity + remove_entity_everywhere over
+  authors/series/publishers/tags; exact-spelling-first resolution with a
+  NOCASE fallback; merges drop colliding links against the survivor's
+  UNIQUE(book, fk) and delete the old row; author merges recompute
+  author_sort and re-lay paths post-commit; series merges renumber
+  incoming books to max+1 over the survivor's other books; series
+  removal nulls series_index like set_series(None).)*
 - [ ] **Promotion candidate: `set_cover(book_id, data)` /
   `remove_cover(book_id)`** (upstream `cache.py:2237-2253`,
   `backend.py:1962-1992`). S.

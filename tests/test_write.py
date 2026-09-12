@@ -2077,3 +2077,163 @@ class TestFtsDirtying(unittest.TestCase):
             )
         finally:
             conn.close()
+
+
+class TestEntityRename(_WriteSideFixture, unittest.TestCase):
+    """C.2: rename_entity / remove_entity_everywhere (1.19), against the
+    trigger-hazard schema (the insert/update triggers call title_sort and
+    uuid4, so setUp must register the UDFs before seeding)."""
+
+    SCHEMA = _ADD_BOOK_SCHEMA
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)
+        conn.executescript(self.SCHEMA)
+        conn.execute(
+            "INSERT INTO books (id, title, sort, author_sort) "
+            "VALUES (1, 'Old Title', 'Old Title', 'Writer, Zed A.')"
+        )
+        conn.execute("INSERT INTO books (id, title, sort) VALUES (2, 'Other', 'Other')")
+        conn.execute(
+            "INSERT INTO authors VALUES (1, 'Zed A. Writer', 'Writer, Zed A.', '')"
+        )
+        conn.executemany(
+            "INSERT INTO books_authors_link (book, author) VALUES (?, 1)", [(1,), (2,)]
+        )
+        conn.commit()
+        conn.close()
+
+    def _exec(self, sql, params=()):
+        # Seed helper: commit + trigger UDFs (series_insert_trg calls
+        # title_sort), unlike the read-only _sql2.
+        conn = sqlite3.connect(self.db_path)
+        try:
+            register_udfs(conn)
+            conn.execute(sql, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _link(self, book, table, col, item_id):
+        self._exec(
+            f"INSERT INTO books_{table}_link (book, {col}) VALUES (?, ?)",
+            (book, item_id),
+        )
+
+    def _dirtied(self):
+        return sorted(r[0] for r in self._sql2("SELECT book FROM metadata_dirtied"))
+
+    def test_rename_author_in_place_recomputes_and_relays(self):
+        self._exec(
+            "INSERT INTO authors (id, name, sort) VALUES (2, 'Ann Leckie', 'Leckie, Ann')"
+        )
+        self._exec("INSERT INTO books_authors_link (book, author) VALUES (1, 2)")
+        self._exec("UPDATE books SET path = 'Zed A. Writer/Old Title (1)' WHERE id = 1")
+        book_dir = os.path.join(self.temp_dir, "Zed A. Writer", "Old Title (1)")
+        os.makedirs(book_dir)
+        with open(os.path.join(book_dir, "cover.jpg"), "wb") as f:
+            f.write(b"C")
+        with self._wdb() as wdb:
+            n = wdb.rename_entity("authors", "Zed A. Writer", "Zed A. Writer Junior")
+        self.assertEqual(n, 2)  # both seeded books carry the author
+        self.assertEqual(
+            self._sql2("SELECT name, sort FROM authors WHERE id = 1"),
+            [("Zed A. Writer Junior", "Writer, Zed A.")],
+        )
+        # author_sort recomputed from the surviving per-author sort keys.
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 1")[0][0],
+            "Writer, Zed A. & Leckie, Ann",
+        )
+        self.assertEqual(self._dirtied(), [1, 2])
+        # The on-disk layout re-laid to the new author name.
+        self.assertFalse(os.path.exists(book_dir))
+        self.assertTrue(
+            os.path.isdir(
+                os.path.join(self.temp_dir, "Zed A. Writer Junior", "Old Title (1)")
+            )
+        )
+
+    def test_rename_author_case_merge_drops_duplicate_links(self):
+        self._exec(
+            "INSERT INTO authors (id, name, sort) VALUES (2, 'zed a. writer', '')"
+        )
+        self._link(2, "authors", "author", 2)  # book 2 carries BOTH spellings
+        with self._wdb() as wdb:
+            n = wdb.rename_entity("authors", "zed a. writer", "Zed A. Writer")
+        self.assertEqual(n, 1)  # book 2 changed: its duplicate-spelling
+        # link (the one that would collide with the survivor's UNIQUE) was
+        # dropped, leaving the book linked to the single surviving row.
+        self.assertEqual(
+            self._sql2("SELECT COUNT(*) FROM authors WHERE id = 2")[0][0], 0
+        )
+        self.assertEqual(
+            self._sql2("SELECT author FROM books_authors_link WHERE book = 2"),
+            [(1,)],
+        )
+
+    def test_rename_series_merge_renumbers_incoming_books(self):
+        self._exec(
+            "INSERT INTO series (id, name) VALUES (1, 'Dune Saga'), (2, 'dune saga')"
+        )
+        self._exec("UPDATE books SET series_index = 1 WHERE id = 1")
+        self._exec("UPDATE books SET series_index = 5 WHERE id = 2")
+        self._link(1, "series", "series", 1)
+        self._link(2, "series", "series", 2)
+        with self._wdb() as wdb:
+            n = wdb.rename_entity("series", "dune saga", "Dune Saga")
+        self.assertEqual(n, 1)  # book 2 moved onto the survivor
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM series")[0][0], 1)
+        # Incoming book renumbers to max + 1 over the survivor's books.
+        self.assertEqual(
+            self._sql2("SELECT series_index FROM books WHERE id = 2")[0][0], 2.0
+        )
+        self.assertEqual(self._dirtied(), [2])
+
+    def test_remove_entity_everywhere_author_relays_and_recomputes(self):
+        self._exec("UPDATE books SET path = 'Zed A. Writer/Old Title (1)' WHERE id = 1")
+        book_dir = os.path.join(self.temp_dir, "Zed A. Writer", "Old Title (1)")
+        os.makedirs(book_dir)
+        with self._wdb() as wdb:
+            n = wdb.remove_entity_everywhere("authors", "Zed A. Writer")
+        self.assertEqual(n, 2)
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM authors")[0][0], 0)
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_authors_link")[0][0], 0)
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 1")[0][0], ""
+        )
+        self.assertEqual(self._dirtied(), [1, 2])
+        # Authorless path component falls back to Unknown.
+        self.assertTrue(
+            os.path.isdir(os.path.join(self.temp_dir, "Unknown", "Old Title (1)"))
+        )
+
+    def test_remove_entity_everywhere_series_nulls_indices(self):
+        self._exec("INSERT INTO series (id, name) VALUES (1, 'Dune Saga')")
+        self._exec("UPDATE books SET series_index = 3 WHERE id = 1")
+        self._link(1, "series", "series", 1)
+        self._link(2, "series", "series", 1)
+        with self._wdb() as wdb:
+            n = wdb.remove_entity_everywhere("series", "Dune Saga")
+        self.assertEqual(n, 2)
+        self.assertEqual(
+            self._sql2("SELECT series_index FROM books WHERE id IN (1, 2)"),
+            [(None,), (None,)],
+        )
+        self.assertEqual(self._dirtied(), [1, 2])
+
+    def test_honest_noops_and_validation(self):
+        with self._wdb() as wdb:
+            self.assertEqual(
+                wdb.rename_entity("authors", "Zed A. Writer", "Zed A. Writer"), 0
+            )
+            self.assertEqual(wdb.remove_entity_everywhere("tags", "Nobody"), 0)
+            with self.assertRaises(ValueError):
+                wdb.rename_entity("ratings", "a", "b")  # not a name table
+            with self.assertRaises(ValueError):
+                wdb.rename_entity("authors", "Missing", "Whatever")
+            with self.assertRaises(ValueError):
+                wdb.remove_entity_everywhere("authors", "  ")

@@ -293,6 +293,8 @@ print(cquarry.__version__)  # "1.18.0"
 | `set_identifiers(book_id, pairs)` | `int` | Batch upsert identifiers. Returns count of changed entries. |
 | `clear_identifier(book_id, id_type)` | `bool` | Delete one identifier pair (since 1.9.0). The type is normalized exactly like `set_identifier` (stripped, lowercased; empty raises); a pair already absent is an honest no-op. Deletion queues OPF regeneration. |
 | `set_authors(book_id, names)` | `bool` | Replace the author list; recomputes `books.author_sort` from per-author sort keys (" & "-joined); prunes orphans. Re-lays the on-disk layout when the first author changes (since 1.18.0). |
+| `rename_entity(kind, old, new)` | `int` | Rename an author/series/publisher/tag everywhere (since 1.19.0): case-variant spellings merge (colliding links dropped, old row deleted), author merges recompute `author_sort` and re-lay paths, series merges renumber incoming books. Returns the affected book count. |
+| `remove_entity_everywhere(kind, name)` | `int` | Remove an author/series/publisher/tag from every book (since 1.19.0): links first (the fkc order), then the row; series removal also nulls `series_index`. Returns the affected book count; an unknown name is an honest 0. |
 | `set_series(book_id, name, index=None)` | `bool` | Assign/clear series + `series_index` (defaults 1.0 fresh, preserves on reassign). |
 | `set_publisher(book_id, name)` | `bool` | Replace/clear publisher; case-insensitive match; orphans pruned. |
 | `set_rating(book_id, stars)` | `bool` | 0-5 stars stored as x2; UNIQUE(rating) rows deduplicated via find-or-create. |
