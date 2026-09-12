@@ -9,6 +9,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -2515,3 +2516,73 @@ class TestOriginalFormat(unittest.TestCase):
             return [tuple(r) for r in conn.execute(sql).fetchall()]
         finally:
             conn.close()
+
+
+class TestTrashLifecycle(unittest.TestCase):
+    """C.5: list_trash / empty_trash / expire_trash (1.20)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+        conn.commit()
+        conn.close()
+        self.trash = os.path.join(self.temp_dir, ".caltrash")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _entry(self, category, book_id, files=("x.epub",), age_seconds=0.0):
+        path = os.path.join(self.trash, category, str(book_id))
+        os.makedirs(path, exist_ok=True)
+        for name in files:
+            with open(os.path.join(path, name), "wb") as f:
+                f.write(b"D")
+        old = time.time() - age_seconds
+        os.utime(path, (old, old))
+
+    def _wdb(self):
+        return WritableCalibreDB(self.db_path)
+
+    def test_empty_trash_removes_everything_and_recreates(self):
+        self._entry("b", 3)
+        self._entry("b", 4, files=("a.epub", "cover.jpg"))
+        self._entry("f", 2, files=("EPUB",))
+        with self._wdb() as wdb:
+            n = wdb.empty_trash()
+        self.assertEqual(n, 3)
+        self.assertEqual(wdb.list_trash(), [])
+        self.assertTrue(os.path.isdir(os.path.join(self.trash, "b")))
+        self.assertTrue(os.path.isdir(os.path.join(self.trash, "f")))
+
+    def test_list_trash_inventories_both_categories(self):
+        self._entry("b", 7, files=("One - X.epub", "cover.jpg"))
+        self._entry("f", 3, files=("EPUB", "MOBI"))
+        with self._wdb() as wdb:
+            entries = wdb.list_trash()
+        by = {(e["category"], e["book_id"]): e for e in entries}
+        self.assertEqual(by[("book", 7)]["files"], ["One - X.epub", "cover.jpg"])
+        self.assertEqual(by[("format", 3)]["files"], ["EPUB", "MOBI"])
+
+    def test_expire_trash_honors_age(self):
+        self._entry("b", 1, age_seconds=40 * 86400)  # older than 14 days
+        self._entry("b", 2, age_seconds=1 * 86400)  # fresh enough
+        with self._wdb() as wdb:
+            n = wdb.expire_trash()  # upstream's 14-day default
+        self.assertEqual(n, 1)
+        self.assertEqual([e["book_id"] for e in wdb.list_trash()], [2])
+
+    def test_expire_trash_timedelta_and_zero_meaning(self):
+        self._entry("b", 1, age_seconds=3600)
+        with self._wdb() as wdb:
+            n = wdb.expire_trash(timedelta(days=30))
+        self.assertEqual(n, 0)  # an hour old is far under 30 days
+        n = wdb.expire_trash(0)  # <= 0 expires everything, like upstream
+        self.assertEqual(n, 1)
+
+    def test_missing_trash_is_an_honest_zero(self):
+        with self._wdb() as wdb:
+            self.assertEqual(wdb.empty_trash(), 0)
+            self.assertEqual(wdb.expire_trash(), 0)
+            self.assertEqual(wdb.list_trash(), [])

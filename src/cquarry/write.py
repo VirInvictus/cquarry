@@ -39,7 +39,7 @@ import shutil
 import sqlite3
 import uuid as _uuid
 from collections.abc import Callable, Generator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Self
 
 from cquarry.helpers import sniff_image_format, title_sort
@@ -2101,6 +2101,103 @@ class WritableCalibreDB:
 
             self._pending_fs_ops.append(_remove)
         return changed
+
+    # -- Trash lifecycle (1.20; the approved C.5) --
+
+    # Upstream's trash categories: 'b' holds trashed book directories,
+    # 'f' trashed formats. remove_book(delete_files="trash") writes 'b'.
+    _TRASH_CATEGORIES = ("b", "f")
+    _TRASH_DEFAULT_EXPIRY_SECONDS = 14 * 86400  # upstream defs.py default
+
+    def _trash_root(self) -> str:
+        return os.path.join(os.path.dirname(self.db_path), self._TRASH_DIR_NAME)
+
+    def _trash_entries(self, category: str) -> list[tuple[str, float]]:
+        """The ``<book_id>, mtime`` entries of one trash category."""
+        base = os.path.join(self._trash_root(), category)
+        out: list[tuple[str, float]] = []
+        if not os.path.isdir(base):
+            return out
+        for name in sorted(os.listdir(base)):
+            path = os.path.join(base, name)
+            if os.path.isdir(path):
+                try:
+                    mtime = os.stat(path).st_mtime
+                except OSError:
+                    mtime = 0.0
+                out.append((name, mtime))
+        return out
+
+    def list_trash(self) -> list[dict[str, Any]]:
+        """Inventory the library's trash: one dict per entry.
+
+        ``{category: "book" | "format", book_id, mtime, files}`` sorted by
+        category then id -- the read that makes
+        :meth:`expire_trash`/:meth:`empty_trash` reviewable before they
+        run. Upstream's trash layout (``.caltrash/b/<id>/`` for books,
+        ``.caltrash/f/<id>/`` for formats); a missing trash dir is an
+        empty list."""
+        out: list[dict[str, Any]] = []
+        for category, label in zip(self._TRASH_CATEGORIES, ("book", "format")):
+            base = os.path.join(self._trash_root(), category)
+            for name, mtime in self._trash_entries(category):
+                files: list[str] = []
+                path = os.path.join(base, name)
+                for root, _dirs, names in os.walk(path):
+                    files.extend(names)
+                out.append(
+                    {
+                        "category": label,
+                        "book_id": int(name) if name.isdigit() else name,
+                        "mtime": mtime,
+                        "files": sorted(files),
+                    }
+                )
+        return out
+
+    def empty_trash(self) -> int:
+        """Permanently delete everything in the library's trash.
+
+        Upstream's ``clear_trash_dir``: the ``.caltrash`` directory is
+        removed whole and recreated empty (``b/`` and ``f/``). This is the
+        irreversible half of ``remove_book(delete_files="trash")`` --
+        call :meth:`list_trash` first if review is wanted. Returns the
+        number of trash entries removed."""
+        root = self._trash_root()
+        count = len(self._trash_entries("b")) + len(self._trash_entries("f"))
+        if os.path.isdir(root):
+            shutil.rmtree(root, ignore_errors=False)
+        for category in self._TRASH_CATEGORIES:
+            os.makedirs(os.path.join(root, category), exist_ok=True)
+        return count
+
+    def expire_trash(self, older_than: float | timedelta | None = None) -> int:
+        """Delete trash entries older than ``older_than`` seconds.
+
+        Mirrors upstream's ``expire_old_trash`` mtime rule: an entry goes
+        when its modification time plus the age is past. The default is
+        upstream's 14 days; a :class:`timedelta` is accepted; a value
+        ``<= 0`` expires everything (that is :meth:`empty_trash`'s job,
+        but honored here for parity). Returns the number of entries
+        removed."""
+        if older_than is None:
+            age = float(self._TRASH_DEFAULT_EXPIRY_SECONDS)
+        elif isinstance(older_than, timedelta):
+            age = older_than.total_seconds()
+        else:
+            age = float(older_than)
+        now = datetime.now(UTC).timestamp()
+        removed = 0
+        root = self._trash_root()
+        for category in self._TRASH_CATEGORIES:
+            base = os.path.join(root, category)
+            for name, mtime in self._trash_entries(category):
+                if age <= 0 or mtime + age <= now:
+                    shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+                    removed += 1
+        for category in self._TRASH_CATEGORIES:
+            os.makedirs(os.path.join(root, category), exist_ok=True)
+        return removed
 
     # -- Original-format save/restore (1.19; the approved C.8) --
 
