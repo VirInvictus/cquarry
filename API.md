@@ -80,9 +80,12 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_dirtied_books()` | `list[int]` | Book ids queued for OPF resync in `metadata_dirtied`; i.e. what Calibre will regenerate/push at its next startup. Sorted, deduplicated; read-only (clearing the queue remains Calibre's job). |
 | `get_annotations_dirtied_books()` | `list[int]` | The annotations sibling queue (`annotations_dirtied`): ids whose highlights/bookmarks Calibre will push to devices. Same read-only contract. |
 | `get_feeds()` | `list[dict[str, Any]]` | Registered news-download recipes from the `feeds` table: `[{id, title, script}]`. |
+| `get_book_text(book_id, fmt)` | `dict[str, Any] \| None` | One format's extracted plain text from the `full-text-search.db` sidecar: the full `books_text` row (`searchable_text`, `format_hash`, `err_msg`, ...). `fmt` is case-insensitive; None when the sidecar is absent or the pair has no row. The FTS5 index tables are never touched (Calibre-only custom tokenizer). |
+| `get_text_extractions(book_id=None)` | `list[dict[str, Any]]` | Bulk extraction-status rows WITHOUT the texts (`searchable_text` omitted; it can be megabytes per format): `err_msg` audit and format-hash change detection. `[]` when the sidecar is absent. |
+| `search_book_text(query, *, fmt=None, ids=None)` | `dict[int, set[str]]` | Python-side content search over the sidecar's `searchable_text`: case- and accent-folded substring match returning `{book_id: {FORMAT, ...}}`. Linear scan by design (no FTS5 outside Calibre). Empty query raises `ValueError`. |
 | `get_tag_browser_counts()` | `dict[str, list[dict[str, Any]]]` | Calibre's own browse-sidebar rollups from the `tag_browser_*` views: `{category: [{id, name, count, avg_rating, sort}]}`, custom columns rekeyed to `#label`. The `filtered_*` variants (GUI-state `books_list_filter()`) are skipped. |
 
-All eight return `[]`/`{}` on databases whose schema predates the tables.
+All of these degrade to `[]`/`{}` on databases whose schema predates the tables; the FTS sidecar reads likewise when `full-text-search.db` is absent.
 
 #### Search and virtual library resolution
 

@@ -121,6 +121,11 @@ class CalibreDB:
         self._prefs_cache: dict[str, Any] | None = None
         self._cc_schema_cache: dict[str, bool] | None = None
         self._annotations_text_cache: dict[int, str] | None = None
+        # FTS sidecar (full-text-search.db) connection state; refresh()
+        # drops it so sidecar reads re-open against current data.
+        self._fts_conn: sqlite3.Connection | None = None
+        self._fts_tmp_path: str | None = None
+        self._fts_missing = False
 
     def refresh(self) -> None:
         """Drop every cache so subsequent reads re-query the database.
@@ -130,9 +135,18 @@ class CalibreDB:
         populate at different moments, so one connection can contradict
         itself, with ``count_books`` answering from one snapshot and
         ``search`` from another. One ``refresh()`` call clears everything,
-        the built search engine included; the next read repopulates from
-        current database state.
+        the built search engine and the FTS-sidecar connection included; the
+        next read repopulates from current database state.
         """
+        if self._fts_conn is not None:
+            self._fts_conn.close()
+        self._fts_conn = None
+        self._fts_missing = False
+        if self._fts_tmp_path:
+            with contextlib.suppress(OSError):
+                for suffix in ("", "-wal", "-shm"):
+                    os.unlink(self._fts_tmp_path + suffix)
+            self._fts_tmp_path = None
         self._init_caches()
 
     def _open(self, db_path: str) -> sqlite3.Connection:
@@ -164,11 +178,19 @@ class CalibreDB:
 
     def close(self) -> None:
         self.conn.close()
+        if self._fts_conn is not None:
+            self._fts_conn.close()
+            self._fts_conn = None
         if self._tmp_path:
             with contextlib.suppress(OSError):
                 for suffix in ("", "-wal", "-shm"):
                     os.unlink(self._tmp_path + suffix)
             self._tmp_path = None
+        if self._fts_tmp_path:
+            with contextlib.suppress(OSError):
+                for suffix in ("", "-wal", "-shm"):
+                    os.unlink(self._fts_tmp_path + suffix)
+            self._fts_tmp_path = None
 
     def __enter__(self) -> Self:
         return self
@@ -1346,6 +1368,160 @@ class CalibreDB:
             return [dict(row) for row in cur.fetchall()]
         except sqlite3.OperationalError:
             return []
+
+    # --- FTS sidecar reads (full-text-search.db, cquarry >= 1.18) ---
+
+    def _fts_connect(self) -> sqlite3.Connection | None:
+        """Open the library's full-text-search.db read-only (cached).
+
+        Same lock-escape as metadata.db: a locked sidecar is snapshot-copied
+        (with ``-wal``/``-shm``) and read from the copy. A missing sidecar,
+        or one without the plain ``books_text`` table, is cached as absent so
+        every sidecar read degrades to empty instead of erroring. Only the
+        plain table is readable here: the FTS5 index tables tokenize through
+        Calibre's custom ``calibre`` tokenizer, which does not exist in the
+        stdlib sqlite build.
+        """
+        if self._fts_missing:
+            return None
+        if self._fts_conn is not None:
+            return self._fts_conn
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(self.db_path)), "full-text-search.db"
+        )
+        if not os.path.exists(path):
+            self._fts_missing = True
+            return None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(db_uri_ro(path), uri=True)
+            conn.row_factory = sqlite3.Row
+            conn.execute("SELECT 1 FROM books_text LIMIT 1")
+            self._fts_conn = conn
+            return conn
+        except sqlite3.OperationalError as e:
+            if conn is not None:
+                conn.close()
+            if "locked" not in str(e).lower():
+                # Created but never initialized (no books_text): absent.
+                self._fts_missing = True
+                return None
+        print(
+            "NOTE: full-text-search.db is locked (Calibre is running). "
+            "Reading from a snapshot copy.",
+            file=sys.stderr,
+        )
+        fd, tmp = tempfile.mkstemp(suffix=".db", prefix="cquarry_fts_")
+        os.close(fd)
+        shutil.copy2(path, tmp)
+        for suffix in ("-wal", "-shm"):
+            src = path + suffix
+            if os.path.exists(src):
+                shutil.copy2(src, tmp + suffix)
+        self._fts_tmp_path = tmp
+        self._fts_conn = sqlite3.connect(db_uri_ro(tmp), uri=True)
+        self._fts_conn.row_factory = sqlite3.Row
+        return self._fts_conn
+
+    def get_book_text(self, book_id: int, fmt: str) -> dict[str, Any] | None:
+        """One format's extracted plain text from ``full-text-search.db``.
+
+        Returns the sidecar's plain ``books_text`` row (``book``, ``format``,
+        ``format_size``, ``format_hash``, ``searchable_text``, ``text_size``,
+        ``text_hash``, ``err_msg``, ``timestamp``) or None when the sidecar
+        is absent or the (book, format) pair has no row. ``fmt`` is
+        case-insensitive. The text is what Calibre extracted for its reader
+        search; ``err_msg`` is non-empty when extraction failed (see
+        :func:`cquarry.integrity.find_failed_text_extraction`). No FTS5
+        machinery is involved: the index tables are unqueryable outside
+        Calibre, the plain table is all there is here.
+        """
+        conn = self._fts_connect()
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT book, format, format_size, format_hash, searchable_text, "
+                "text_size, text_hash, err_msg, timestamp "
+                "FROM books_text WHERE book = ? AND upper(format) = upper(?)",
+                (book_id, fmt),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None  # sidecar lost its table mid-session: degrade
+        return dict(row) if row is not None else None
+
+    def get_text_extractions(self, book_id: int | None = None) -> list[dict[str, Any]]:
+        """Bulk extraction-status rows from the FTS sidecar, WITHOUT the text.
+
+        One dict per ``books_text`` row carrying ``book``, ``format``,
+        ``format_size``, ``format_hash``, ``text_size``, ``text_hash``,
+        ``err_msg`` and ``timestamp`` -- everything except
+        ``searchable_text``, which can be megabytes per format (read one
+        row's text via :meth:`get_book_text`). Feeds integrity predicates
+        (``err_msg``) and format-hash change detection. Empty list when the
+        sidecar is absent or the schema predates the table.
+        """
+        conn = self._fts_connect()
+        if conn is None:
+            return []
+        sql = (
+            "SELECT book, format, format_size, format_hash, text_size, "
+            "text_hash, err_msg, timestamp FROM books_text"
+        )
+        params: tuple = ()
+        if book_id is not None:
+            sql += " WHERE book = ?"
+            params = (book_id,)
+        sql += " ORDER BY book, format"
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [dict(r) for r in rows]
+
+    def search_book_text(
+        self,
+        query: str,
+        *,
+        fmt: str | None = None,
+        ids: set[int] | None = None,
+    ) -> dict[int, set[str]]:
+        """Python-side content search over the sidecar's extracted text.
+
+        Case- and accent-folded substring match (the search engine's default
+        text semantics) of ``query`` against each format's
+        ``searchable_text``; returns ``{book_id: {FORMAT, ...}}`` naming the
+        formats that matched. ``fmt`` restricts to one format; ``ids``
+        restricts the book set (the usual ``search()``-then-look-inside
+        composition). An empty query raises ValueError. The scan is linear
+        over the sidecar's rows -- the FTS5 index is unqueryable outside
+        Calibre (custom tokenizer), so this read IS the content index here.
+        Empty dict when the sidecar is absent.
+        """
+        if not query:
+            raise ValueError("query must not be empty")
+        conn = self._fts_connect()
+        if conn is None:
+            return {}
+        sql = "SELECT book, format, searchable_text FROM books_text"
+        params: tuple = ()
+        if fmt is not None:
+            sql += " WHERE upper(format) = upper(?)"
+            params = (fmt,)
+        sql += " ORDER BY book, format"
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        q = _fold(query)
+        out: dict[int, set[str]] = {}
+        for row in rows:
+            if ids is not None and row["book"] not in ids:
+                continue
+            text = row["searchable_text"]
+            if text and q in _fold(text):
+                out.setdefault(row["book"], set()).add(row["format"].upper())
+        return out
 
     def get_tag_browser_counts(self) -> dict[str, list[dict[str, Any]]]:
         """Calibre's own tag-browser rollups from the ``tag_browser_*`` views.

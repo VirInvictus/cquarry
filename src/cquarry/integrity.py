@@ -9,9 +9,11 @@ Brandon's library linter.
 
 Everything here is a pure function over the cached rows
 (:meth:`cquarry.db.CalibreDB.get_all_books`); there is no SQL in this module.
-The two cover-file checks are the exception that proves the rule: a flag
-alone cannot see the disk, so they ride :meth:`get_cover_path` and
-:func:`cquarry.helpers.get_image_size`. Every id list is sorted.
+The cover-file checks and :func:`find_failed_text_extraction` are the
+exceptions that prove the rule: a flag over cached rows cannot see the disk,
+and the FTS sidecar is a separate database, so they ride
+:meth:`get_cover_path` + :func:`get_image_size` and
+:meth:`get_text_extractions` respectively. Every id list is sorted.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ __all__ = [
     "find_coverless",
     "find_deprecated_formats",
     "find_duplicate_books",
+    "find_failed_text_extraction",
     "find_formatless",
     "find_identifierless",
     "find_low_res_covers",
@@ -165,6 +168,26 @@ def find_identifierless(db: CalibreDB) -> list[int]:
     store). The curation-facing opposite of :meth:`CalibreDB.get_identifiers`;
     promoted from Hermitage's inline Insights predicate."""
     return sorted(b["id"] for b in db.get_all_books() if not b["identifiers"])
+
+
+def find_failed_text_extraction(db: CalibreDB) -> dict[int, dict[str, str]]:
+    """``{book_id: {FORMAT: err_msg}}`` for formats whose extraction failed.
+
+    Reads the FTS sidecar's extraction status via
+    :meth:`CalibreDB.get_text_extractions` and keeps the rows with a
+    non-empty ``err_msg`` -- Calibre records scans, DRM, and corrupt files
+    there when it indexes book contents. The third sanctioned SQL ride in
+    this module (after the two cover-file checks): the sidecar is a separate
+    database the cached rows cannot see. Empty dict when the sidecar is
+    absent (nothing was ever extracted).
+    """
+    failed: dict[int, dict[str, str]] = {}
+    rows = sorted(db.get_text_extractions(), key=lambda r: (r["book"], r["format"]))
+    for row in rows:
+        msg = row.get("err_msg") or ""
+        if msg.strip():
+            failed.setdefault(row["book"], {})[row["format"]] = msg
+    return failed
 
 
 def find_series_gaps(db: CalibreDB) -> dict[str, list[int]]:

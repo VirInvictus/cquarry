@@ -1700,5 +1700,161 @@ class TestLockedDBSnapshot(unittest.TestCase):
         holder.close()
 
 
+class TestFTSSidecar(unittest.TestCase):
+    """The full-text-search.db sidecar reads (1.18): get_book_text,
+    get_text_extractions, search_book_text over the plain books_text table."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,"
+            " series_index REAL, path TEXT, has_cover INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO books (id, title, sort, series_index, path,"
+            " has_cover) VALUES (?,?,?,?,?,0)",
+            [
+                (1, "Zebra", "Zebra", 1.0, "Zebra (1)"),
+                (2, "Mango", "Mango", 1.0, "Mango (2)"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        # The sidecar: the plain books_text table (upstream fts_sqlite.sql
+        # shape, sans the FTS5 virtual tables, which stdlib sqlite cannot
+        # even create without Calibre's custom tokenizer).
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.executescript(
+            """
+            CREATE TABLE dirtied_formats (
+                id INTEGER PRIMARY KEY, book INTEGER NOT NULL,
+                format TEXT NOT NULL COLLATE NOCASE,
+                in_progress INTEGER NOT NULL DEFAULT FALSE,
+                UNIQUE(book, format)
+            );
+            CREATE TABLE books_text (
+                id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                format TEXT NOT NULL COLLATE NOCASE,
+                format_hash TEXT NOT NULL COLLATE NOCASE,
+                format_size INTEGER NOT NULL DEFAULT 0,
+                searchable_text TEXT NOT NULL DEFAULT '',
+                text_size INTEGER NOT NULL DEFAULT 0,
+                text_hash TEXT NOT NULL COLLATE NOCASE DEFAULT '',
+                err_msg TEXT DEFAULT '',
+                UNIQUE(book, format)
+            );
+            """
+        )
+        fts.execute(
+            "INSERT INTO books_text (book, timestamp, format, format_hash,"
+            " format_size, searchable_text, text_size, text_hash, err_msg)"
+            " VALUES (1, 1700000000.0, 'EPUB', 'h1', 100, 'The quick cafe', 14,"
+            " 't1', '')"
+        )
+        fts.execute(
+            "INSERT INTO books_text (book, timestamp, format, format_hash,"
+            " format_size, searchable_text, text_size, text_hash, err_msg)"
+            " VALUES (1, 1700000001.0, 'MOBI', 'h2', 200, '', 0, '',"
+            " 'This book has DRM')"
+        )
+        fts.execute(
+            "INSERT INTO books_text (book, timestamp, format, format_hash,"
+            " format_size, searchable_text, text_size, text_hash, err_msg)"
+            " VALUES (2, 1700000002.0, 'EPUB', 'h3', 300, 'Le cafe au lait',"
+            " 15, 't3', '')"
+        )
+        fts.commit()
+        fts.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_get_book_text_full_row(self):
+        row = self.db.get_book_text(1, "EPUB")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["book"], 1)
+        self.assertEqual(row["format"], "EPUB")
+        self.assertEqual(row["searchable_text"], "The quick cafe")
+        self.assertEqual(row["format_size"], 100)
+        self.assertEqual(row["format_hash"], "h1")
+        self.assertEqual(row["text_size"], 14)
+        self.assertEqual(row["text_hash"], "t1")
+        self.assertEqual(row["err_msg"], "")
+
+    def test_get_book_text_fmt_case_insensitive(self):
+        self.assertEqual(self.db.get_book_text(1, "epub")["format"], "EPUB")
+        self.assertEqual(
+            self.db.get_book_text(1, "Mobi")["err_msg"], "This book has DRM"
+        )
+
+    def test_get_book_text_misses_return_none(self):
+        self.assertIsNone(self.db.get_book_text(1, "AZW3"))  # no such row
+        self.assertIsNone(self.db.get_book_text(99, "EPUB"))  # no such book
+        self.assertIsNone(self.db.get_book_text(2, "MOBI"))
+
+    def test_get_book_text_without_sidecar(self):
+        other = os.path.join(self.temp_dir, "lib2")
+        os.makedirs(other)
+        os.link(self.db_path, os.path.join(other, "metadata.db"))
+        with CalibreDB(os.path.join(other, "metadata.db")) as db:
+            self.assertIsNone(db.get_book_text(1, "EPUB"))
+            self.assertEqual(db.get_text_extractions(), [])
+            self.assertEqual(db.search_book_text("cafe"), {})
+
+    def test_get_text_extractions_omit_the_text(self):
+        rows = self.db.get_text_extractions()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r["book"] for r in rows], [1, 1, 2])  # sorted
+        self.assertNotIn("searchable_text", rows[0])
+        self.assertEqual(
+            [(r["format"], r["err_msg"]) for r in rows if r["book"] == 1],
+            [("EPUB", ""), ("MOBI", "This book has DRM")],
+        )
+
+    def test_get_text_extractions_scoped_to_one_book(self):
+        rows = self.db.get_text_extractions(book_id=2)
+        self.assertEqual([r["format"] for r in rows], ["EPUB"])
+
+    def test_search_book_text_folds_case_and_accents(self):
+        hits = self.db.search_book_text("CAFE")
+        self.assertEqual(hits, {1: {"EPUB"}, 2: {"EPUB"}})
+        # Folded accents: 'café' IS 'cafe' after folding, so the accent
+        # discriminator is the surrounding text ('café au' only fits book 2).
+        self.assertEqual(self.db.search_book_text("café au"), {2: {"EPUB"}})
+        self.assertEqual(self.db.search_book_text("quick cafe"), {1: {"EPUB"}})
+
+    def test_search_book_text_filters(self):
+        self.assertEqual(self.db.search_book_text("cafe", fmt="mobi"), {})
+        self.assertEqual(self.db.search_book_text("cafe", ids={1}), {1: {"EPUB"}})
+        self.assertEqual(self.db.search_book_text("nomatch"), {})
+
+    def test_search_book_text_empty_query_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.search_book_text("")
+
+    def test_refresh_rediscovers_a_late_sidecar(self):
+        other = os.path.join(self.temp_dir, "lib3")
+        os.makedirs(other)
+        os.link(self.db_path, os.path.join(other, "metadata.db"))
+        db = CalibreDB(os.path.join(other, "metadata.db"))
+        try:
+            self.assertIsNone(db.get_book_text(1, "EPUB"))  # cached as absent
+            os.link(
+                os.path.join(self.temp_dir, "full-text-search.db"),
+                os.path.join(other, "full-text-search.db"),
+            )
+            db.refresh()
+            self.assertEqual(db.get_book_text(1, "EPUB")["format"], "EPUB")
+        finally:
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

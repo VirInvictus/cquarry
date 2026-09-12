@@ -16,6 +16,7 @@ from cquarry.integrity import (
     find_coverless,
     find_deprecated_formats,
     find_duplicate_books,
+    find_failed_text_extraction,
     find_formatless,
     find_identifierless,
     find_low_res_covers,
@@ -212,6 +213,70 @@ class TestIntegrity(unittest.TestCase):
 
     def test_find_series_gaps(self):
         self.assertEqual(find_series_gaps(self.db), {"Gap Series": [2]})
+
+
+class TestFailedTextExtraction(unittest.TestCase):
+    """find_failed_text_extraction: the FTS sidecar's err_msg rows (1.18)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,"
+            " series_index REAL, path TEXT, has_cover INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO books (id, title, sort) VALUES (?,?,?)",
+            [(1, "One", "One"), (2, "Two", "Two")],
+        )
+        conn.commit()
+        conn.close()
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.execute(
+            "CREATE TABLE books_text ("
+            " id INTEGER PRIMARY KEY, book INTEGER NOT NULL,"
+            " timestamp REAL NOT NULL, format TEXT NOT NULL COLLATE NOCASE,"
+            " format_hash TEXT NOT NULL COLLATE NOCASE,"
+            " format_size INTEGER NOT NULL DEFAULT 0,"
+            " searchable_text TEXT NOT NULL DEFAULT '',"
+            " text_size INTEGER NOT NULL DEFAULT 0,"
+            " text_hash TEXT NOT NULL COLLATE NOCASE DEFAULT '',"
+            " err_msg TEXT DEFAULT '', UNIQUE(book, format))"
+        )
+        fts.executemany(
+            "INSERT INTO books_text (book, timestamp, format, format_hash,"
+            " searchable_text, err_msg) VALUES (?,?,?,?,?,?)",
+            [
+                (1, 1700000000.0, "EPUB", "h1", "clean text", ""),
+                (1, 1700000001.0, "MOBI", "h2", "", "This book has DRM"),
+                (2, 1700000002.0, "EPUB", "h3", "other text", ""),
+                (2, 1700000003.0, "PDF", "h4", "", "scan produced no text"),
+            ],
+        )
+        fts.commit()
+        fts.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        import shutil
+
+        shutil.rmtree(self.temp_dir)
+
+    def test_only_failed_rows_are_reported(self):
+        self.assertEqual(
+            find_failed_text_extraction(self.db),
+            {1: {"MOBI": "This book has DRM"}, 2: {"PDF": "scan produced no text"}},
+        )
+
+    def test_absent_sidecar_is_empty_not_an_error(self):
+        other = os.path.join(self.temp_dir, "lib2")
+        os.makedirs(other)
+        os.link(self.db_path, os.path.join(other, "metadata.db"))
+        with CalibreDB(os.path.join(other, "metadata.db")) as db:
+            self.assertEqual(find_failed_text_extraction(db), {})
 
 
 if __name__ == "__main__":

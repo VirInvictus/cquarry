@@ -1267,13 +1267,19 @@ candidates at :1131-1175 except where a box says promotion candidate.
 
 ### A. Read coverage
 
-- [ ] **Read `full-text-search.db`: `get_book_text(book_id, fmt)`** plus
+- [x] **Read `full-text-search.db`: `get_book_text(book_id, fmt)`** plus
   optional Python-side content search over `books_text` (book, format,
   format_size, format_hash, searchable_text, text_size, text_hash,
   err_msg, timestamp; upstream `calibre/db/fts/connect.py:35-39`,
   `resources/fts_sqlite.sql:1-23`). Second SQLite file with the same
   snapshot/lock handling as db.py:138-163; the plain table suffices, no
   FTS5 machinery. The largest missing read surface.
+  *(SHIPPED 2026-09-12 in 1.18.0: `get_book_text` (full row incl. the
+  text), `get_text_extractions` (bulk status rows WITHOUT the megabyte
+  texts, the err_msg/hash-change surface), and `search_book_text`
+  (folded Python-side content search returning {book: {formats}});
+  same lock-escape snapshot as metadata.db, absent-sidecar reads
+  degrade to empty, refresh() drops the sidecar connection.)*
 - [ ] **Expose `books_pages_link` auxiliary columns** (`algorithm`,
   `format`, `format_size`, `timestamp`, `needs_scan`; upstream
   `schema_upgrades.py:853-862`) via `get_page_metadata()` or a dossier
@@ -1283,9 +1289,12 @@ candidates at :1131-1175 except where a box says promotion candidate.
   `#label_index` from `_custom_value`; today db.py:1748-1749 registers
   a float location that :1759-1760 can never resolve. Rides :281 and
   unblocks Carrel's OPDS content block.
-- [ ] **`find_failed_text_extraction` integrity predicate**: formats
+- [x] **`find_failed_text_extraction` integrity predicate**: formats
   whose `books_text.err_msg` is non-empty (scans, DRM, corrupt files).
   Rides the FTS box.
+  *(SHIPPED 2026-09-12 in 1.18.0: `{book_id: {FORMAT: err_msg}}` over
+  `get_text_extractions`, sorted ids; the third sanctioned non-cached
+  read in integrity after the two cover-file checks.)*
 - [ ] **Doc line**: `annotations.searchable_text` joins highlight text
   and notes with `\x1f\n` (upstream `calibre/db/annotations.py:134-145`).
 - [ ] **(marginal)** Read the normalized custom-column value-table
