@@ -2102,6 +2102,133 @@ class WritableCalibreDB:
             self._pending_fs_ops.append(_remove)
         return changed
 
+    # -- Original-format save/restore (1.19; the approved C.8) --
+
+    def save_original_format(self, book_id: int, fmt: str) -> bool:
+        """Save a copy of the format as ``ORIGINAL_<FMT>`` (upstream
+        cache.py:1581), overwriting any previously saved original.
+
+        The undo-able repair primitive: call before swapping a repaired
+        file into place, and :meth:`restore_original_format` can put the
+        bytes back. The copy is a real ``data`` row plus a
+        ``<stem>.original_<ext>`` file beside the original, so Calibre sees
+        it exactly as it sees one of its own. Returns True when saved,
+        False when the book has no such format (or its file is missing on
+        disk). Raises ValueError when ``fmt`` is itself an ORIGINAL
+        format."""
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Format must not be empty")
+        if "ORIGINAL" in fmt:
+            raise ValueError("Cannot save an original of an original format")
+        with self.batch():
+            self._require_book(book_id)
+            src = self.conn.execute(
+                "SELECT id, name, uncompressed_size FROM data "
+                "WHERE book = ? AND upper(format) = ?",
+                (book_id, fmt),
+            ).fetchone()
+            if src is None:
+                return False
+            book_dir = self._book_dir_path(book_id)
+            if book_dir is None:
+                return False
+            src_path = os.path.join(book_dir, f"{src['name']}.{fmt.lower()}")
+            if not os.path.isfile(src_path):
+                return False
+            with open(src_path, "rb") as f:
+                data = f.read()
+            nfmt = "ORIGINAL_" + fmt
+            orig = self.conn.execute(
+                "SELECT id, name FROM data WHERE book = ? AND upper(format) = ?",
+                (book_id, nfmt),
+            ).fetchone()
+            if orig is None:
+                self.add_format(book_id, nfmt, src["name"], len(data))
+            else:
+                self.set_format(book_id, nfmt, src["name"], len(data))
+                old_stem = orig["name"]
+                old_name = src["name"]
+
+                def _sweep_old_stem(
+                    book_dir=book_dir, old_stem=old_stem, old_name=old_name, nfmt=nfmt
+                ):
+                    if old_stem != old_name:
+                        with contextlib.suppress(OSError):
+                            os.unlink(
+                                os.path.join(book_dir, f"{old_stem}.{nfmt.lower()}")
+                            )
+
+                self._pending_fs_ops.append(_sweep_old_stem)
+            dest = os.path.join(book_dir, f"{src['name']}.{nfmt.lower()}")
+
+            def _place_copy(dest=dest, data=data):
+                _place_bytes(data, dest)
+
+            self._pending_fs_ops.append(_place_copy)
+        return True
+
+    def restore_original_format(self, book_id: int, original_fmt: str) -> bool:
+        """Restore the format from a previously saved ``ORIGINAL_<FMT>``,
+        removing the original afterwards (upstream cache.py:1595).
+
+        The ORIGINAL file's bytes become the target format's file (its
+        ``data`` row keeps the target's filename stem), and the ORIGINAL
+        row and file are removed. Returns True on success, False when no
+        accessible ORIGINAL row/file exists. The restored format is queued
+        for FTS re-extraction and a pages rescan (the same machinery a
+        :meth:`set_format` repair uses)."""
+        nfmt = (original_fmt or "").strip().upper()
+        if not nfmt.startswith("ORIGINAL_") or len(nfmt) <= len("ORIGINAL_"):
+            raise ValueError(f"Expected an ORIGINAL_<FMT> format, got {original_fmt!r}")
+        fmt = nfmt[len("ORIGINAL_") :]
+        # Attach before the batch opens so the restored format can always
+        # be queued (see _ensure_fts_attached).
+        self._ensure_fts_attached()
+        with self.batch():
+            self._require_book(book_id)
+            orig = self.conn.execute(
+                "SELECT id, name FROM data WHERE book = ? AND upper(format) = ?",
+                (book_id, nfmt),
+            ).fetchone()
+            if orig is None:
+                return False
+            book_dir = self._book_dir_path(book_id)
+            if book_dir is None:
+                return False
+            orig_path = os.path.join(book_dir, f"{orig['name']}.{nfmt.lower()}")
+            if not os.path.isfile(orig_path):
+                return False
+            with open(orig_path, "rb") as f:
+                data = f.read()
+            target = self.conn.execute(
+                "SELECT id, name FROM data WHERE book = ? AND upper(format) = ?",
+                (book_id, fmt),
+            ).fetchone()
+            if target is None:
+                self.add_format(book_id, fmt, orig["name"], len(data))
+                dest_stem = orig["name"]
+            else:
+                self.set_format(book_id, fmt, target["name"], len(data))
+                dest_stem = target["name"]
+            # The bytes on disk changed even when the row was already
+            # correct (an honest set_format no-op): queue re-extraction
+            # unconditionally -- INSERT OR IGNORE dedupes when the row
+            # change already queued it.
+            self._mark_fts_dirty(book_id, fmt)
+            dest = os.path.join(book_dir, f"{dest_stem}.{fmt.lower()}")
+
+            def _swap(dest=dest, data=data, orig_path=orig_path):
+                _place_bytes(data, dest)
+                with contextlib.suppress(OSError):
+                    os.unlink(orig_path)
+
+            self._pending_fs_ops.append(_swap)
+            # The ORIGINAL row and its FTS queue entry do not survive a
+            # restore (remove_format clears the queue entry).
+            self.remove_format(book_id, nfmt)
+        return True
+
     # -- Book creation (Phase 10) --
 
     def add_book(

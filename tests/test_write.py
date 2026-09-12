@@ -2371,3 +2371,147 @@ class TestPassthroughSetters(_WriteSideFixture, unittest.TestCase):
         self.assertEqual(
             self._sql2("SELECT book FROM metadata_dirtied WHERE book = 1")[0][0], 1
         )
+
+
+class TestOriginalFormat(unittest.TestCase):
+    """C.8: save_original_format / restore_original_format (1.19)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                timestamp TEXT, last_modified TEXT, path TEXT);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,
+                format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, UNIQUE(book));
+            CREATE TABLE books_pages_link (book INTEGER PRIMARY KEY,
+                pages INTEGER DEFAULT 0 NOT NULL, needs_scan INTEGER NOT NULL DEFAULT 0);
+            """
+        )
+        conn.execute("INSERT INTO books (id, title, sort) VALUES (1, 'One', 'One')")
+        conn.execute("INSERT INTO books_pages_link (book, pages) VALUES (1, 10)")
+        conn.commit()
+        conn.close()
+        self.book_dir = os.path.join(self.temp_dir, "Zed A. Writer", "One (1)")
+        os.makedirs(self.book_dir)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE books SET path = ? WHERE id = 1",
+                ("Zed A. Writer/One (1)",),
+            )
+            conn.executemany(
+                "INSERT INTO data (book, format, uncompressed_size, name) VALUES (?,?,?,?)",
+                [(1, "EPUB", 11, "One - Zed A. Writer")],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.write_file("One - Zed A. Writer.epub", b"ORIGINAL-BYTES")
+        # The sidecar, so the FTS queue assertions are real.
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.executescript(
+            """
+            CREATE TABLE dirtied_formats (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, format TEXT NOT NULL COLLATE NOCASE,
+                in_progress INTEGER NOT NULL DEFAULT FALSE, UNIQUE(book, format));
+            CREATE TABLE books_text (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, format TEXT NOT NULL, err_msg TEXT DEFAULT '');
+            """
+        )
+        fts.commit()
+        fts.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def write_file(self, name, payload):
+        with open(os.path.join(self.book_dir, name), "wb") as f:
+            f.write(payload)
+
+    def read_file(self, name):
+        with open(os.path.join(self.book_dir, name), "rb") as f:
+            return f.read()
+
+    def fts_fmts(self):
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        try:
+            return {r[0] for r in fts.execute("SELECT format FROM dirtied_formats")}
+        finally:
+            fts.close()
+
+    def test_save_copies_bytes_to_an_original_row_and_file(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.save_original_format(1, "epub"))
+        self.assertEqual(
+            self._data(),
+            [
+                ("EPUB", 11, "One - Zed A. Writer"),
+                ("ORIGINAL_EPUB", 14, "One - Zed A. Writer"),
+            ],
+        )
+        self.assertEqual(self.read_file("One - Zed A. Writer.epub"), b"ORIGINAL-BYTES")
+        self.assertEqual(
+            self.read_file("One - Zed A. Writer.original_epub"), b"ORIGINAL-BYTES"
+        )
+        # Mirrors upstream's trigger-on-any-insert: the original is queued
+        # for extraction like any added format.
+        self.assertIn("ORIGINAL_EPUB", self.fts_fmts())
+
+    def test_save_misses_are_false_and_originals_are_rejected(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertFalse(wdb.save_original_format(1, "MOBI"))
+            with self.assertRaises(ValueError):
+                wdb.save_original_format(1, "ORIGINAL_EPUB")
+            with self.assertRaises(ValueError):
+                wdb.save_original_format(1, " ")
+
+    def test_restore_swaps_bytes_back_and_removes_the_original(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.save_original_format(1, "EPUB"))
+        # The repair swaps the EPUB file and re-catalogues it.
+        self.write_file("One - Zed A. Writer.epub", b"REPAIRED-BYTES")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE data SET uncompressed_size = 14 WHERE book = 1 AND format = 'EPUB'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.restore_original_format(1, "ORIGINAL_EPUB"))
+        # The original bytes are back under EPUB.
+        self.assertEqual(self.read_file("One - Zed A. Writer.epub"), b"ORIGINAL-BYTES")
+        self.assertEqual(self._data(), [("EPUB", 14, "One - Zed A. Writer")])
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(self.book_dir, "One - Zed A. Writer.original_epub")
+            )
+        )
+        # The restored format is queued for FTS re-extraction; the
+        # removed original's queue entry is gone.
+        self.assertIn("EPUB", self.fts_fmts())
+        self.assertNotIn("ORIGINAL_EPUB", self.fts_fmts())
+
+    def test_restore_without_an_original_is_false(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertFalse(wdb.restore_original_format(1, "ORIGINAL_EPUB"))
+            with self.assertRaises(ValueError):
+                wdb.restore_original_format(1, "EPUB")
+
+    def _data(self):
+        return sorted(
+            self._sql_rows("SELECT format, uncompressed_size, name FROM data")
+        )
+
+    def _sql_rows(self, sql):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(sql).fetchall()]
+        finally:
+            conn.close()

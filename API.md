@@ -299,6 +299,8 @@ print(cquarry.__version__)  # "1.18.0"
 | `remove_cover(book_id)` | `bool` | Clear the cover (since 1.19.0): both cover files swept, `has_cover` cleared, OPF resync queued. True when the flag actually changed. |
 | `set_author_sort(book_id, value)` / `set_title_sort(book_id, value)` | `bool` | Verbatim sort corrections (since 1.19.0); empty raises; a later `set_authors`/`update_title` recomputes over them. |
 | `set_timestamp(book_id, value)` | `bool` | Set the addition timestamp (since 1.19.0), normalized like `set_pubdate`; `None` writes the sentinel. |
+| `save_original_format(book_id, fmt)` | `bool` | Copy the format as an `ORIGINAL_<FMT>` row + file (since 1.19.0) for undo-able repair; False when the format/file is missing; saving an original of an original raises. |
+| `restore_original_format(book_id, original_fmt)` | `bool` | Swap the ORIGINAL bytes back into the format (since 1.19.0), remove the original row/file/queue entry, and queue the restored format for FTS re-extraction. |
 | `set_series(book_id, name, index=None)` | `bool` | Assign/clear series + `series_index` (defaults 1.0 fresh, preserves on reassign). |
 | `set_publisher(book_id, name)` | `bool` | Replace/clear publisher; case-insensitive match; orphans pruned. |
 | `set_rating(book_id, stars)` | `bool` | 0-5 stars stored as x2; UNIQUE(rating) rows deduplicated via find-or-create. |

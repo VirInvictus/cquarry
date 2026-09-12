@@ -1476,8 +1476,16 @@ candidates at :1131-1175 except where a box says promotion candidate.
   their job.)*
 - [ ] **Promotion candidate: `create_custom_column` /
   `delete_custom_column`** (upstream `backend.py:1384,1536`). M.
-- [ ] **Promotion candidate: `save_original_format` /
+- [x] **Promotion candidate: `save_original_format` /
   `restore_original_format`** (upstream `cache.py:1581-1614`). S-M.
+  *(APPROVED 2026-09-12 (Brandon, "four loop-closers") and SHIPPED in
+  1.19.0: the copy is a real data row (ORIGINAL_<FMT>, upstream's own
+  layout) plus a <stem>.original_<ext> file, so Calibre sees it as one
+  of its own; restore swaps the bytes back, keeps the target's
+  filename stem, and removes the original row, file, and FTS queue
+  entry. Restore queues the restored format for re-extraction
+  unconditionally -- the bytes changed even when the row was already
+  correct. Both verbs defer file work to the outermost commit.)*
 - [x] **`clean_identifier` parity** (upstream `db/write.py:118-121`):
   value `,`->`|`, type strips `:`/`,`. S.
   *(SHIPPED 2026-09-12 in 1.18.0: applied in set_identifier and mirrored
