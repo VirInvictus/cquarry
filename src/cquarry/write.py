@@ -301,6 +301,13 @@ class WritableCalibreDB:
         # the current outermost batch, performed only after its COMMIT (a
         # rollback drops them instead: resurrected rows keep their files).
         self._pending_removals: list[tuple[int, str, str]] = []
+        # Path re-lays registered by update_title/set_authors inside the
+        # current outermost batch: SQL applies immediately, the filesystem
+        # half (dir rename + format-file renames) runs only after the
+        # COMMIT, so a rollback leaves the old layout for the old rows.
+        self._pending_relayouts: list[
+            tuple[int, str, str, list[tuple[str, str]], str]
+        ] = []
 
     # -- lifecycle --
 
@@ -369,6 +376,7 @@ class WritableCalibreDB:
                 if ok and not self._batch_poisoned:
                     self.conn.commit()
                     self._flush_pending_removals()
+                    self._flush_pending_relayouts()
                 else:
                     with contextlib.suppress(sqlite3.Error):
                         self.conn.rollback()
@@ -379,6 +387,12 @@ class WritableCalibreDB:
                     # path is a no-op (ignore_errors).
                     for orphan in self._batch_dirs:
                         shutil.rmtree(orphan, ignore_errors=True)
+                    # The rollback resurrected whatever the queued removals
+                    # and re-lays were aimed at: both queues are dropped
+                    # with the transaction, never flushed by a LATER batch
+                    # against rows the rollback brought back.
+                    self._pending_removals.clear()
+                    self._pending_relayouts.clear()
                 self._batch_dirs.clear()
                 self._batch_poisoned = False
             elif not ok:
@@ -455,7 +469,13 @@ class WritableCalibreDB:
     # -- Phase 3 write APIs --
 
     def update_title(self, book_id: int, new_title: str) -> None:
-        """Rename a book, refreshing its sort key and last_modified stamp."""
+        """Rename a book, refreshing its sort key and last_modified stamp.
+
+        Re-lays the on-disk layout to match: the ``Author/Title (id)``
+        directory and every format file move to the new stems, and
+        ``books.path``/``data.name`` follow (the fs half defers to the
+        outermost commit inside a :meth:`batch`).
+        """
         new_title = new_title.strip()
         if not new_title:
             raise ValueError("Title must not be empty")
@@ -467,10 +487,26 @@ class WritableCalibreDB:
                 (new_title, title_sort(new_title), self._now(), book_id),
             )
             self._mark_dirty(book_id)
+            first_author = self._first_author_name(book_id)
+            self._relayout_book_path(book_id, new_title, first_author)
             self._commit()
         except BaseException:
             self._rollback()
             raise
+
+    def _first_author_name(self, book_id: int) -> str:
+        """The book's first author (link order), '' when authorless -- the
+        same input ``add_book`` uses for the path components. Schemas
+        predating the link tables degrade to '' (the path's Unknown rule)."""
+        try:
+            row = self.conn.execute(
+                "SELECT a.name FROM books_authors_link bal JOIN authors a "
+                "ON a.id = bal.author WHERE bal.book = ? ORDER BY bal.id LIMIT 1",
+                (book_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return ""  # schema predates the author link tables
+        return row["name"] if row is not None else ""
 
     def add_tag(self, book_id: int, tag: str) -> bool:
         """Attach a tag to a book. Returns True if a link was created.
@@ -766,6 +802,15 @@ class WritableCalibreDB:
             )
             self._prune_orphans("authors")
             self._mark_dirty(book_id)
+            # The path's author component follows the new first author.
+            title_row = self.conn.execute(
+                "SELECT title FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            self._relayout_book_path(
+                book_id,
+                title_row["title"] or "",
+                self._first_author_name(book_id),
+            )
             self._commit()
             return True
         except BaseException:
@@ -1910,6 +1955,121 @@ class WritableCalibreDB:
         if row is None or not row["path"]:
             return None
         return os.path.join(os.path.dirname(self.db_path), row["path"])
+
+    # -- Path re-laying (C.1, upstream backend.update_path) --
+
+    def _relayout_book_path(self, book_id: int, title: str, first_author: str) -> None:
+        """Re-lay a book's directory and format filenames after a rename.
+
+        The completion of the curation-rename story: ``update_title`` and
+        ``set_authors`` used to move the rows while the on-disk layout kept
+        the old ``Author/Title (id)`` directory and ``Title - Author.ext``
+        stems, silently corrupting the human-navigable library. Computes the
+        new layout (upstream ``construct_path_name``/``construct_file_name``
+        via the same helpers ``add_book`` uses), writes ``books.path`` and
+        ``data.name`` in the transaction, and defers the filesystem half
+        (dir rename, per-format file renames, emptied-parent removal) to
+        after the outermost COMMIT -- a rollback drops it, so rows and files
+        never disagree inside a failed pass. Books with no stored path get
+        the db-only correction, exactly like upstream.
+        """
+        new_rel = _construct_path_name(book_id, title, first_author)
+        try:
+            formats = [
+                r["format"]
+                for r in self.conn.execute(
+                    "SELECT format FROM data WHERE book = ?", (book_id,)
+                )
+                if r["format"]
+            ]
+        except sqlite3.OperationalError:
+            formats = []  # schema predates the data table
+        extlen = max((len(f) for f in formats), default=9) + 1
+        new_stem = _construct_file_name(title, first_author, extlen)
+        try:
+            renames = [
+                (r["format"], r["name"])
+                for r in self.conn.execute(
+                    "SELECT format, name FROM data WHERE book = ?", (book_id,)
+                )
+                if r["format"] and r["name"] and r["name"] != new_stem
+            ]
+        except sqlite3.OperationalError:
+            renames = []  # schema predates the data table
+        old_row = self.conn.execute(
+            "SELECT path FROM books WHERE id = ?", (book_id,)
+        ).fetchone()
+        old_rel = old_row["path"] or ""
+        if old_rel == new_rel and not renames:
+            return
+        # SQL first: in-transaction, so a failed pass rolls the rows back.
+        self.conn.execute("UPDATE books SET path = ? WHERE id = ?", (new_rel, book_id))
+        for fmt, _old_name in renames:
+            self.conn.execute(
+                "UPDATE data SET name = ? WHERE book = ? AND format = ?",
+                (new_stem, book_id, fmt),
+            )
+        op = (book_id, old_rel, new_rel, renames, new_stem)
+        if self._batch_depth:
+            self._pending_relayouts.append(op)
+        else:
+            self._apply_relayout(op)
+
+    def _flush_pending_relayouts(self) -> None:
+        """Perform path re-lays deferred by setters inside a batch.
+
+        Called only after the outermost COMMIT, mirroring
+        :meth:`_flush_pending_removals`: a rollback that resurrected the
+        rows must not leave them pointing at renamed directories.
+        """
+        for op in self._pending_relayouts:
+            self._apply_relayout(op)
+        self._pending_relayouts.clear()
+
+    def _apply_relayout(self, op: tuple) -> None:
+        """The filesystem half of one re-lay: dir rename, file renames,
+        emptied-parent removal. Best-effort like upstream (a missing source
+        directory is a db-only correction; the target of a move is removed
+        only when it is a stale leftover -- ids are unique in paths, so it
+        cannot be a live book's directory)."""
+        _book_id, old_rel, new_rel, renames, new_stem = op
+        root = os.path.dirname(self.db_path)
+        old_dir = os.path.join(root, *old_rel.split("/")) if old_rel else None
+        new_dir = os.path.join(root, *new_rel.split("/"))
+        if old_dir and os.path.exists(old_dir):
+            if os.path.exists(new_dir) and os.path.samefile(old_dir, new_dir):
+                # Same directory under a case-differing spelling
+                # (case-insensitive filesystems): fix the spelling segment
+                # by segment, exactly like upstream.
+                segs_old, segs_new = old_rel.split("/"), new_rel.split("/")
+                if len(segs_old) == len(segs_new):
+                    cur = root
+                    for o_seg, n_seg in zip(segs_old, segs_new):
+                        if o_seg.lower() == n_seg.lower() and o_seg != n_seg:
+                            with contextlib.suppress(OSError):
+                                os.replace(
+                                    os.path.join(cur, o_seg), os.path.join(cur, n_seg)
+                                )
+                        cur = os.path.join(cur, n_seg)
+            else:
+                if os.path.exists(new_dir):
+                    shutil.rmtree(new_dir)
+                os.makedirs(os.path.dirname(new_dir), exist_ok=True)
+                try:
+                    os.rename(old_dir, new_dir)
+                except OSError:
+                    shutil.move(old_dir, new_dir)
+                parent = os.path.dirname(old_dir)
+                if parent != root:
+                    with contextlib.suppress(OSError):
+                        os.rmdir(parent)  # only succeeds when empty
+        # Format files ride the dir rename; rename them to the new stem.
+        if renames and os.path.isdir(new_dir):
+            for fmt, old_name in renames:
+                src = os.path.join(new_dir, old_name + "." + fmt.lower())
+                dest = os.path.join(new_dir, new_stem + "." + fmt.lower())
+                if src != dest and os.path.exists(src):
+                    os.replace(src, dest)
 
     def _flush_pending_removals(self) -> None:
         """Perform file removals deferred by remove_book inside a batch.

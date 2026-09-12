@@ -1381,10 +1381,26 @@ candidates at :1131-1175 except where a box says promotion candidate.
 
 ### C. Write completions and promotion candidates
 
-- [ ] **Path re-laying on `update_title`/`set_authors`** (internal
+- [x] **Path re-laying on `update_title`/`set_authors`** (internal
   completion; upstream `cache.py:1986-1987`, `backend.py:2098-2202`):
   dir rename, format-file renames to the new stem, empty-parent
   removal, batch-compensation aware. M.
+  *(SHIPPED 2026-09-12 in 1.18.0: `_relayout_book_path` recomputes the
+  layout with the add_book helpers, writes books.path/data.name in the
+  transaction, and defers the fs half to the outermost COMMIT inside a
+  batch (a rollback drops it, so rows and files never disagree);
+  outside a batch it applies immediately after the setter's own commit.
+  Stale targets are removed, case-only spellings go through upstream's
+  per-segment fix, path-less legacy rows get the db-only correction,
+  and schemas without data/authors degrade. NOT covered: comment-side
+  files Calibre keeps by policy.)*
+- [x] **NEW FINDING (fixed in the same 1.18.0 pass): a failed batch
+  never cleared `_pending_removals`.** remove_book's deferred removals
+  survived a rollback, so a LATER successful batch would flush them
+  against rows the rollback had resurrected -- exactly the
+  fileless-resurrection the design forbids. The rollback path now
+  clears both deferred queues (removals + re-lays); pinned by
+  test_failed_batch_drops_pending_removals_too.
 - [ ] **Promotion candidate: `rename_entity(field, old, new)` +
   `remove_entity_everywhere`** (upstream `cache.py:2758-2862`): author
   renames recompute sorts and re-lay paths; series renumber; case-change

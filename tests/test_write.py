@@ -1743,3 +1743,180 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
         self.assertEqual(self._count("SELECT COUNT(*) FROM books"), 3)
         # The kept add's OPF queue entry survives the later failed batch.
         self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(3,)])
+
+
+class TestPathRelaying(_WriteSideFixture, unittest.TestCase):
+    """C.1: update_title/set_authors re-lay the on-disk layout (dir rename,
+    format-file renames to the new stem, emptied-parent removal), with the
+    fs half deferred to the outermost commit inside a batch."""
+
+    def _seed_layout(self, book_id, path, files):
+        """Create the on-disk book directory with files and matching rows."""
+        book_dir = os.path.join(self.temp_dir, *path.split("/"))
+        os.makedirs(book_dir, exist_ok=True)
+        rows = []
+        for stem_ext, payload in files:
+            with open(os.path.join(book_dir, stem_ext), "wb") as f:
+                f.write(payload)
+            stem, ext = stem_ext.rsplit(".", 1)
+            rows.append((book_id, ext.upper(), len(payload), stem))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("UPDATE books SET path = ? WHERE id = ?", (path, book_id))
+            conn.executemany(
+                "INSERT INTO data (book, format, uncompressed_size, name) "
+                "VALUES (?,?,?,?)",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _dir(self, rel):
+        return os.path.join(self.temp_dir, *rel.split("/"))
+
+    def test_update_title_moves_dir_and_format_files(self):
+        self._seed_layout(
+            1,
+            "Zed A. Writer/Old Title (1)",
+            [("Old Title - Zed A. Writer.epub", b"EPUB")],
+        )
+        # A non-format satellite file rides the directory rename.
+        with open(self._dir("Zed A. Writer/Old Title (1)/cover.jpg"), "wb") as f:
+            f.write(b"COVER")
+        with self._wdb() as wdb:
+            wdb.update_title(1, "New Title")
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 1")[0][0],
+            "Zed A. Writer/New Title (1)",
+        )
+        self.assertEqual(
+            self._sql2("SELECT name FROM data WHERE book = 1")[0][0],
+            "New Title - Zed A. Writer",
+        )
+        self.assertFalse(os.path.exists(self._dir("Zed A. Writer/Old Title (1)")))
+        new_dir = self._dir("Zed A. Writer/New Title (1)")
+        self.assertTrue(os.path.isdir(new_dir))
+        with open(os.path.join(new_dir, "New Title - Zed A. Writer.epub"), "rb") as f:
+            self.assertEqual(f.read(), b"EPUB")
+        self.assertTrue(os.path.exists(os.path.join(new_dir, "cover.jpg")))
+
+    def test_set_authors_moves_dir_and_renames_stem(self):
+        self._seed_layout(
+            1,
+            "Zed A. Writer/Old Title (1)",
+            [("Old Title - Zed A. Writer.epub", b"EPUB")],
+        )
+        with self._wdb() as wdb:
+            wdb.set_authors(1, ["Ann Leckie"])
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 1")[0][0],
+            "Ann Leckie/Old Title (1)",
+        )
+        self.assertEqual(
+            self._sql2("SELECT name FROM data WHERE book = 1")[0][0],
+            "Old Title - Ann Leckie",
+        )
+        self.assertTrue(
+            os.path.isfile(
+                self._dir("Ann Leckie/Old Title (1)/Old Title - Ann Leckie.epub")
+            )
+        )
+        # The emptied old author directory is removed.
+        self.assertFalse(os.path.exists(self._dir("Zed A. Writer")))
+
+    def test_batch_defers_the_fs_half_until_the_commit(self):
+        self._seed_layout(
+            1,
+            "Zed A. Writer/Old Title (1)",
+            [("Old Title - Zed A. Writer.epub", b"EPUB")],
+        )
+        with WritableCalibreDB(self.db_path) as wdb:
+            with wdb.batch():
+                wdb.update_title(1, "New Title")
+                # In-transaction rows already point at the new layout...
+                row = wdb.conn.execute("SELECT path FROM books WHERE id = 1").fetchone()
+                self.assertEqual(row["path"], "Zed A. Writer/New Title (1)")
+                # ...but the files have not moved yet.
+                self.assertTrue(
+                    os.path.exists(self._dir("Zed A. Writer/Old Title (1)"))
+                )
+            # After the commit, the filesystem caught up.
+            self.assertTrue(os.path.exists(self._dir("Zed A. Writer/New Title (1)")))
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 1")[0][0],
+            "Zed A. Writer/New Title (1)",
+        )
+
+    def test_failed_batch_drops_the_relay(self):
+        self._seed_layout(
+            1,
+            "Zed A. Writer/Old Title (1)",
+            [("Old Title - Zed A. Writer.epub", b"EPUB")],
+        )
+        wdb = WritableCalibreDB(self.db_path)
+        with self.assertRaises(RuntimeError), wdb.batch():
+            wdb.update_title(1, "New Title")
+            raise RuntimeError("boom")
+        wdb.close()
+        # Rows rolled back AND the layout untouched: no half-applied state.
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 1")[0][0],
+            "Zed A. Writer/Old Title (1)",
+        )
+        self.assertTrue(os.path.exists(self._dir("Zed A. Writer/Old Title (1)")))
+        self.assertFalse(os.path.exists(self._dir("Zed A. Writer/New Title (1)")))
+
+    def test_no_path_row_gets_the_db_only_correction(self):
+        # Book 2 has no path and no directory (legacy rows): the setter
+        # writes the computed path without touching the filesystem.
+        with self._wdb() as wdb:
+            wdb.update_title(2, "Other Title")
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 2")[0][0],
+            "Zed A. Writer/Other Title (2)",
+        )
+        self.assertFalse(os.path.exists(self._dir("Zed A. Writer/Other Title (2)")))
+
+    def test_stale_target_directory_is_replaced(self):
+        self._seed_layout(
+            1,
+            "Zed A. Writer/Old Title (1)",
+            [("Old Title - Zed A. Writer.epub", b"EPUB")],
+        )
+        # A leftover from a crashed prior attempt at the target name.
+        stale = self._dir("Zed A. Writer/New Title (1)")
+        os.makedirs(stale)
+        with open(os.path.join(stale, "junk.txt"), "w") as f:
+            f.write("stale")
+        with self._wdb() as wdb:
+            wdb.update_title(1, "New Title")
+        self.assertTrue(
+            os.path.isfile(
+                self._dir("Zed A. Writer/New Title (1)/New Title - Zed A. Writer.epub")
+            )
+        )
+        self.assertFalse(
+            os.path.exists(self._dir("Zed A. Writer/New Title (1)/junk.txt"))
+        )
+
+    def test_failed_batch_drops_pending_removals_too(self):
+        # The 1.18 regression pin: a failed batch must clear the deferred
+        # removal queue, or a LATER successful batch would trash the files
+        # of rows the rollback resurrected.
+        self._seed_layout(
+            2,
+            "Zed A. Writer/Other (2)",
+            [("Other - Zed A. Writer.epub", b"EPUB")],
+        )
+        wdb = WritableCalibreDB(self.db_path)
+        with self.assertRaises(RuntimeError), wdb.batch():
+            wdb.remove_book(2, delete_files="trash")
+            raise RuntimeError("boom")
+        self.assertEqual(wdb._pending_removals, [])  # dropped with the rollback
+        wdb.close()
+        # A later successful batch must NOT flush the stale removal.
+        with self._wdb() as wdb2, wdb2.batch():
+            wdb2.add_tag(1, "Safe")
+        self.assertTrue(os.path.exists(self._dir("Zed A. Writer/Other (2)")))
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books WHERE id = 2")[0][0], 1)

@@ -286,13 +286,13 @@ print(cquarry.__version__)  # "1.17.0"
 | `register_udfs(conn)` | `None` | Register the trigger-required SQL functions/collations on any read-write connection. |
 | `uuid4([_arg])` | `str` | SQL-callable UUID generator matching Calibre's `uuid4()` UDF. |
 | `title_sort(title)` | `str` | Re-exported from `cquarry.helpers`. |
-| `update_title(book_id, new_title)` | `None` | Rename with refreshed sort key and `last_modified`. |
+| `update_title(book_id, new_title)` | `None` | Rename with refreshed sort key and `last_modified`; re-lays the on-disk layout (directory + format files move to the new stems; since 1.18.0). |
 | `add_tag(book_id, tag)` / `remove_tag(book_id, tag)` | `bool` | Idempotent tag mutation following Calibre's link-table sequence; returns whether state changed. |
 | `clear_tags(book_id)` | `int` | Detach every tag from the book (since 1.13.0): links deleted, orphaned tag rows pruned after (the `fkc_delete_on_tags` order), OPF resync queued only on change. Returns the count of links removed; an already-untagged book is an honest 0. |
 | `set_identifier(book_id, id_type, val)` | `bool` | EAV upsert honoring `UNIQUE(book, type)`; `None` deletes. Returns `True` if state changed. |
 | `set_identifiers(book_id, pairs)` | `int` | Batch upsert identifiers. Returns count of changed entries. |
 | `clear_identifier(book_id, id_type)` | `bool` | Delete one identifier pair (since 1.9.0). The type is normalized exactly like `set_identifier` (stripped, lowercased; empty raises); a pair already absent is an honest no-op. Deletion queues OPF regeneration. |
-| `set_authors(book_id, names)` | `bool` | Replace the author list; recomputes `books.author_sort` from per-author sort keys (" & "-joined); prunes orphans. |
+| `set_authors(book_id, names)` | `bool` | Replace the author list; recomputes `books.author_sort` from per-author sort keys (" & "-joined); prunes orphans. Re-lays the on-disk layout when the first author changes (since 1.18.0). |
 | `set_series(book_id, name, index=None)` | `bool` | Assign/clear series + `series_index` (defaults 1.0 fresh, preserves on reassign). |
 | `set_publisher(book_id, name)` | `bool` | Replace/clear publisher; case-insensitive match; orphans pruned. |
 | `set_rating(book_id, stars)` | `bool` | 0-5 stars stored as x2; UNIQUE(rating) rows deduplicated via find-or-create. |
