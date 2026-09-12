@@ -1333,10 +1333,17 @@ candidates at :1131-1175 except where a box says promotion candidate.
   `_match_all` (search.py:1088-1095) omits `identifiers` (upstream
   sweeps them, DS:808-818). Fix the code or the claim; add a pinning
   test either way.
-- [ ] **Port super-quotes `"""..."""`**: replicate upstream's
+- [x] **Port super-quotes `"""..."""`**: replicate upstream's
   docstring-sentinel pass before REPLACEMENTS in `_tokenize` (SQP:
   150,191-212; documented user feature, gui.rst:445). Today
   `title:"""a "b" (c)"""` mis-tokenizes.
+  *(SHIPPED 2026-09-12 in 1.18.0: the span is hex-shielded behind the
+  sentinel before the replacement cycle and recovered in unescape, so
+  quotes/parens/escapes inside survive verbatim and the whole thing
+  lexes as one word with its location. Upstream's span regex is the
+  at-least-one-character idiom (..*?), so a one-character span IS
+  super-quoted and only an empty span falls through -- pinned in
+  tests.)*
 - [ ] **`template:` raises a clear unsupported-location ParseException**
   (model: upstream TemplatesNotAllowed, DS:716-717) instead of silently
   matching nothing; record it in spec §5.

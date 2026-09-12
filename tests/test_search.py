@@ -131,6 +131,75 @@ class TestParser(unittest.TestCase):
     def test_bare_word_is_all(self):
         self.assertEqual(self.parse("Dysfunction"), ["token", "all", "Dysfunction"])
 
+    def test_super_quotes(self):
+        # The 1.18 pin: """...""" super-quotes shield quotes/parens/escapes
+        # from the lexer (upstream's documented escape hatch, gui.rst:445).
+        # The span (quotes included) is hex-shielded into one bare word, so
+        # `location:"""..."""` lexes and parses as one token+query.
+        self.assertEqual(
+            self.parse('title:"""a "b" (c)"""'), ["token", "title", 'a "b" (c)']
+        )
+        # Escapes and parens survive verbatim inside the span (the escape
+        # replacement cycle runs after the docstring pass, on the rest).
+        self.assertEqual(
+            self.parse('comments:"""((escapes \\" stay)"""'),
+            ["token", "comments", '((escapes \\" stay)'],
+        )
+        # A super-quote among ordinary tokens.
+        self.assertEqual(
+            self.parse('title:"""Weird (Title) Here""" or tags:Foo'),
+            ["or", ["token", "title", "Weird (Title) Here"], ["token", "tags", "Foo"]],
+        )
+        # Upstream's span regex is the "at least one character" idiom
+        # (..*?), so a one-character span IS super-quoted; only an empty
+        # span falls through to the plain lexer.
+        self.assertEqual(self.parse('title:"""x"""'), ["token", "title", "x"])
+
+    def test_super_quotes_engine_match(self):
+        books = {
+            1: {
+                "title": 'Heavy "Metal" (Deluxe)',
+                "authors": [],
+                "tags": [],
+                "comments": "",
+                "identifiers": {},
+                "cover": False,
+            },
+            2: {
+                "title": "Plain Title",
+                "authors": [],
+                "tags": [],
+                "comments": "",
+                "identifiers": {},
+                "cover": False,
+            },
+        }
+
+        class _QProvider:
+            def all_ids(self):
+                return set(books)
+
+            def field(self, book_id, location):
+                return books[book_id].get(location)
+
+            def vl_expression(self, name):
+                return None
+
+            def saved_search(self, name):
+                return None
+
+            def custom_locations(self):
+                return {}
+
+        engine = SearchEngine(_QProvider())
+        self.assertEqual(engine.search('title:"""Heavy "Metal" (Deluxe)"""'), {1})
+        self.assertEqual(engine.search('title:"""(Deluxe)"""'), {1})
+        self.assertEqual(engine.search('title:"""a "b" (c)"""'), set())
+        # The pre-1.18 pain point: the same text without super-quotes
+        # mis-tokenizes (an absorbed prefix, bare words, an unbalanced
+        # trailing quote), ending in a parse error instead of a query.
+        self.assertRaises(ParseException, engine.search, 'title:"a "b"')
+
     def test_location_token(self):
         self.assertEqual(
             self.parse("title:Dysfunction"), ["token", "title", "Dysfunction"]

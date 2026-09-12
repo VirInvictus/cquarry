@@ -243,6 +243,14 @@ class _Parser:
     EOF = 4
     REPLACEMENTS = tuple(("\\" + x, chr(i + 1)) for i, x in enumerate('\\"()'))
 
+    # Upstream's docstring sentinel (search_query_parser.py docstring_sep):
+    # a character run that cannot appear in a query naturally, wrapped
+    # around the hex-shielded content of a super-quoted span.
+    _DOCSTRING_SEP = "\u25a1\u0f00\u0646"
+    # Upstream's span regex is (""")(..*?)("""): note the `..*?`, so an
+    # EMPTY or one-character span is NOT super-quoted. Quirk kept verbatim.
+    _DOCSTRING_RE = re.compile(r'(""")(..*?)(""")', re.DOTALL)
+
     # Token grammar, tried in order at each position (replaces the old
     # re.Scanner: same semantics, documented API only).
     #   @...:word        GPM template reference (tokenized, not evaluated)
@@ -259,6 +267,19 @@ class _Parser:
         self.current = 0
 
     def _tokenize(self, expr: str) -> list[tuple[int, str]]:
+        # Super-quotes """...""" (upstream's documented escape hatch for
+        # quote/paren-heavy queries, gui.rst:445): the span's content is
+        # hex-shielded behind the sentinel BEFORE the escape/paren
+        # replacement cycle, so quotes, parens and escapes inside survive
+        # the lexer verbatim; the unescape pass recovers them.
+        expr = self._DOCSTRING_RE.sub(
+            lambda m: (
+                self._DOCSTRING_SEP
+                + m.group(2).encode("utf-8").hex()
+                + self._DOCSTRING_SEP
+            ),
+            expr,
+        )
         for k, v in self.REPLACEMENTS:
             expr = expr.replace(k, v)
         tokens: list[tuple[int, str]] = []
@@ -281,7 +302,17 @@ class _Parser:
         if tail.strip():
             raise ParseException(f"Could not parse near: {tail!r}")
 
+        sep = re.escape(self._DOCSTRING_SEP)
+
         def unescape(x: str) -> str:
+            # Recover the super-quoted spans first (hex -> text), then the
+            # escape/paren sentinels -- upstream unescape()'s order.
+            x = re.sub(
+                f"({sep})(..*?)({sep})",
+                lambda m: bytes.fromhex(m.group(2)).decode("utf-8"),
+                x,
+                flags=re.DOTALL,
+            )
             for k, v in self.REPLACEMENTS:
                 x = x.replace(v, k[1:])
             return x
