@@ -31,9 +31,9 @@ of search-edge divergences (one of them a real bug).
 
 1. **`full-text-search.db` is entirely unread** (upstream
    `calibre/db/fts/connect.py:35-39` attaches it beside metadata.db;
-   `fts_sqlite.sql` defines `books_text` — book, format, format_size,
+   `fts_sqlite.sql` defines `books_text`: book, format, format_size,
    format_hash, searchable_text, text_size, text_hash, err_msg,
-   timestamp — plus FTS5 index tables with a custom tokenizer). The
+   timestamp; plus FTS5 index tables with a custom tokenizer). The
    plain `books_text` table is readable with stdlib sqlite and needs no
    FTS5 machinery. This is the single largest missing read surface:
    book-content search and snippets with zero Calibre process, plus
@@ -41,10 +41,10 @@ of search-edge divergences (one of them a real bug).
    signal, and format-hash change detection.
 2. **`books_pages_link` auxiliary columns** (`algorithm`, `format`,
    `format_size`, `timestamp`, `needs_scan`; upstream
-   `schema_upgrades.py:853-862`) — cquarry reads only `book, pages`
+   `schema_upgrades.py:853-862`): cquarry reads only `book, pages`
    (db.py:314). Enables a "pages pending rescan" integrity predicate
    and provenance for displayed counts.
-3. **Custom-series `extra` (index) resolution** — db.py:1748-1749
+3. **Custom-series `extra` (index) resolution**: db.py:1748-1749
    registers `#label_index` as a float location that db.py:1759-1760
    can never resolve because `load_custom_column` never selects the
    link table's `extra` float (db.py:1067-1071). `#myseries_index:>3`
@@ -54,7 +54,7 @@ of search-edge divergences (one of them a real bug).
    notes with `\x1f\n` (upstream `calibre/db/annotations.py:134-145`).
    One sentence in spec/CLAUDE.md stops consumers mishandling notes.
 5. **Marginal**: the normalized custom-column value-table `link` column
-   (upstream schema_upgrades.py:836) — no Calibre UI populates it; read
+   (upstream schema_upgrades.py:836); no Calibre UI populates it; read
    it only if touching item 3's SQL anyway.
 
 ## B. Search-parity gaps (spec §5 honesty pass included)
@@ -67,7 +67,7 @@ with false-inversion and nesting ban; user categories with `.` subcats;
 saved-search/VL recursion detection; custom `#label`/`#label_index`
 addressing; language canonicalization.
 
-1. **Real bug**: `identifiers:KEY:TRUE/FALSE` inverts on uppercase —
+1. **Real bug**: `identifiers:KEY:TRUE/FALSE` inverts on uppercase:
    search.py:1058 gates on `valq.lower()` but selects with raw `valq`
    (:1067). Upstream lowercases once and uses it for both (DS:424-430).
 2. **Doc/code contradiction**: spec.md:87 and the roadmap ship note say
@@ -111,7 +111,7 @@ trash.
    `cache.py:1986-1987`, `backend.py:2098-2202`): dir rename, format
    file renames to the new `Title - Author.ext` stem, empty-parent
    removal. Without it, curation renames leave `Author/Title (id)`
-   directories lying about their contents — the one gap that silently
+   directories lying about their contents: the one gap that silently
    corrupts the human-navigable layout. Internal completion; M.
 2. **`rename_entity` / `remove_entity_everywhere`** (upstream
    `cache.py:2758-2862`: author renames recompute sorts and re-lay
@@ -154,7 +154,7 @@ OPF-dump-now (decided), notes (declined by recorded decision).
 
 Read-side: annotations with searchable_text, dirty queues, full custom
 column layout handling, single-entity fetches, the entire guard/trigger
-census — none of it present in calibredb's surface. Search-side: the
+census; none of it present in calibredb's surface. Search-side: the
 port is saner than upstream at the edges (raises on garbage instead of
 silently truncating). Write-side: batch sessions with filesystem
 compensation and the `set_format` atomic path have no upstream

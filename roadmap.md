@@ -1090,7 +1090,7 @@ closing the connection, never mentioning commit-on-exit.*
       APIs, the ~ match kind incl. malformed-pattern raise, and the POSIX
       case-semantics pin for format_path_index. The BaseException witness
       rode 7c798a3.)*
-- [ ] **Deflate the inherited-test inflation:** 306 collected items are 252
+- [x] **Deflate the inherited-test inflation:** 306 collected items are 252
       distinct tests; `TestWriteSideExpansion`'s 13 tests re-run in four
       subclasses with byte-identical fixtures (39 items). Convert to a
       fixture mixin, keep the variant only where the schema genuinely
@@ -1308,7 +1308,7 @@ lane.)*
   no taught query; refresh/set_format/export_rows/find_identifierless
   belong to Hermitage/bindery/CQ surfaces the skills do not teach).
 
-## Phase 13: the upstream comparison — FTS reads, search honesty, write completions (proposed 2026-09-12, from REPORT-12-Sept.md)
+## Phase 13: the upstream comparison, FTS reads, search honesty, write completions (proposed 2026-09-12, from REPORT-12-Sept.md)
 
 Three research passes compared this repo line-for-line against the
 upstream Calibre clone (schema + upgrade map, search stack, write
@@ -1378,13 +1378,15 @@ candidates at :1131-1175 except where a box says promotion candidate.
 
 ### B. Search parity (spec §5 honesty pass included)
 
-- [ ] **Fix the `identifiers:KEY:TRUE/FALSE` inversion**: search.py:1058
+- [x] **Fix the `identifiers:KEY:TRUE/FALSE` inversion**: search.py:1058
   gates on `valq.lower()` but selects with raw `valq` (:1067); upstream
   lowercases once and uses it for both (DS:424-430). Add a pinning test.
-- [ ] **Reconcile the `all`-sweep identifiers contradiction**: spec.md:87
+  *(SHIPPED 2026-09-12 in 1.18.0 via b810d94 with a pinning test; the box was missed by the lane and flipped by the 2026-09-12 verification pass.)*
+- [x] **Reconcile the `all`-sweep identifiers contradiction**: spec.md:87
   and the roadmap ship note say identifier keys sweep as text;
   `_match_all` (search.py:1088-1095) omits `identifiers` (upstream
   sweeps them, DS:808-818). Fix the code or the claim; add a pinning
+  *(SHIPPED 2026-09-12 in 1.18.0 via b810d94, the all-sweep presence branch; the box was missed by the lane and flipped by the 2026-09-12 verification pass.)*
   test either way.
 - [x] **Port super-quotes `"""..."""`**: replicate upstream's
   docstring-sentinel pass before REPLACEMENTS in `_tokenize` (SQP:
@@ -1492,7 +1494,7 @@ candidates at :1131-1175 except where a box says promotion candidate.
   Calibre's own to clean -- the sidecar's delete triggers tokenize
   through FTS5 with Calibre's custom tokenizer, which does not exist
   outside Calibre.)*
-- [x] **Promotion candidate: trash lifecycle** — `empty_trash()` /
+- [x] **Promotion candidate: trash lifecycle**: `empty_trash()` /
   `expire_trash(older_than=)` (upstream `backend.py:2386-2409`,
   `cache.py:3557`). S.
   *(DEFERRED 2026-09-12 (Brandon's call, "four loop-closers"), then
@@ -1558,7 +1560,7 @@ test_write.py style.
 
 This is a FOUR-PROGRAM update: cquarry, bindery-cli, CalibreQuarry,
 Hermitage. Policy: keep the three consumers current with the newest
-cquarry — no pinning to old versions when building against upstream is
+cquarry: no pinning to old versions when building against upstream is
 cheap. A feature with no purpose for a consumer does not force that
 consumer's floor requirement, but everything comes up if able, in the
 logical order (cquarry ships and pushes first; consumers follow).
@@ -1584,7 +1586,7 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
   CI green. No release: its Phase 19 lane follows.)*
 - [x] **bindery-cli brings up**: floor -> 1.18.0, lock regen,
   run_tests.sh + CI, adoption note. Consumes: C.4 (its set_format
-  repair lane leaves Calibre's FTS index and page counts honest — the
+  repair lane leaves Calibre's FTS index and page counts honest; the
   exact stale-index hole the research flagged), C.8 when approved
   (save/restore_original_format is bindery's undo-able repair), plus
   the search/runtime fixes riding the install.
