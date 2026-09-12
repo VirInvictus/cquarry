@@ -1761,7 +1761,10 @@ class CalibreDB:
         """Concatenated annotation searchable text for one book (cached).
 
         Feeds the ``annotations:`` search location. Empty string when the
-        book has no annotations or the schema predates the table.
+        book has no annotations or the schema predates the table. Within a
+        stored ``searchable_text``, an annotation's notes follow its
+        highlighted text joined by ``\n\x1f\n`` (LF, ASCII unit separator,
+        LF; upstream ``annot_db_data``).
         """
         if self._annotations_text_cache is None:
             self._annotations_text_cache = {}

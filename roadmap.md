@@ -1308,8 +1308,13 @@ candidates at :1131-1175 except where a box says promotion candidate.
   *(SHIPPED 2026-09-12 in 1.18.0: `{book_id: {FORMAT: err_msg}}` over
   `get_text_extractions`, sorted ids; the third sanctioned non-cached
   read in integrity after the two cover-file checks.)*
-- [ ] **Doc line**: `annotations.searchable_text` joins highlight text
+- [x] **Doc line**: `annotations.searchable_text` joins highlight text
   and notes with `\x1f\n` (upstream `calibre/db/annotations.py:134-145`).
+  *(SHIPPED 2026-09-12 in 1.18.0, verified against the upstream source:
+  the actual separator is `\n\x1f\n` -- LF, unit separator, LF -- the
+  research line dropped the leading LF. Recorded in spec §3.2,
+  CLAUDE.md's schema facts, API.md's get_annotations row, and the
+  _annotations_text docstring.)*
 - [x] **(marginal)** Read the normalized custom-column value-table
   `link` column (upstream schema_upgrades.py:836) into
   `load_custom_column` output; only if touching that SQL anyway.
