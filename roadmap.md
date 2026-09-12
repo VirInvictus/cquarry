@@ -1637,3 +1637,38 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
   1.18.0's commit. Skills swept same-release (phase-3 updated:
   set_format FTS dirtying, set_identifier comma cleaning, the rename
   re-lay caution; phase-1 clean).)*
+
+## New findings 2026-09-12 (six-lens full audit; detail: audit/FULL-AUDIT-2026-09-12.md, Wave 13)
+
+- [ ] **HIGH: save_original_format poisons FTS dirtying for the whole
+      connection.** write.py:2221 opens its batch without
+      _ensure_fts_attached(); the nested add_format/set_format then ATTACH
+      inside BEGIN IMMEDIATE, the OperationalError is caught, and
+      _fts_state=False is cached for the connection lifetime - every later
+      format verb silently skips dirtied_formats queueing and needs_scan.
+      One-line fix: ensure before the batch, mirroring
+      restore_original_format:2284.
+- [ ] **Flush-failure state corruption:** in batch()'s finally, the three
+      flushes run BEFORE _batch_dirs.clear()/_batch_poisoned reset, so a
+      flush OSError leaves the caller with a committed transaction plus
+      leaked dirs a later failed exit will rmtree (rows pointing at
+      deleted directories). Reset state in a finally before propagating;
+      make _remove_book_dir idempotent.
+- [ ] **FTS contract gaps:** remove_book never clears dirtied_formats
+      (docstring + API.md claim the queues are cleaned; needs
+      ensure-before-begin + per-format clearing); add_book bypasses FTS/
+      pages dirtying for seeded formats; non-batched update_title/
+      set_authors apply the fs relayout before commit (a failed commit
+      diverges rows from files - remove_book's after-commit ordering is
+      the correct pattern).
+- [ ] **Blitz candidates:** list_books ids-order mode (S; retires Carrel-
+      calibre-web's live preserve_order shim - the only parked item with a
+      consumer); metadata-quality predicates in integrity.py
+      (find_invalid_uuids, sentinel pubdate, bad language codes - the
+      routed bindery item, 51 OPF-085 warnings counted); PRAGMA
+      data_version external_changes_detected() (S); annotations N+1 fix +
+      optional decoded view.
+- [ ] **GitHub presentation (workspace batch):** description rewrite
+      (discloses the write path, drops backticks); drop the cli topic, add
+      library-management/ebook-management/search; homepage = PyPI;
+      Releases for v1.18-v1.20; wiki off; README badges + the 3.14+ line.
