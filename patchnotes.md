@@ -1,3 +1,51 @@
+## v1.19.0 (2026-09-12)
+
+### The approved promotion candidates: the four loop-closers
+
+Brandon approved four of the six researched write-API candidates from
+REPORT-12-Sept.md (Phase 13 section C); the other two stay deferred with
+their consumers. Every verb ships with tests against the trigger-hazard
+schema, keeps its file work behind the commit boundary, and rides the
+1.18 machinery (path re-laying, FTS dirtying, the batch queues).
+
+- **`rename_entity(kind, old, new)` / `remove_entity_everywhere(kind,
+  name)`.** The fix-the-misspelled-name verb for authors, series,
+  publishers, and tags. A rename whose target already exists merges:
+  colliding links drop against the survivor's UNIQUE(book, fk) and the
+  old row is deleted. Author renames recompute `books.author_sort` and
+  re-lay every affected book's on-disk path; series merges renumber
+  incoming books to max+1 over the survivor's other books; series removal
+  nulls `series_index` like `set_series(None)`. Both return the affected
+  book count and queue every affected book for OPF resync.
+- **`set_cover(book_id, data)` / `remove_cover(book_id)`.** The
+  audit-to-fix loop closes: `find_low_res_covers` names the bad cover,
+  `set_cover` replaces it. JPEG/PNG sniff-or-raise (the `add_book` rule;
+  no stdlib transcoding), written to `cover.jpg`/`cover.png` with any
+  stale cover under the other extension removed; `remove_cover` sweeps
+  both and clears `has_cover`.
+- **`set_author_sort` / `set_title_sort` / `set_timestamp`.** Verbatim
+  passthrough corrections for mangled sorts (`set_timestamp` normalizes
+  like `set_pubdate`). A later `set_authors`/`update_title` recomputes
+  over an override by design; that interplay is documented on both sides.
+- **`save_original_format(book_id, fmt)` /
+  `restore_original_format(book_id, "ORIGINAL_<FMT>")`.** The undo-able
+  repair primitive bindery's lane asked for. The copy is a real
+  `ORIGINAL_<FMT>` data row plus a `<stem>.original_<ext>` file --
+  upstream's own convention, so Calibre sees it natively. Restore swaps
+  the bytes back, keeps the target's filename stem, removes the original
+  row/file/queue entry, and always queues the restored format for FTS
+  re-extraction (the bytes changed even when the row was already
+  correct).
+
+Deferred: the trash lifecycle (nothing uses
+`remove_book(delete_files="trash")` in anger yet) and
+`create_custom_column`/`delete_custom_column` (the acquisition importer
+is a future project; schema DDL waits for a real consumer).
+
+Suite: 400 passed (was 381). Consumers: CalibreQuarry and bindery-cli
+bump their floors to >=1.19.0 (the consuming riders); Hermitage consumes
+none of the four and stays at the 1.18.0 pin.
+
 ## v1.18.0 (2026-09-12)
 
 ### Phase 13: the upstream comparison (FTS reads, search honesty, write completions)

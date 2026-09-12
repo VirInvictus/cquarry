@@ -1465,6 +1465,9 @@ candidates at :1131-1175 except where a box says promotion candidate.
 - [ ] **Promotion candidate: trash lifecycle** — `empty_trash()` /
   `expire_trash(older_than=)` (upstream `backend.py:2386-2409`,
   `cache.py:3557`). S.
+  *(DEFERRED 2026-09-12 (Brandon's call, "four loop-closers"): nothing
+  uses remove_book(delete_files="trash") in anger yet, so there is no
+  trash to manage; revisit when .caltrash actually accumulates.)*
 - [x] **Promotion candidate: `set_author_sort` / `set_title_sort` /
   `set_timestamp` passthrough setters** (upstream `cache.py:2348-2366`).
   S.
@@ -1476,6 +1479,10 @@ candidates at :1131-1175 except where a box says promotion candidate.
   their job.)*
 - [ ] **Promotion candidate: `create_custom_column` /
   `delete_custom_column`** (upstream `backend.py:1384,1536`). M.
+  *(DEFERRED 2026-09-12 (Brandon's call): the consumer -- the acquisition
+  bootstrap creating #audience/#reading_status -- is a future project,
+  and schema DDL is the riskiest of the candidates to build
+  speculatively. Revisit when the importer is real.)*
 - [x] **Promotion candidate: `save_original_format` /
   `restore_original_format`** (upstream `cache.py:1581-1614`). S-M.
   *(APPROVED 2026-09-12 (Brandon, "four loop-closers") and SHIPPED in
@@ -1556,11 +1563,13 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
   consumer's floor in that wave (C.3 -> CalibreQuarry's cover verb;
   C.8 -> bindery's repair lane; C.7 -> the acquisition bootstrap; C.2/
   C.5/C.6 -> CalibreQuarry's curation verbs). No approval, no rider.
-  *(DISPOSITIONED 2026-09-12: the six candidates were RAISED at session
-  start, batched, per the standing rule; no approval arrived during the
-  lane, so every box stays SHUT and no rider shipped. The raise text
-  stands in the session record; approval whenever it comes ships them
-  as 1.19.0 under this box's shape.)*
+  *(DISPOSITIONED 2026-09-12, twice: raised at session start, then
+  answered -- Brandon approved the FOUR LOOP-CLOSERS (C.2 rename_entity,
+  C.3 set_cover, C.6 sort setters, C.8 save/restore_original_format),
+  which shipped as 1.19.0 in commits d2b4e09/64a874b/89bf66f/8d7e80f;
+  C.5 and C.7 stay deferred with their boxes annotated. Rider floors:
+  CalibreQuarry and bindery-cli (the consuming consumers) bump to
+  >=1.19.0; Hermitage consumes none of the four and is exempt.)*
 - [x] **Ecosystem close-out**: all three consumers' adoption notes
   recorded in this roadmap's cascade block; the per-consumer floors
   stated in each consumer's pyproject; nothing left pinned below
