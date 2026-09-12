@@ -2633,6 +2633,296 @@ class WritableCalibreDB:
             "author_sort_computed": author_sort,
         }
 
+    # -- Custom-column schema management (1.20; the approved C.7) --
+
+    # Upstream library/custom_columns.py CUSTOM_DATA_TYPES; the storage
+    # mapping is create_custom_column's (backend.py:1384).
+    _CUSTOM_DATA_TYPES = frozenset(
+        {
+            "rating",
+            "text",
+            "comments",
+            "datetime",
+            "int",
+            "float",
+            "bool",
+            "series",
+            "composite",
+            "enumeration",
+        }
+    )
+    # Datatypes stored directly (Pattern B); the rest are normalized
+    # (Pattern A: value table + link table).
+    _CUSTOM_DIRECT_TYPES = frozenset(
+        {"datetime", "comments", "int", "bool", "float", "composite"}
+    )
+    _CUSTOM_DDL_TYPES = {
+        "rating": "INT",
+        "int": "INT",
+        "text": "TEXT",
+        "comments": "TEXT",
+        "series": "TEXT",
+        "composite": "TEXT",
+        "enumeration": "TEXT",
+        "float": "REAL",
+        "datetime": "timestamp",
+        "bool": "BOOL",
+    }
+
+    def create_custom_column(
+        self,
+        label: str,
+        name: str,
+        datatype: str,
+        *,
+        is_multiple: bool = False,
+        editable: bool = True,
+        display: dict[str, Any] | None = None,
+    ) -> int:
+        """Create a custom column and return its column number.
+
+        Mirrors upstream's ``create_custom_column`` (backend.py:1384)
+        DDL-for-DDL: the ``custom_columns`` row, the storage tables (value
+        table + link table for the normalized datatypes
+        text/enumeration/series/rating; a direct table for
+        int/float/bool/datetime/comments/composite), the fkc guard
+        triggers, the series ``extra`` index column, and the
+        ``tag_browser_*`` views (including the ``filtered_`` one, whose
+        ``books_list_filter()`` only evaluates inside Calibre -- views are
+        lazy, so creating it is safe and keeps the schema faithful).
+        Label rules are upstream's: lowercase letters/digits/underscores,
+        starting with a letter. ``is_multiple`` only applies to text (and
+        composite). Also sets Calibre's
+        ``update_all_last_mod_dates_on_start`` pref, exactly like upstream,
+        so the next Calibre start refreshes every book's metadata. Once
+        created, the standard write/read surface
+        (:meth:`set_custom_column`, :meth:`load_custom_column
+        <cquarry.db.CalibreDB.load_custom_column>`, the ``#label`` search
+        locations) picks the column up automatically; a long-lived
+        :class:`cquarry.db.CalibreDB` reader must ``refresh()`` to see it.
+        """
+        label = (label or "").strip()
+        if not label:
+            raise ValueError("No label was provided")
+        if (
+            re.match(r"^\w*$", label) is None
+            or not label[0].isalpha()
+            or label.lower() != label
+        ):
+            raise ValueError(
+                "The label must contain only lower case letters, digits "
+                "and underscores, and start with a letter"
+            )
+        datatype = (datatype or "").strip().lower()
+        if datatype not in self._CUSTOM_DATA_TYPES:
+            raise ValueError(f"{datatype!r} is not a supported data type")
+        display = display if display is not None else {}
+        if self.conn.execute(
+            "SELECT 1 FROM custom_columns WHERE label = ?", (label,)
+        ).fetchone():
+            raise ValueError(f"A custom column with label {label!r} already exists")
+        required = {"editable", "display", "normalized"}
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(custom_columns)")}
+        if not required.issubset(cols):
+            raise ValueError(
+                "The custom_columns table predates the editable/display/"
+                "normalized columns; column creation needs a modern schema"
+            )
+        normalized = datatype not in self._CUSTOM_DIRECT_TYPES
+        is_multiple = bool(is_multiple) and datatype in ("text", "composite")
+        with self.batch():
+            # The column number must not collide with storage tables that
+            # still exist for a flag-deleted column (Calibre purges those
+            # tables at its next startup, so a fresh id can otherwise land
+            # on a live table). One past the highest row id AND table
+            # number is always free -- a deliberate, documented deviation
+            # from upstream's bare lastrowid.
+            num = self.conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM custom_columns"
+            ).fetchone()[0]
+            for (tbl,) in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND "
+                "(name LIKE 'custom_column_%' OR name LIKE 'books_custom_column_%')"
+            ):
+                m = re.search(r"(\d+)$", tbl)
+                if m:
+                    num = max(num, int(m.group(1)))
+            num += 1
+            self.conn.execute(
+                "INSERT INTO custom_columns"
+                "(id,label,name,datatype,is_multiple,editable,display,normalized)"
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    num,
+                    label,
+                    name,
+                    datatype,
+                    int(is_multiple),
+                    int(editable),
+                    json.dumps(display),
+                    int(normalized),
+                ),
+            )
+            table, lt = f"custom_column_{num}", f"books_custom_column_{num}_link"
+            dt = self._CUSTOM_DDL_TYPES[datatype]
+            collate = "COLLATE NOCASE" if dt == "TEXT" else ""
+            # One statement per execute(): executescript() would COMMIT
+            # the open batch transaction (Python's legacy transaction
+            # control), breaking the pass's atomicity.
+            stmts: list[str] = []
+            if normalized:
+                extra = "extra REAL," if datatype == "series" else ""
+                stmts.append(f"""
+                    CREATE TABLE {table}(
+                        id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                        value {dt} NOT NULL {collate},
+                        link TEXT NOT NULL DEFAULT "",
+                        UNIQUE(value));""")
+                stmts.append(f"CREATE INDEX {table}_idx ON {table} (value {collate});")
+                stmts.append(f"""
+                    CREATE TABLE {lt}(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        book INTEGER NOT NULL,
+                        value INTEGER NOT NULL,
+                        {extra}
+                        UNIQUE(book, value));""")
+                stmts.append(f"CREATE INDEX {lt}_aidx ON {lt} (value);")
+                stmts.append(f"CREATE INDEX {lt}_bidx ON {lt} (book);")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_update_{lt}_a
+                            BEFORE UPDATE OF book ON {lt}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from books WHERE id=NEW.book) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+                                END;
+                            END;""")
+                # Upstream writes `BEFORE UPDATE OF author` here -- a column
+                # this link table does not have -- so that guard can never
+                # fire; the value column is what is actually being guarded.
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_update_{lt}_b
+                            BEFORE UPDATE OF value ON {lt}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from {table} WHERE id=NEW.value) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: value not in {table}')
+                                END;
+                            END;""")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_insert_{lt}
+                            BEFORE INSERT ON {lt}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from books WHERE id=NEW.book) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+                                    WHEN (SELECT id from {table} WHERE id=NEW.value) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: value not in {table}')
+                                END;
+                            END;""")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_delete_{lt}
+                            AFTER DELETE ON {table}
+                            BEGIN
+                                DELETE FROM {lt} WHERE value=OLD.id;
+                            END;""")
+                stmts.append(f"""
+                    CREATE VIEW tag_browser_{table} AS SELECT
+                        id,
+                        value,
+                        (SELECT COUNT(id) FROM {lt} WHERE value={table}.id) count,
+                        (SELECT AVG(r.rating)
+                         FROM {lt},
+                              books_ratings_link as bl,
+                              ratings as r
+                         WHERE {lt}.value={table}.id and bl.book={lt}.book and
+                               r.id = bl.rating and r.rating <> 0) avg_rating,
+                        value AS sort
+                    FROM {table};""")
+                stmts.append(f"""
+                    CREATE VIEW tag_browser_filtered_{table} AS SELECT
+                        id,
+                        value,
+                        (SELECT COUNT({lt}.id) FROM {lt} WHERE value={table}.id AND
+                        books_list_filter(book)) count,
+                        (SELECT AVG(r.rating)
+                         FROM {lt},
+                              books_ratings_link as bl,
+                              ratings as r
+                         WHERE {lt}.value={table}.id AND bl.book={lt}.book AND
+                               r.id = bl.rating and r.rating <> 0 AND
+                               books_list_filter(bl.book)) avg_rating,
+                        value AS sort
+                    FROM {table};""")
+            else:
+                stmts.append(f"""
+                    CREATE TABLE {table}(
+                        id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                        book  INTEGER,
+                        value {dt} NOT NULL {collate},
+                        UNIQUE(book));""")
+                stmts.append(f"CREATE INDEX {table}_idx ON {table} (book);")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_insert_{table}
+                            BEFORE INSERT ON {table}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from books WHERE id=NEW.book) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+                                END;
+                            END;""")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_update_{table}
+                            BEFORE UPDATE OF book ON {table}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from books WHERE id=NEW.book) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+                                END;
+                            END;""")
+            for statement in stmts:
+                self.conn.execute(statement)
+            # Upstream sets this pref so the next Calibre start refreshes
+            # every book's last_modified (new column = new metadata shape).
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("update_all_last_mod_dates_on_start", "true"),
+            )
+        return num
+
+    def delete_custom_column(self, label: str) -> bool:
+        """Flag a custom column for deletion (returns True when flagged).
+
+        Upstream's ``delete_custom_column`` does NOT drop the storage: it
+        sets ``mark_for_delete=1`` on the ``custom_columns`` row, and the
+        physical purge (value tables, link tables, the row itself) happens
+        at Calibre's next startup. cquarry keeps that contract -- nothing
+        is dropped here -- and, faithful to the reader, the flagged column
+        stays listed and functional until Calibre's purge. Raises
+        ValueError for an unknown label, and on schemas predating the
+        ``mark_for_delete`` column (deletion needs a modern schema).
+        """
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(custom_columns)")}
+        if "mark_for_delete" not in cols:
+            # Checked first: resolving the column on such a schema would
+            # fail confusingly on its missing modern columns anyway.
+            raise ValueError(
+                "The custom_columns table predates mark_for_delete; "
+                "column deletion needs a modern schema"
+            )
+        row = self._custom_column_meta(label)
+        self._begin()
+        try:
+            self.conn.execute(
+                "UPDATE custom_columns SET mark_for_delete = 1 WHERE id = ?",
+                (row["id"],),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
     # -- Book lifecycle --
 
     # Upstream's library-local trash directory (constants.py TRASH_DIR_NAME);

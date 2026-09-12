@@ -13,6 +13,7 @@ import time
 import unittest
 from datetime import UTC, datetime, timedelta, timezone
 
+from cquarry.db import CalibreDB
 from cquarry.write import WritableCalibreDB, register_udfs, title_sort
 
 
@@ -2586,3 +2587,154 @@ class TestTrashLifecycle(unittest.TestCase):
             self.assertEqual(wdb.empty_trash(), 0)
             self.assertEqual(wdb.expire_trash(), 0)
             self.assertEqual(wdb.list_trash(), [])
+
+
+class TestCustomColumnSchema(unittest.TestCase):
+    """C.7: create_custom_column / delete_custom_column (1.20).
+
+    The acceptance is the full round trip: create, write through
+    set_custom_column, read through a fresh CalibreDB (load/field/search),
+    then flag-delete and confirm the faithful not-yet-purged state."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)
+        conn.executescript(_ADD_BOOK_SCHEMA)
+        # The real schema's custom_columns carries mark_for_delete (the
+        # delete verb records it); the shared fixture omits it.
+        conn.execute(
+            "ALTER TABLE custom_columns ADD COLUMN mark_for_delete INTEGER DEFAULT 0"
+        )
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'One')")
+        conn.execute("INSERT INTO books (id, title) VALUES (2, 'Two')")
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql_rows(self, sql):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(sql).fetchall()]
+        finally:
+            conn.close()
+
+    def test_create_text_multiple_round_trip(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            num = wdb.create_custom_column(
+                "audience", "Audience", "text", is_multiple=True
+            )
+            self.assertGreaterEqual(num, 1)
+            wdb.set_custom_column(1, "#audience", ["Fantasy", "Young Adult"])
+        # Pattern A storage exists: value table + link table + triggers.
+        self.assertEqual(
+            self._sql_rows(f"SELECT value FROM custom_column_{num}"),
+            [("Fantasy",), ("Young Adult",)],
+        )
+        self.assertGreaterEqual(
+            self._sql_rows(
+                "SELECT count(*) FROM sqlite_master WHERE type='trigger'"
+                f" AND name LIKE 'fkc_%books_custom_column_{num}_link'"
+            )[0][0],
+            2,
+        )
+        # A fresh reader sees the column and its values end to end.
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(
+                db.load_custom_column("#audience"), {1: ["Fantasy", "Young Adult"]}
+            )
+            self.assertEqual(db.search("#audience:Fantasy"), {1})
+
+    def test_create_series_column_carries_the_extra_index(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            num = wdb.create_custom_column("saga", "Saga", "series")
+            wdb.set_custom_column(1, "#saga", "The Saga")
+            wdb.conn.execute(
+                f"UPDATE books_custom_column_{num}_link SET extra = 2.5 WHERE book = 1"
+            )
+        with CalibreDB(self.db_path) as db:
+            # A.3's derived index location works on created columns too.
+            self.assertEqual(db.field(1, "#saga_index"), 2.5)
+
+    def test_create_bool_direct_storage(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            num = wdb.create_custom_column("flagged", "Flagged", "bool")
+            self.assertTrue(wdb.set_custom_column(1, "#flagged", True))
+            # Direct storage upserts: the second write flips in place.
+            self.assertTrue(wdb.set_custom_column(1, "#flagged", False))
+        self.assertEqual(
+            self._sql_rows(f"SELECT book, value FROM custom_column_{num}"),
+            [(1, 0)],
+        )
+
+    def test_create_validation(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.create_custom_column("2bad", "X", "text")
+            with self.assertRaises(ValueError):
+                wdb.create_custom_column("Bad Upper", "X", "text")
+            with self.assertRaises(ValueError):
+                wdb.create_custom_column("ok", "X", "notatype")
+            wdb.create_custom_column("ok", "X", "text")
+            with self.assertRaises(ValueError):
+                wdb.create_custom_column("ok", "Y", "text")  # duplicate label
+
+    def test_composite_creates_storage_like_upstream_but_writes_raise(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            num = wdb.create_custom_column(
+                "calc",
+                "Calc",
+                "composite",
+                display={"composite_template": "{title}"},
+            )
+            self.assertGreaterEqual(num, 1)
+            self.assertEqual(
+                self._sql_rows(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table'"
+                    f" AND name='custom_column_{num}'"
+                )[0][0],
+                1,
+            )
+            with self.assertRaises(ValueError):
+                wdb.set_custom_column(1, "#calc", "x")  # no storage writes
+
+    def test_delete_flags_but_never_drops(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            num = wdb.create_custom_column("gone", "Gone", "text")
+            self.assertTrue(wdb.delete_custom_column("#gone"))
+            with self.assertRaises(ValueError):
+                wdb.delete_custom_column("#nope")
+        self.assertEqual(
+            self._sql_rows("SELECT mark_for_delete FROM custom_columns")[0][0], 1
+        )
+        # Faithful to the reader: the column still works until Calibre
+        # performs the physical purge at its next startup.
+        tables = self._sql_rows(
+            "SELECT count(*) FROM sqlite_master WHERE type='table'"
+            f" AND name IN ('custom_column_{num}',"
+            f" 'books_custom_column_{num}_link')"
+        )[0][0]
+        self.assertEqual(tables, 2)
+
+    def test_delete_on_schema_without_the_flag_raises(self):
+        # A schema predating mark_for_delete cannot record the deletion.
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.create_custom_column("gone", "Gone", "text")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE cc_old AS SELECT id, label, name, datatype,"
+                " is_multiple FROM custom_columns"
+            )
+            conn.execute("DROP TABLE custom_columns")
+            conn.execute("ALTER TABLE cc_old RENAME TO custom_columns")
+            conn.commit()
+        finally:
+            conn.close()
+        wdb = WritableCalibreDB(self.db_path)
+        with self.assertRaises(ValueError):
+            wdb.delete_custom_column("#gone")
+        wdb.close()
