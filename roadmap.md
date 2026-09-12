@@ -1432,11 +1432,16 @@ candidates at :1131-1175 except where a box says promotion candidate.
   `delete_custom_column`** (upstream `backend.py:1384,1536`). M.
 - [ ] **Promotion candidate: `save_original_format` /
   `restore_original_format`** (upstream `cache.py:1581-1614`). S-M.
-- [ ] **`clean_identifier` parity** (upstream `db/write.py:118-121`):
+- [x] **`clean_identifier` parity** (upstream `db/write.py:118-121`):
   value `,`->`|`, type strips `:`/`,`. S.
-- [ ] **Docs: record the case-change policy** (cquarry never re-cases
+  *(SHIPPED 2026-09-12 in 1.18.0: applied in set_identifier and mirrored
+  in clear_identifier's type normalization, so every path through the
+  chokepoint (set_identifiers, add_book seeding included) stores
+  Calibre's comma-free shape.)*
+- [x] **Docs: record the case-change policy** (cquarry never re-cases
   existing entity rows; upstream `allow_case_change`,
   db/write.py:299-315) in spec §5. Docs-only.
+  *(SHIPPED 2026-09-12 in 1.18.0 as dated spec §5 item 12.)*
 
 Ship shape: batch A.1-A.4 + B.1-B.5 + C.9-C.10 as 1.18.0 (research
 lane); the promotion-candidate boxes stay shut until Brandon approves

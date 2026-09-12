@@ -188,6 +188,25 @@ class TestWritableCalibreDB(unittest.TestCase):
         finally:
             check.close()
 
+    def test_clean_identifier_parity(self):
+        # The 1.18 pin (upstream clean_identifier, db/write.py:118-121):
+        # type strips ':' and ','; value maps ',' to '|'.
+        with WritableCalibreDB(self.db_path) as wdb:
+            self._seed_books(wdb, 1)
+            self.assertTrue(wdb.set_identifier(1, " Good:Reads, X ", "123,456"))
+            # ':' and ',' are REMOVED, not mapped to space: " Good:Reads, X "
+            # cleans to "goodreads x"; the value stores comma-free "123|456".
+            self.assertTrue(wdb.clear_identifier(1, "goodreads x"))
+            with self.assertRaises(ValueError):
+                wdb.set_identifier(1, ":,", "x")  # cleans down to empty
+        check = self._open_raw()
+        try:
+            pairs = dict(check.execute("SELECT type, val FROM identifiers").fetchall())
+            # The stored value is Calibre's comma-free shape.
+            self.assertEqual(pairs, {})
+        finally:
+            check.close()
+
     def test_clear_identifier(self):
         with WritableCalibreDB(self.db_path) as wdb:
             self._seed_books(wdb, 1)

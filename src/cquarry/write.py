@@ -615,13 +615,18 @@ class WritableCalibreDB:
         """Upsert one entry in the EAV ``identifiers`` table.
 
         ``val=None`` (or blank) deletes the pair. The table is UNIQUE(book,
-        type), so an existing value of the same type is replaced. Returns True
-        when stored state changed.
+        type), so an existing value of the same type is replaced. Returns
+        True when stored state changed. Both halves are cleaned exactly
+        like upstream's ``clean_identifier`` (db/write.py:118-121, 1.18):
+        the type is stripped, lowercased, and stripped of ``:``/``,``; the
+        value is stripped with ``,`` mapped to ``|`` -- Calibre's stored
+        shape, since a comma in a value collides with the keypair query
+        grammar downstream.
         """
-        id_type = id_type.strip().lower()
+        id_type = (id_type or "").strip().lower().replace(":", "").replace(",", "")
         if not id_type:
             raise ValueError("Identifier type must not be empty")
-        clean_val = val.strip() if isinstance(val, str) else val
+        clean_val = val.strip().replace(",", "|") if isinstance(val, str) else val
         cur = self.conn.cursor()
         self._begin()
         try:
@@ -666,12 +671,13 @@ class WritableCalibreDB:
     def clear_identifier(self, book_id: int, id_type: str) -> bool:
         """Delete one entry from the EAV ``identifiers`` table.
 
-        The type is normalized exactly like :meth:`set_identifier` (stripped,
-        lowercased; empty raises). Returns True when a row was deleted; a
-        pair that is already absent is an honest no-op (False). Deletion
-        queues the book for OPF regeneration via ``_touch_book()``.
+        The type is normalized exactly like :meth:`set_identifier`
+        (stripped, lowercased, ``:``/`,` stripped; empty raises). Returns
+        True when a row was deleted; a pair that is already absent is an
+        honest no-op (False). Deletion queues the book for OPF
+        regeneration via ``_touch_book()``.
         """
-        id_type = id_type.strip().lower()
+        id_type = (id_type or "").strip().lower().replace(":", "").replace(",", "")
         if not id_type:
             raise ValueError("Identifier type must not be empty")
         cur = self.conn.cursor()
