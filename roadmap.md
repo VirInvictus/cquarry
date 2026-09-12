@@ -1280,10 +1280,17 @@ candidates at :1131-1175 except where a box says promotion candidate.
   (folded Python-side content search returning {book: {formats}});
   same lock-escape snapshot as metadata.db, absent-sidecar reads
   degrade to empty, refresh() drops the sidecar connection.)*
-- [ ] **Expose `books_pages_link` auxiliary columns** (`algorithm`,
+- [x] **Expose `books_pages_link` auxiliary columns** (`algorithm`,
   `format`, `format_size`, `timestamp`, `needs_scan`; upstream
   `schema_upgrades.py:853-862`) via `get_page_metadata()` or a dossier
   key. Enables a "pages pending rescan" integrity predicate.
+  *(SHIPPED 2026-09-12 in 1.18.0 as `get_page_metadata(book_id=None)`
+  -> `{book: {pages, algorithm, format, format_size, timestamp,
+  needs_scan}}`, needs_scan surfaced as bool; the dossier key form was
+  declined -- provenance is a provenance-table read, not part of the
+  hydrated row contract, and get_book rows must stay shape-frozen.
+  The pages-pending-rescan predicate was NOT added: needs_scan is
+  rendered directly from this read.)*
 - [ ] **Make `#label_index` real for custom series columns**: select
   `l.extra` in `load_custom_column` (db.py:1067-1071) and serve
   `#label_index` from `_custom_value`; today db.py:1748-1749 registers

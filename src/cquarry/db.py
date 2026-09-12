@@ -348,6 +348,43 @@ class CalibreDB:
         self._pages_cache = pages
         return self._pages_cache
 
+    def get_page_metadata(
+        self, book_id: int | None = None
+    ) -> dict[int, dict[str, Any]]:
+        """The full ``books_pages_link`` row per book: provenance for the
+        displayed page count.
+
+        ``pages`` alone comes through :meth:`get_all_books` /
+        :meth:`get_book` / ``field()``; this surfaces the auxiliary columns
+        Calibre maintains beside the count: ``algorithm`` (the CountPages
+        profile that produced it), ``format`` (the format it was computed
+        from), ``format_size``, ``timestamp``, and ``needs_scan`` (True =
+        Calibre has queued a recount, so the stored count is stale until
+        that runs). ``needs_scan`` is surfaced as a bool. Returns
+        ``{book_id: {...}}`` in ascending id order, or an empty dict on
+        schemas predating the native table (the ``#pages`` custom-column
+        fallback is invisible here, exactly as it is to the native rows).
+        """
+        sql = (
+            "SELECT book, pages, algorithm, format, format_size, "
+            "timestamp, needs_scan FROM books_pages_link"
+        )
+        params: tuple = ()
+        if book_id is not None:
+            sql += " WHERE book = ?"
+            params = (book_id,)
+        sql += " ORDER BY book"
+        try:
+            rows = self.conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return {}  # schema predates the native table
+        out: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            rec = dict(row)
+            rec["needs_scan"] = bool(rec["needs_scan"])
+            out[row["book"]] = rec
+        return out
+
     def get_identifiers(self, book_id: int) -> dict[str, str]:
         cur = self.conn.cursor()
         try:

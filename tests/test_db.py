@@ -1700,6 +1700,78 @@ class TestLockedDBSnapshot(unittest.TestCase):
         holder.close()
 
 
+class TestPageMetadata(unittest.TestCase):
+    """get_page_metadata: the books_pages_link auxiliary columns (1.18)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO books (id, title, sort) VALUES (?,?,?)",
+            [(1, "One", "One"), (2, "Two", "Two")],
+        )
+        # The native table's real shape (upstream schema_upgrades.py:853-862).
+        conn.execute(
+            "CREATE TABLE books_pages_link ("
+            " book INTEGER PRIMARY KEY, pages INTEGER DEFAULT 0 NOT NULL,"
+            " algorithm INTEGER DEFAULT 0 NOT NULL,"
+            " format TEXT DEFAULT '' NOT NULL COLLATE NOCASE,"
+            " format_size INTEGER DEFAULT 0 NOT NULL,"
+            " timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+            " needs_scan INTEGER NOT NULL DEFAULT 0 CHECK(needs_scan IN (0, 1)))"
+        )
+        conn.executemany(
+            "INSERT INTO books_pages_link (book, pages, algorithm, format,"
+            " format_size, timestamp, needs_scan) VALUES (?,?,?,?,?,?,?)",
+            [
+                (2, 312, 1, "EPUB", 456789, "2024-05-01 10:00:00", 1),
+                (1, 200, 0, "", 0, "2024-01-02 03:04:05", 0),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_full_rows_keyed_by_book(self):
+        meta = self.db.get_page_metadata()
+        self.assertEqual(list(meta), [1, 2])  # ascending id order
+        self.assertEqual(
+            meta[2],
+            {
+                "book": 2,
+                "pages": 312,
+                "algorithm": 1,
+                "format": "EPUB",
+                "format_size": 456789,
+                "timestamp": "2024-05-01 10:00:00",
+                "needs_scan": True,
+            },
+        )
+        self.assertFalse(meta[1]["needs_scan"])
+
+    def test_scoped_to_one_book(self):
+        meta = self.db.get_page_metadata(book_id=2)
+        self.assertEqual(list(meta), [2])
+
+    def test_schema_without_the_table_degrades(self):
+        other = os.path.join(self.temp_dir, "lib2")
+        os.makedirs(other)
+        bare = sqlite3.connect(os.path.join(other, "metadata.db"))
+        bare.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+        bare.commit()
+        bare.close()
+        with CalibreDB(os.path.join(other, "metadata.db")) as db:
+            self.assertEqual(db.get_page_metadata(), {})
+
+
 class TestFTSSidecar(unittest.TestCase):
     """The full-text-search.db sidecar reads (1.18): get_book_text,
     get_text_extractions, search_book_text over the plain books_text table."""
