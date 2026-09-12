@@ -1209,6 +1209,22 @@ hardening release.*
 - **Promotion candidates (C.2, C.3, C.5-C.8).** Raised at session start,
   batched; no approval in-lane; all six boxes stay shut (see section D).
 
+### Cascade notes for the 2026-09-12 wave (cquarry 1.20.0)
+
+- **Riders: none, by decision.** No consumer consumes C.5/C.7 today --
+  CalibreQuarry's trash/management surfaces and the acquisition importer
+  come later -- so per the four-program rule's no-purpose-no-bump clause
+  the ecosystem floors stay at >=1.19.0. Consumers come up when their
+  features do.
+- **Upstream delta:** the clone's only db/ commits since the 09-10/11
+  research are a notes-import birthtime fix (notes remain declined) and a
+  typing nit. Schema upgrades still end at explicit version 26; real
+  libraries read user_version 27, matching the add_book census. Nothing
+  to port.
+- **Skills.** phase-3-import teaches the trash verbs and the column
+  bootstrap (with the flag-only delete caveat); phase-1-import needs
+  nothing.
+
 ### Cascade notes for the 2026-09-12 rider wave (cquarry 1.19.0)
 
 - **CalibreQuarry.** Floor >=1.19.0 (57a0985, suite 385 OK, CI green,
