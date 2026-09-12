@@ -1,3 +1,52 @@
+## v1.20.0 (2026-09-12)
+
+### The last two promotion candidates, figured out
+
+Brandon un-deferred C.5 and C.7 ("get that done as 1.20.0, along with
+anything upstream"). The upstream delta since the 09-10/11 research
+turned out to be two trivial commits (a notes-import birthtime fix --
+notes stay declined -- and a typing nit); no schema, search, or write
+surface changed, and the real-library schema version still matches the
+add_book census.
+
+- **Trash lifecycle: `list_trash()` / `empty_trash()` /
+  `expire_trash(older_than=)`.** The management half of
+  `remove_book(delete_files="trash")`, over upstream's
+  `.caltrash/b`/`.caltrash/f` layout. `empty_trash` is upstream's
+  `clear_trash_dir` (remove whole, recreate empty); `expire_trash` is
+  `expire_old_trash`'s mtime rule with upstream's 14-day default
+  (`timedelta` accepted; `<= 0` expires everything); `list_trash` is the
+  added reviewable inventory (`{category, book_id, mtime, files}`) so the
+  destructive half can be looked at before it runs. Pure filesystem
+  verbs: trashed rows are already gone, so nothing touches the database.
+- **`create_custom_column(label, name, datatype, *, is_multiple,
+  editable, display)` / `delete_custom_column(label)`.** The library
+  bootstrap. Creation mirrors upstream's DDL statement-for-statement:
+  the `custom_columns` row, value/link storage per the normalized vs
+  direct split, the fkc guard triggers, the series `extra` index column,
+  and the `tag_browser` views (including the `filtered_` one -- views are
+  lazy, so its Calibre-only function is safe to reference). Calibre's
+  `update_all_last_mod_dates_on_start` pref is set like upstream so the
+  next start refreshes every book. Two deliberate deviations, documented:
+  column numbers allocate past the highest row id AND storage-table
+  number (a bare `lastrowid` can collide with tables still awaiting
+  Calibre's purge of a flag-deleted column), and the link-table update
+  guard fires on `UPDATE OF value` where upstream's `OF author` names a
+  column the table does not have (its guard was dead code).
+  Deletion drops NOTHING, exactly like upstream: it sets
+  `mark_for_delete=1` and the physical purge is Calibre's own
+  next-startup job; the flagged column stays listed and functional until
+  then. Created columns work end to end immediately -- `set_custom_column`
+  writes through them, and a fresh reader loads and searches them,
+  including the series `#label_index` location.
+
+Riders: none this wave -- no consumer consumes these verbs yet
+(CalibreQuarry's management surfaces and the acquisition importer come
+later), so the ecosystem floors stay at >=1.19.0 per the four-program
+rule's no-purpose-no-bump clause.
+
+Suite: 412 passed (was 400).
+
 ## v1.19.0 (2026-09-12)
 
 ### The approved promotion candidates: the four loop-closers

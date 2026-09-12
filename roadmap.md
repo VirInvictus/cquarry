@@ -1476,12 +1476,16 @@ candidates at :1131-1175 except where a box says promotion candidate.
   Calibre's own to clean -- the sidecar's delete triggers tokenize
   through FTS5 with Calibre's custom tokenizer, which does not exist
   outside Calibre.)*
-- [ ] **Promotion candidate: trash lifecycle** — `empty_trash()` /
+- [x] **Promotion candidate: trash lifecycle** — `empty_trash()` /
   `expire_trash(older_than=)` (upstream `backend.py:2386-2409`,
   `cache.py:3557`). S.
-  *(DEFERRED 2026-09-12 (Brandon's call, "four loop-closers"): nothing
-  uses remove_book(delete_files="trash") in anger yet, so there is no
-  trash to manage; revisit when .caltrash actually accumulates.)*
+  *(DEFERRED 2026-09-12 (Brandon's call, "four loop-closers"), then
+  UN-DEFERRED the same day ("get C.5 and C.7 figured out") and SHIPPED
+  in 1.20.0 (4a6a2f1): empty_trash = upstream's clear_trash_dir;
+  expire_trash = expire_old_trash's mtime rule with upstream's 14-day
+  default (timedelta accepted; <= 0 expires all); list_trash added as
+  the minimal reviewable inventory -- book id, mtime, files, both
+  categories. Pure filesystem verbs: trashed rows are already gone.)*
 - [x] **Promotion candidate: `set_author_sort` / `set_title_sort` /
   `set_timestamp` passthrough setters** (upstream `cache.py:2348-2366`).
   S.
@@ -1491,12 +1495,22 @@ candidates at :1131-1175 except where a box says promotion candidate.
   instant = honest no-op). The interplay is documented: a later
   set_authors/update_title recomputes over the override -- that is
   their job.)*
-- [ ] **Promotion candidate: `create_custom_column` /
+- [x] **Promotion candidate: `create_custom_column` /
   `delete_custom_column`** (upstream `backend.py:1384,1536`). M.
-  *(DEFERRED 2026-09-12 (Brandon's call): the consumer -- the acquisition
-  bootstrap creating #audience/#reading_status -- is a future project,
-  and schema DDL is the riskiest of the candidates to build
-  speculatively. Revisit when the importer is real.)*
+  *(DEFERRED 2026-09-12 (Brandon's call), then UN-DEFERRED the same day
+  and SHIPPED in 1.20.0 (5392c55): create mirrors upstream's DDL
+  statement-for-statement (normalized vs direct storage, fkc triggers,
+  the series extra column, the tag_browser views including the filtered_
+  one; update_all_last_mod_dates_on_start set like upstream). Two
+  documented deviations: column numbers allocate past the highest
+  storage-table number (a bare lastrowid can collide with tables still
+  awaiting Calibre's purge of a flag-deleted column), and the link-table
+  update guard fires on UPDATE OF value where upstream's 'OF author'
+  names a nonexistent column (dead code upstream). delete drops NOTHING,
+  exactly like upstream: mark_for_delete=1, purge is Calibre's own
+  next-startup job; the flagged column stays listed and functional until
+  then. Round trip pinned: create -> set_custom_column -> fresh-reader
+  load/search incl. #label_index.)*
 - [x] **Promotion candidate: `save_original_format` /
   `restore_original_format`** (upstream `cache.py:1581-1614`). S-M.
   *(APPROVED 2026-09-12 (Brandon, "four loop-closers") and SHIPPED in
@@ -1584,6 +1598,18 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
   C.5 and C.7 stay deferred with their boxes annotated. Rider floors:
   CalibreQuarry and bindery-cli (the consuming consumers) bump to
   >=1.19.0; Hermitage consumes none of the four and is exempt.)*
+
+  *(1.20.0 RIDERS: none. No consumer consumes C.5/C.7 today -- the trash
+  verbs and the bootstrap await CalibreQuarry's removal/management verbs
+  and the acquisition importer. Per the four-program rule the floors
+  stay at >=1.19.0 rather than bumping without purpose; consumers come
+  up when their features do.)*
+
+  *(UPSTREAM DELTA at 1.20.0: the clone's only db/ commits since the
+  09-10/11 research are a notes-import birthtime fix (notes are
+  declined) and a typing nit -- no schema, search, or write surface
+  changed. Schema upgrades still end at explicit version 26; real
+  libraries read user_version 27, matching the add_book census.)*
 - [x] **Ecosystem close-out**: all three consumers' adoption notes
   recorded in this roadmap's cascade block; the per-consumer floors
   stated in each consumer's pyproject; nothing left pinned below

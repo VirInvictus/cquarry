@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.19.0
+**Version:** 1.20.0
 
 ## Public API
 
@@ -266,7 +266,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.19.0"
+print(cquarry.__version__)  # "1.20.0"
 ```
 
 ### Writes (from `cquarry.write`)
@@ -301,6 +301,11 @@ print(cquarry.__version__)  # "1.19.0"
 | `set_timestamp(book_id, value)` | `bool` | Set the addition timestamp (since 1.19.0), normalized like `set_pubdate`; `None` writes the sentinel. |
 | `save_original_format(book_id, fmt)` | `bool` | Copy the format as an `ORIGINAL_<FMT>` row + file (since 1.19.0) for undo-able repair; False when the format/file is missing; saving an original of an original raises. |
 | `restore_original_format(book_id, original_fmt)` | `bool` | Swap the ORIGINAL bytes back into the format (since 1.19.0), remove the original row/file/queue entry, and queue the restored format for FTS re-extraction. |
+| `create_custom_column(label, name, datatype, *, is_multiple=False, editable=True, display=None)` | `int` | Create a custom column with upstream's exact DDL (since 1.20.0); returns the column number. Label rules are upstream's (lowercase word chars, letter first). |
+| `delete_custom_column(label)` | `bool` | Flag the column `mark_for_delete=1` (since 1.20.0) -- the physical purge is Calibre's next-startup job; the column stays functional until then. |
+| `list_trash()` | `list[dict[str, Any]]` | Inventory the trash (since 1.20.0): `{category, book_id, mtime, files}` per entry across `.caltrash/b` and `.caltrash/f`. |
+| `empty_trash()` | `int` | Permanently remove every trash entry and recreate the empty directories (since 1.20.0); returns the count. |
+| `expire_trash(older_than=None)` | `int` | Remove trash entries older than the age (since 1.20.0; seconds or `timedelta`; upstream's 14-day default; `<= 0` expires all). |
 | `set_series(book_id, name, index=None)` | `bool` | Assign/clear series + `series_index` (defaults 1.0 fresh, preserves on reassign). |
 | `set_publisher(book_id, name)` | `bool` | Replace/clear publisher; case-insensitive match; orphans pruned. |
 | `set_rating(book_id, stars)` | `bool` | 0-5 stars stored as x2; UNIQUE(rating) rows deduplicated via find-or-create. |
