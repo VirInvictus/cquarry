@@ -1209,7 +1209,21 @@ hardening release.*
 - **Promotion candidates (C.2, C.3, C.5-C.8).** Raised at session start,
   batched; no approval in-lane; all six boxes stay shut (see section D).
 
-### Cascade notes for the 2026-09-09 hardening releases
+### Cascade notes for the 2026-09-12 rider wave (cquarry 1.19.0)
+
+- **CalibreQuarry.** Floor >=1.19.0 (57a0985, suite 385 OK, CI green,
+  adoption note). The consuming rider for C.2/C.3/C.6: Phase 19's curation
+  and cover verbs build on rename_entity, set_cover, and the sort setters.
+- **bindery-cli.** Floor >=1.19.0 + uv.lock (1878f85, run_tests.sh OK, CI
+  green, adoption note). The consuming rider for C.8: the repair lane's
+  undo primitive.
+- **Hermitage.** EXEMPT from this wave (Brandon's "four loop-closers"
+  consume none of the four verbs through its surfaces); it stays at the
+  1.18.0 pin and 1.8.3.
+- **Skills.** phase-3-import teaches the four verbs; phase-1-import needs
+  nothing (no import-path behavior changed).
+
+### Cascade notes for the 2026-09-12 wave (cquarry 1.18.0)
 
 *(Recorded here per the cascade rule: every affected consumer is named with
 what changed under it; adoption or waiver happens in each consumer's own
