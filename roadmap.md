@@ -1291,11 +1291,17 @@ candidates at :1131-1175 except where a box says promotion candidate.
   hydrated row contract, and get_book rows must stay shape-frozen.
   The pages-pending-rescan predicate was NOT added: needs_scan is
   rendered directly from this read.)*
-- [ ] **Make `#label_index` real for custom series columns**: select
+- [x] **Make `#label_index` real for custom series columns**: select
   `l.extra` in `load_custom_column` (db.py:1067-1071) and serve
   `#label_index` from `_custom_value`; today db.py:1748-1749 registers
   a float location that :1759-1760 can never resolve. Rides :281 and
   unblocks Carrel's OPDS content block.
+  *(SHIPPED 2026-09-12 in 1.18.0: load_custom_column selects the link
+  table's `extra` and stashes it under the derived `#label_index` token;
+  _custom_value resolves the suffix against the base series column;
+  `#myseries_index:>3` matches. An exact label literally ending in
+  `_index` keeps the token; ancient link tables without `extra` degrade
+  to None. The roadmap.md:281 cc-adapter box is satisfied by this.)*
 - [x] **`find_failed_text_extraction` integrity predicate**: formats
   whose `books_text.err_msg` is non-empty (scans, DRM, corrupt files).
   Rides the FTS box.
@@ -1304,9 +1310,13 @@ candidates at :1131-1175 except where a box says promotion candidate.
   read in integrity after the two cover-file checks.)*
 - [ ] **Doc line**: `annotations.searchable_text` joins highlight text
   and notes with `\x1f\n` (upstream `calibre/db/annotations.py:134-145`).
-- [ ] **(marginal)** Read the normalized custom-column value-table
+- [x] **(marginal)** Read the normalized custom-column value-table
   `link` column (upstream schema_upgrades.py:836) into
   `load_custom_column` output; only if touching that SQL anyway.
+  *(SHIPPED 2026-09-12 in 1.18.0, riding the A.3 SQL: exposed as
+  `custom_column_links(col_name)` -> `{book: url}` rather than folded
+  into load_custom_column's return -- that shape is contract-frozen
+  (native single values / native lists) and consumers iterate it.)*
 
 ### B. Search parity (spec §5 honesty pass included)
 

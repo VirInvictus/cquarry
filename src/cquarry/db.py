@@ -114,6 +114,7 @@ class CalibreDB:
         self._custom_loc_cache: dict[str, str] | None = None
         self._custom_label_cache: dict[str, dict[str, Any]] | None = None
         self._custom_val_cache: dict[str, dict[int, Any]] = {}
+        self._custom_link_cache: dict[str, dict[int, str]] = {}
         self._comments_cache: dict[int, str] | None = None
         self._pages_col_cache: Any = _UNSET
         self._pages_cache: dict[int, int] | None = None
@@ -1123,14 +1124,47 @@ class CalibreDB:
         results: dict[int, Any] = {}
         try:
             if has_link:
+                # Series custom columns carry the book's index in the link
+                # table's `extra` float, and normalized value tables may
+                # carry a `link` URL column (both optional on old schemas;
+                # PRAGMA-probed so ancient layouts degrade to NULLs instead
+                # of erroring). The index feeds the `#label_index` search
+                # location; the links are exposed via custom_column_links().
+                link_cols = {
+                    r[1] for r in self.conn.execute(f"PRAGMA table_info({link_table})")
+                }
+                value_cols = {
+                    r[1]
+                    for r in self.conn.execute(
+                        f"PRAGMA table_info(custom_column_{cid})"
+                    )
+                }
+                extra_expr = "l.extra" if "extra" in link_cols else "NULL"
+                link_expr = "c.link" if "link" in value_cols else "NULL"
                 cur.execute(f"""
-                    SELECT l.book, c.value
+                    SELECT l.book, c.value, {extra_expr} AS extra, {link_expr} AS clink
                     FROM {link_table} l
                     JOIN custom_column_{cid} c ON c.id = l.value
                 """)
                 grouped: dict[int, list] = {}
+                index_map: dict[int, Any] = {}
+                link_map: dict[int, str] = {}
                 for row in cur.fetchall():
                     grouped.setdefault(row["book"], []).append(row["value"])
+                    if row["extra"] is not None:
+                        index_map[row["book"]] = row["extra"]
+                    if row["clink"]:
+                        link_map[row["book"]] = row["clink"]
+                if col["datatype"] == "series":
+                    # Serve the registered-but-previously-unresolvable
+                    # `#label_index` float location. An exact label that
+                    # literally ends in `_index` keeps the token (exact
+                    # label wins, mirroring find_custom_column), so the
+                    # stash only happens for the derived spelling.
+                    token = "#" + col["label"] + "_index"
+                    if token not in self._custom_by_label():
+                        self._custom_val_cache[token] = index_map
+                    self._custom_link_cache["#" + col["label"]] = link_map
                 if col["is_multiple"]:
                     # Native lists, never a comma-joined string: a stored
                     # value like "Doe, John" is ONE value, and re-splitting
@@ -1969,8 +2003,41 @@ class CalibreDB:
             }
         return self._custom_label_cache
 
+    def custom_column_links(self, col_name: str) -> dict[int, str]:
+        """The normalized value table's `link` column: ``{book_id: url}``.
+
+        Upstream added a per-value `link` (schema_upgrades.py:836) but no
+        Calibre UI populates it, so this is a faithful, rarely-populated
+        read. Normalized columns only (text/enumeration/series/rating); the
+        map fills as a side effect of :meth:`load_custom_column` and is
+        empty until that runs (or when the schema predates the column, or
+        nothing carries a link). Column addressed as in
+        :meth:`find_custom_column`.
+        """
+        col = self.find_custom_column(col_name)
+        if col is None:
+            return {}
+        token = "#" + col["label"]
+        if token not in self._custom_link_cache:
+            self.load_custom_column(col["name"])
+        return self._custom_link_cache.get(token, {})
+
     def _custom_value(self, book_id: int, location: str) -> Any:
-        col = self._custom_by_label().get(location[1:])
+        label = location[1:]
+        # The derived series-index location (`#myseries_index`): a float the
+        # link table's `extra` column feeds (load_custom_column stashes it
+        # alongside the base values). A real column literally labeled
+        # `<x>_index` keeps the token; exact labels always win.
+        if label.endswith("_index") and label not in self._custom_by_label():
+            base = self._custom_by_label().get(label[: -len("_index")])
+            if base is not None and base["datatype"] == "series":
+                base_token = "#" + base["label"]
+                if base_token not in self._custom_val_cache:
+                    self.load_custom_column(base["name"])
+                return self._custom_val_cache.get(base_token + "_index", {}).get(
+                    book_id
+                )
+        col = self._custom_by_label().get(label)
         if not col:
             return None
 

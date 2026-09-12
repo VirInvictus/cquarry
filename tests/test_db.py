@@ -1928,5 +1928,125 @@ class TestFTSSidecar(unittest.TestCase):
             db.close()
 
 
+class TestCustomSeriesIndex(unittest.TestCase):
+    """`#label_index` made real for custom series columns, plus the
+    normalized value-table `link` column read (1.18, roadmap A.3/A.6)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " series_index REAL)"
+        )
+        conn.executemany(
+            "INSERT INTO books (id, title, sort, series_index) VALUES (?,?,?,1.0)",
+            [(1, "One", "One"), (2, "Two", "Two"), (3, "Three", "Three")],
+        )
+        conn.execute(
+            "CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT,"
+            " name TEXT, datatype TEXT, is_multiple INTEGER, editable INTEGER,"
+            " display TEXT, normalized INTEGER)"
+        )
+        # 'mys': the custom series column. 'foo_index': a REAL column whose
+        # exact label collides with the derived-token spelling.
+        conn.executemany(
+            "INSERT INTO custom_columns VALUES (?,?,?,?,?,'{}',0,1)",
+            [
+                (1, "mys", "My Series", "series", 0),
+                (2, "foo_index", "F", "text", 0),
+            ],
+        )
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT,
+                link TEXT NOT NULL DEFAULT '');
+            CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, value TEXT);
+            CREATE TABLE books_custom_column_1_link (id INTEGER PRIMARY KEY,
+                book INTEGER, value INTEGER, extra FLOAT);
+            CREATE TABLE books_custom_column_2_link (id INTEGER PRIMARY KEY,
+                book INTEGER, value INTEGER);
+            """
+        )
+        conn.executemany(
+            "INSERT INTO custom_column_1 (id, value, link) VALUES (?,?,?)",
+            [(1, "Dawn", "https://example.com/1"), (2, "Day", ""), (3, "Dusk", "")],
+        )
+        # Book ids: index 1.5, 3.5; book 3's row carries a NULL extra.
+        conn.executemany(
+            "INSERT INTO books_custom_column_1_link (book, value, extra)"
+            " VALUES (?,?,?)",
+            [(1, 1, 1.5), (2, 2, 3.5), (3, 3, None)],
+        )
+        conn.executemany(
+            "INSERT INTO custom_column_2 (id, value) VALUES (?,?)", [(1, "X")]
+        )
+        conn.execute(
+            "INSERT INTO books_custom_column_2_link (book, value) VALUES (1, 1)"
+        )
+        conn.commit()
+        conn.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_field_serves_the_series_index(self):
+        self.assertEqual(self.db.field(1, "#mys_index"), 1.5)
+        self.assertEqual(self.db.field(2, "#mys_index"), 3.5)
+        self.assertIsNone(self.db.field(3, "#mys_index"))  # NULL extra
+        self.assertIsNone(self.db.field(99, "#mys_index"))
+
+    def test_search_over_the_index_location(self):
+        # The engine already registered `#mys_index` as a float location;
+        # this is the search that silently matched nothing before the fix.
+        self.assertEqual(self.db.search("#mys_index:>2"), {2})
+        self.assertEqual(self.db.search("#mys_index:1.5"), {1})
+        self.assertEqual(self.db.search("#mys_index:true"), {1, 2})
+        self.assertEqual(self.db.search("#mys_index:false"), {3})
+
+    def test_load_custom_column_shape_unchanged(self):
+        self.assertEqual(
+            self.db.load_custom_column("#mys"),
+            {1: "Dawn", 2: "Day", 3: "Dusk"},
+        )
+
+    def test_exact_label_wins_over_the_derived_token(self):
+        # A real column literally labeled `foo_index` resolves to itself.
+        self.assertEqual(self.db.field(1, "#foo_index"), "X")
+        self.assertEqual(self.db.search("#foo_index:X"), {1})
+
+    def test_custom_column_links(self):
+        self.assertEqual(
+            self.db.custom_column_links("#mys"), {1: "https://example.com/1"}
+        )
+        # Empty-string and NULL links are both absent; direct-storage
+        # columns have no links at all.
+        self.assertEqual(self.db.custom_column_links("#foo_index"), {})
+        # Unknown column: empty, never an error.
+        self.assertEqual(self.db.custom_column_links("#nope"), {})
+
+    def test_ancient_link_table_without_extra_degrades(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_9 (id INTEGER PRIMARY KEY, value TEXT);
+            CREATE TABLE books_custom_column_9_link (id INTEGER PRIMARY KEY,
+                book INTEGER, value INTEGER);
+            INSERT INTO custom_columns VALUES (9, 'old', 'Old', 'series',
+                0, 1, '{}', 1);
+            INSERT INTO custom_column_9 (id, value) VALUES (1, 'Ancient');
+            INSERT INTO books_custom_column_9_link (book, value) VALUES (1, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        self.db.refresh()
+        self.assertIsNone(self.db.field(1, "#old_index"))
+        self.assertEqual(self.db.field(1, "#old"), "Ancient")
+
+
 if __name__ == "__main__":
     unittest.main()

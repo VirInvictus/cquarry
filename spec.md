@@ -139,7 +139,7 @@ Derivations promoted from CalibreQuarry's `--analytics` frontend; the frontend k
 
 ## 4. Field location table
 
-Canonical locations, their datatypes, and recognized aliases. Custom columns are registered dynamically from the `custom_columns` table and use `#label` as their location token.
+Canonical locations, their datatypes, and recognized aliases. Custom columns are registered dynamically from the `custom_columns` table and use `#label` as their location token; series custom columns additionally register `#<label>_index` (cquarry ≥ 1.18), a float fed by the link table's `extra` column (a real column literally labeled `<x>_index` keeps the token).
 
 | Canonical | Datatype | Aliases |
 |-----------|----------|---------|
