@@ -1254,3 +1254,109 @@ lane.)*
   surfaces verified not skill-facing (search-grammar parity changes touch
   no taught query; refresh/set_format/export_rows/find_identifierless
   belong to Hermitage/bindery/CQ surfaces the skills do not teach).
+
+## Phase 13: the upstream comparison — FTS reads, search honesty, write completions (proposed 2026-09-12, from REPORT-12-Sept.md)
+
+Three research passes compared this repo line-for-line against the
+upstream Calibre clone (schema + upgrade map, search stack, write
+paths). Full evidence and upstream file:line pointers live in
+REPORT-12-Sept.md; the boxes below are self-sufficient but the report
+is the deep reference. Overlaps: item 3 rides roadmap.md:281 (cc-adapter);
+nothing here re-opens Phase 10-12 shipped work or the gated promotion
+candidates at :1131-1175 except where a box says promotion candidate.
+
+### A. Read coverage
+
+- [ ] **Read `full-text-search.db`: `get_book_text(book_id, fmt)`** plus
+  optional Python-side content search over `books_text` (book, format,
+  format_size, format_hash, searchable_text, text_size, text_hash,
+  err_msg, timestamp; upstream `calibre/db/fts/connect.py:35-39`,
+  `resources/fts_sqlite.sql:1-23`). Second SQLite file with the same
+  snapshot/lock handling as db.py:138-163; the plain table suffices, no
+  FTS5 machinery. The largest missing read surface.
+- [ ] **Expose `books_pages_link` auxiliary columns** (`algorithm`,
+  `format`, `format_size`, `timestamp`, `needs_scan`; upstream
+  `schema_upgrades.py:853-862`) via `get_page_metadata()` or a dossier
+  key. Enables a "pages pending rescan" integrity predicate.
+- [ ] **Make `#label_index` real for custom series columns**: select
+  `l.extra` in `load_custom_column` (db.py:1067-1071) and serve
+  `#label_index` from `_custom_value`; today db.py:1748-1749 registers
+  a float location that :1759-1760 can never resolve. Rides :281 and
+  unblocks Carrel's OPDS content block.
+- [ ] **`find_failed_text_extraction` integrity predicate**: formats
+  whose `books_text.err_msg` is non-empty (scans, DRM, corrupt files).
+  Rides the FTS box.
+- [ ] **Doc line**: `annotations.searchable_text` joins highlight text
+  and notes with `\x1f\n` (upstream `calibre/db/annotations.py:134-145`).
+- [ ] **(marginal)** Read the normalized custom-column value-table
+  `link` column (upstream schema_upgrades.py:836) into
+  `load_custom_column` output; only if touching that SQL anyway.
+
+### B. Search parity (spec §5 honesty pass included)
+
+- [ ] **Fix the `identifiers:KEY:TRUE/FALSE` inversion**: search.py:1058
+  gates on `valq.lower()` but selects with raw `valq` (:1067); upstream
+  lowercases once and uses it for both (DS:424-430). Add a pinning test.
+- [ ] **Reconcile the `all`-sweep identifiers contradiction**: spec.md:87
+  and the roadmap ship note say identifier keys sweep as text;
+  `_match_all` (search.py:1088-1095) omits `identifiers` (upstream
+  sweeps them, DS:808-818). Fix the code or the claim; add a pinning
+  test either way.
+- [ ] **Port super-quotes `"""..."""`**: replicate upstream's
+  docstring-sentinel pass before REPLACEMENTS in `_tokenize` (SQP:
+  150,191-212; documented user feature, gui.rst:445). Today
+  `title:"""a "b" (c)"""` mis-tokenizes.
+- [ ] **`template:` raises a clear unsupported-location ParseException**
+  (model: upstream TemplatesNotAllowed, DS:716-717) instead of silently
+  matching nothing; record it in spec §5.
+- [ ] **§5 honesty pass**: date fields over-accept the
+  blank/empty/`~`/numeric vocabulary upstream rejects (DS:153-176);
+  numeric fields over-accept tristate words (DS:245-290); the
+  all-sweep probes `id` and numeric-`cover` upstream excludes (DS:811)
+  and lacks the bare true/false-presence branch (DS:849-855); lexer
+  strictness and quoted-absorption differences (SQP:205,279-284);
+  tristate bool fidelity and translated vocabulary (DS:356-411);
+  benign extensions (`lang`, `ids`, timestamp token, case-insensitive
+  VL names, ignored prefs). For each: fix-to-parity or a dated §5
+  entry. Never silent.
+- [ ] **(optional, only on consumer demand)** implement `template:`
+  searches over a minimal template subset.
+
+### C. Write completions and promotion candidates
+
+- [ ] **Path re-laying on `update_title`/`set_authors`** (internal
+  completion; upstream `cache.py:1986-1987`, `backend.py:2098-2202`):
+  dir rename, format-file renames to the new stem, empty-parent
+  removal, batch-compensation aware. M.
+- [ ] **Promotion candidate: `rename_entity(field, old, new)` +
+  `remove_entity_everywhere`** (upstream `cache.py:2758-2862`): author
+  renames recompute sorts and re-lay paths; series renumber; case-change
+  merges. M.
+- [ ] **Promotion candidate: `set_cover(book_id, data)` /
+  `remove_cover(book_id)`** (upstream `cache.py:2237-2253`,
+  `backend.py:1962-1992`). S.
+- [ ] **FTS + pages dirtying alongside format writes** (internal): when
+  `full-text-search.db` exists, insert into `dirtied_formats` and set
+  `books_pages_link.needs_scan` (upstream `fts_triggers.sql`,
+  `cache.py:2472,2481`). S-M.
+- [ ] **Promotion candidate: trash lifecycle** — `empty_trash()` /
+  `expire_trash(older_than=)` (upstream `backend.py:2386-2409`,
+  `cache.py:3557`). S.
+- [ ] **Promotion candidate: `set_author_sort` / `set_title_sort` /
+  `set_timestamp` passthrough setters** (upstream `cache.py:2348-2366`).
+  S.
+- [ ] **Promotion candidate: `create_custom_column` /
+  `delete_custom_column`** (upstream `backend.py:1384,1536`). M.
+- [ ] **Promotion candidate: `save_original_format` /
+  `restore_original_format`** (upstream `cache.py:1581-1614`). S-M.
+- [ ] **`clean_identifier` parity** (upstream `db/write.py:118-121`):
+  value `,`->`|`, type strips `:`/`,`. S.
+- [ ] **Docs: record the case-change policy** (cquarry never re-cases
+  existing entity rows; upstream `allow_case_change`,
+  db/write.py:299-315) in spec §5. Docs-only.
+
+Ship shape: batch A.1-A.4 + B.1-B.5 + C.9-C.10 as 1.18.0 (research
+lane); the promotion-candidate boxes stay shut until Brandon approves
+them per the standing rule. The functional matrix: every A/B item gets
+a pinning test; every C item ships with its trigger-census test in the
+test_write.py style.
