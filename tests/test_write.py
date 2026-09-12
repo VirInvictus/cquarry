@@ -2323,3 +2323,51 @@ class TestCoverManagement(_WriteSideFixture, unittest.TestCase):
         self.assertEqual(
             self._sql2("SELECT book FROM metadata_dirtied WHERE book = 1")[0][0], 1
         )
+
+
+class TestPassthroughSetters(_WriteSideFixture, unittest.TestCase):
+    """C.6: set_author_sort / set_title_sort / set_timestamp (1.19)."""
+
+    def test_author_sort_override_sticks_until_recomputed(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_author_sort(1, "Writer, Zed A. B."))
+            self.assertFalse(wdb.set_author_sort(1, "Writer, Zed A. B."))
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 1")[0][0],
+            "Writer, Zed A. B.",
+        )
+        # set_authors recomputes OVER the override -- documented interplay.
+        with self._wdb() as wdb:
+            wdb.set_authors(1, ["Zed A. Writer"])
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 1")[0][0],
+            "Writer, Zed A.",
+        )
+
+    def test_title_sort_override_does_not_recompute(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_title_sort(1, "Custom Sort, A"))
+        self.assertEqual(
+            self._sql2("SELECT sort FROM books WHERE id = 1")[0][0],
+            "Custom Sort, A",
+        )
+
+    def test_empty_sort_values_raise(self):
+        with self._wdb() as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_author_sort(1, "   ")
+            with self.assertRaises(ValueError):
+                wdb.set_title_sort(1, "")
+
+    def test_timestamp_normalizes_like_pubdate(self):
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_timestamp(1, "2024-03-05"))
+            self.assertFalse(wdb.set_timestamp(1, "2024-03-05T00:00:00+00:00"))
+            self.assertTrue(wdb.set_timestamp(1, None))
+        value = self._sql2("SELECT timestamp FROM books WHERE id = 1")[0][0]
+        self.assertTrue(value.startswith("0101-01-01"))
+        with self._wdb() as wdb:
+            wdb.set_timestamp(1, None)
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied WHERE book = 1")[0][0], 1
+        )

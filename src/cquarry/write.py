@@ -1391,6 +1391,81 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    # -- Passthrough sort/timestamp setters (1.19; the approved C.6) --
+
+    def set_author_sort(self, book_id: int, value: str) -> bool:
+        """Override the book's ``author_sort`` string verbatim.
+
+        The passthrough for hand-tuned corrections: unlike
+        :meth:`set_authors`, which recomputes the sort from the authors'
+        sort keys, this stores exactly what you pass. Returns True when
+        stored state changed. A later ``set_authors``/author rename will
+        recompute over the override -- that is their job, not a bug.
+        """
+        return self._set_book_text_column(book_id, "author_sort", value)
+
+    def set_title_sort(self, book_id: int, value: str) -> bool:
+        """Override the book's ``title_sort`` (``books.sort``) verbatim.
+
+        The passthrough for mangled sort keys; unlike
+        :meth:`update_title`, which recomputes the sort through
+        ``title_sort()``, this stores exactly what you pass. Returns True
+        when stored state changed. A later ``update_title`` recomputes
+        over the override."""
+        return self._set_book_text_column(book_id, "sort", value)
+
+    def set_timestamp(self, book_id: int, value: str | date | datetime | None) -> bool:
+        """Set the book's ``timestamp`` (its addition date).
+
+        Normalized exactly like :meth:`set_pubdate` (ISO text in UTC,
+        ``None`` writes the undefined-date sentinel, an equal instant is
+        an honest no-op). Note the search grammar's bare ``timestamp``
+        location reads this column; Calibre sorts "recently added" by it.
+        """
+        new = _normalize_pubdate(value)
+        self._begin()
+        try:
+            self._require_book(book_id)
+            row = self.conn.execute(
+                "SELECT timestamp FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            if _same_instant(row["timestamp"] if row else None, new):
+                self._commit()
+                return False
+            self.conn.execute(
+                "UPDATE books SET timestamp = ? WHERE id = ?", (new, book_id)
+            )
+            self._touch_book(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def _set_book_text_column(self, book_id: int, column: str, value: str) -> bool:
+        new = value.strip() if isinstance(value, str) else ""
+        if not new:
+            raise ValueError(f"{column} must not be empty")
+        self._begin()
+        try:
+            self._require_book(book_id)
+            row = self.conn.execute(
+                f"SELECT {column} AS cur FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            if row is not None and row["cur"] == new:
+                self._rollback()
+                return False
+            self.conn.execute(
+                f"UPDATE books SET {column} = ?, last_modified = ? WHERE id = ?",
+                (new, self._now(), book_id),
+            )
+            self._mark_dirty(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
     # -- Custom-column writers --
 
     def _custom_column_meta(self, label: str) -> dict[str, Any]:

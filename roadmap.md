@@ -1465,9 +1465,15 @@ candidates at :1131-1175 except where a box says promotion candidate.
 - [ ] **Promotion candidate: trash lifecycle** — `empty_trash()` /
   `expire_trash(older_than=)` (upstream `backend.py:2386-2409`,
   `cache.py:3557`). S.
-- [ ] **Promotion candidate: `set_author_sort` / `set_title_sort` /
+- [x] **Promotion candidate: `set_author_sort` / `set_title_sort` /
   `set_timestamp` passthrough setters** (upstream `cache.py:2348-2366`).
   S.
+  *(APPROVED 2026-09-12 (Brandon, "four loop-closers") and SHIPPED in
+  1.19.0: verbatim overrides for mangled sorts; set_timestamp
+  normalizes like set_pubdate (ISO UTC text, None = sentinel, equal
+  instant = honest no-op). The interplay is documented: a later
+  set_authors/update_title recomputes over the override -- that is
+  their job.)*
 - [ ] **Promotion candidate: `create_custom_column` /
   `delete_custom_column`** (upstream `backend.py:1384,1536`). M.
 - [ ] **Promotion candidate: `save_original_format` /
