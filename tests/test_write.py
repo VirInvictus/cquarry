@@ -1920,3 +1920,141 @@ class TestPathRelaying(_WriteSideFixture, unittest.TestCase):
             wdb2.add_tag(1, "Safe")
         self.assertTrue(os.path.exists(self._dir("Zed A. Writer/Other (2)")))
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM books WHERE id = 2")[0][0], 1)
+
+
+class TestFtsDirtying(unittest.TestCase):
+    """C.4: format writes keep Calibre's FTS index and page counts honest
+    (dirtied_formats queue + books_pages_link.needs_scan)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                timestamp TEXT, last_modified TEXT, path TEXT);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,
+                format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE books_pages_link (book INTEGER PRIMARY KEY,
+                pages INTEGER DEFAULT 0 NOT NULL, needs_scan INTEGER NOT NULL DEFAULT 0);
+            """
+        )
+        conn.execute("INSERT INTO books (id, title, sort) VALUES (1, 'One', 'One')")
+        conn.execute(
+            "INSERT INTO data (book, format, uncompressed_size, name) "
+            "VALUES (1, 'EPUB', 10, 'One - X')"
+        )
+        conn.execute(
+            "INSERT INTO books_pages_link (book, pages, needs_scan) VALUES (1, 100, 0)"
+        )
+        conn.commit()
+        conn.close()
+        # The sidecar (plain tables; the FTS5 machinery is irrelevant here).
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.executescript(
+            """
+            CREATE TABLE dirtied_formats (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, format TEXT NOT NULL COLLATE NOCASE,
+                in_progress INTEGER NOT NULL DEFAULT FALSE, UNIQUE(book, format));
+            CREATE TABLE books_text (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, timestamp REAL NOT NULL,
+                format TEXT NOT NULL COLLATE NOCASE, format_hash TEXT NOT NULL,
+                format_size INTEGER DEFAULT 0, searchable_text TEXT DEFAULT '',
+                text_size INTEGER DEFAULT 0, text_hash TEXT DEFAULT '',
+                err_msg TEXT DEFAULT '', UNIQUE(book, format));
+            INSERT INTO books_text (book, timestamp, format, format_hash,
+                searchable_text) VALUES (1, 1700000000.0, 'EPUB', 'h1', 'old text');
+            """
+        )
+        fts.commit()
+        fts.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _fts(self):
+        conn = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _pages(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT needs_scan FROM books_pages_link WHERE book = 1"
+            ).fetchone()
+            return row[0]
+        finally:
+            conn.close()
+
+    def test_set_format_queues_reextraction_and_pages_scan(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.set_format(1, "epub", "One - X", 99))
+        fts = self._fts()
+        row = fts.execute("SELECT book, format FROM dirtied_formats").fetchone()
+        fts.close()
+        self.assertEqual((row["book"], row["format"]), (1, "EPUB"))
+        self.assertEqual(self._pages(), 1)
+
+    def test_add_format_queues_too(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.add_format(1, "MOBI", "One - X", 5))
+        fts = self._fts()
+        fmts = {r["format"] for r in fts.execute("SELECT format FROM dirtied_formats")}
+        fts.close()
+        self.assertEqual(fmts, {"MOBI"})
+
+    def test_remove_format_clears_the_queue_but_not_books_text(self):
+        # Pre-seed a queue entry as if extraction were pending.
+        fts = self._fts()
+        fts.execute("INSERT INTO dirtied_formats (book, format) VALUES (1, 'EPUB')")
+        fts.commit()
+        fts.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.remove_format(1, "EPUB"))
+        fts = self._fts()
+        self.assertEqual(
+            fts.execute("SELECT COUNT(*) FROM dirtied_formats").fetchone()[0], 0
+        )
+        # The tokenizer trap: the stale text row is Calibre's own to clean.
+        self.assertEqual(
+            fts.execute("SELECT COUNT(*) FROM books_text").fetchone()[0], 1
+        )
+        fts.close()
+
+    def test_identical_set_format_queues_nothing(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertFalse(wdb.set_format(1, "EPUB", "One - X", 10))
+        fts = self._fts()
+        self.assertEqual(
+            fts.execute("SELECT COUNT(*) FROM dirtied_formats").fetchone()[0], 0
+        )
+        fts.close()
+        self.assertEqual(self._pages(), 0)
+
+    def test_failed_batch_rolls_the_sidecar_back(self):
+        wdb = WritableCalibreDB(self.db_path)
+        with self.assertRaises(RuntimeError), wdb.batch():
+            wdb.set_format(1, "EPUB", "Repaired - X", 123)
+            raise RuntimeError("boom")
+        wdb.close()
+        fts = self._fts()
+        self.assertEqual(
+            fts.execute("SELECT COUNT(*) FROM dirtied_formats").fetchone()[0], 0
+        )
+        fts.close()
+        self.assertEqual(self._pages(), 0)
+
+    def test_no_sidecar_degrades_to_noop(self):
+        os.remove(os.path.join(self.temp_dir, "full-text-search.db"))
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.set_format(1, "EPUB", "One - X", 42))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM data WHERE book = 1").fetchone()[0],
+                1,
+            )
+        finally:
+            conn.close()

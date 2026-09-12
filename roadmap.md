@@ -1408,10 +1408,20 @@ candidates at :1131-1175 except where a box says promotion candidate.
 - [ ] **Promotion candidate: `set_cover(book_id, data)` /
   `remove_cover(book_id)`** (upstream `cache.py:2237-2253`,
   `backend.py:1962-1992`). S.
-- [ ] **FTS + pages dirtying alongside format writes** (internal): when
+- [x] **FTS + pages dirtying alongside format writes** (internal): when
   `full-text-search.db` exists, insert into `dirtied_formats` and set
   `books_pages_link.needs_scan` (upstream `fts_triggers.sql`,
   `cache.py:2472,2481`). S-M.
+  *(SHIPPED 2026-09-12 in 1.18.0: add_format/set_format queue the pair
+  for re-extraction and set needs_scan (schema-guarded); remove_format
+  clears the queue entry so Calibre never re-extracts a vanished file.
+  The sidecar is ATTACHed before the transaction opens (SQLite forbids
+  ATTACH inside one), so the queue writes roll back with the batch; a
+  missing or unattachable sidecar degrades the whole thing to a no-op.
+  Documented residual: the stale books_text row of a REMOVED format is
+  Calibre's own to clean -- the sidecar's delete triggers tokenize
+  through FTS5 with Calibre's custom tokenizer, which does not exist
+  outside Calibre.)*
 - [ ] **Promotion candidate: trash lifecycle** — `empty_trash()` /
   `expire_trash(older_than=)` (upstream `backend.py:2386-2409`,
   `cache.py:3557`). S.

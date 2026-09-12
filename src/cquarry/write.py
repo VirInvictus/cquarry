@@ -308,6 +308,11 @@ class WritableCalibreDB:
         self._pending_relayouts: list[
             tuple[int, str, str, list[tuple[str, str]], str]
         ] = []
+        # full-text-search.db attach state: None = not tried yet, True =
+        # attached as fts_db, False = absent or unusable for this
+        # connection. Tried lazily before the first format write (ATTACH
+        # is illegal inside a transaction, so never after _begin()).
+        self._fts_state: bool | None = None
 
     # -- lifecycle --
 
@@ -1510,6 +1515,70 @@ class WritableCalibreDB:
 
     # -- Format management --
 
+    def _ensure_fts_attached(self) -> bool:
+        """Attach the library's full-text-search.db for writing, once.
+
+        Returns True when ``fts_db`` is attached and the dirty-queue writes
+        can run. The attach must happen BEFORE a transaction opens (SQLite
+        forbids ATTACH inside one), so format setters call this before
+        ``_begin()``; a missing sidecar or a failed attach (locked,
+        unreadable) marks this connection FTS-unavailable -- dirtying is
+        best-effort and degrades to a no-op, never blocks a format write.
+        """
+        if self._fts_state is None:
+            path = os.path.join(os.path.dirname(self.db_path), "full-text-search.db")
+            if not os.path.exists(path):
+                self._fts_state = False
+            else:
+                try:
+                    self.conn.execute("ATTACH DATABASE ? AS fts_db", (path,))
+                    self._fts_state = True
+                except sqlite3.Error:
+                    self._fts_state = False
+        return self._fts_state
+
+    def _mark_fts_dirty(self, book_id: int, fmt: str) -> None:
+        """Queue (book, format) for FTS re-extraction and a pages rescan.
+
+        Upstream's TEMP triggers (``fts_triggers.sql``) insert into the
+        sidecar's ``dirtied_formats`` on every data INSERT/UPDATE, and
+        format adds queue a pages scan (``cache.py:2472``). Without this, a
+        repaired format file leaves Calibre's content index and page counts
+        stale forever -- Calibre never re-reads a file on its own; it only
+        processes its queues. The writes join the caller's transaction, so
+        a batch rollback undoes them. ``needs_scan`` is skipped on schemas
+        predating ``books_pages_link``.
+        """
+        if not self._ensure_fts_attached():
+            return
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fts_db.dirtied_formats(book, format) VALUES (?, ?)",
+            (book_id, fmt.upper()),
+        )
+        with contextlib.suppress(sqlite3.OperationalError):
+            self.conn.execute(
+                "UPDATE books_pages_link SET needs_scan = 1 WHERE book = ?",
+                (book_id,),
+            )
+
+    def _clear_fts_dirty(self, book_id: int, fmt: str) -> None:
+        """Drop the (book, format) FTS queue entry alongside a removal, so
+        Calibre never re-extracts a vanished file.
+
+        The stale ``books_text`` row stays: only Calibre itself can delete
+        it, because the sidecar's delete triggers maintain the FTS5 index
+        through Calibre's custom tokenizer, which does not exist here --
+        deleting from ``books_text`` outside Calibre would corrupt the
+        index, so this deliberately does not try (Calibre's re-extraction
+        or next index maintenance cleans the row).
+        """
+        if not self._ensure_fts_attached():
+            return
+        self.conn.execute(
+            "DELETE FROM fts_db.dirtied_formats WHERE book = ? AND format = ?",
+            (book_id, fmt.upper()),
+        )
+
     def add_format(self, book_id: int, fmt: str, name: str, size: int) -> bool:
         """Register a format row in ``data``. Returns True when inserted.
 
@@ -1524,6 +1593,8 @@ class WritableCalibreDB:
             raise ValueError("Format and name must not be empty")
         if size < 0:
             raise ValueError(f"Format size must not be negative, got {size}")
+        # ATTACH must precede the transaction (see _ensure_fts_attached).
+        self._ensure_fts_attached()
         self._begin()
         try:
             self._require_book(book_id)
@@ -1538,6 +1609,7 @@ class WritableCalibreDB:
                 "VALUES (?, ?, ?, ?)",
                 (book_id, fmt, int(size), name),
             )
+            self._mark_fts_dirty(book_id, fmt)
             self._touch_book(book_id)
             self._commit()
             return True
@@ -1546,7 +1618,13 @@ class WritableCalibreDB:
             raise
 
     def remove_format(self, book_id: int, fmt: str) -> bool:
-        """Drop a format row from ``data``. Returns True when removed."""
+        """Drop a format row from ``data``. Returns True when removed.
+
+        The FTS sidecar's queue entry for the pair is cleared too (when the
+        sidecar exists), so Calibre never re-extracts a vanished file; the
+        stale ``books_text`` row is Calibre's own to clean (see
+        :meth:`_clear_fts_dirty`)."""
+        self._ensure_fts_attached()
         self._begin()
         try:
             self._require_book(book_id)
@@ -1557,6 +1635,7 @@ class WritableCalibreDB:
             )
             changed = self.conn.total_changes > before
             if changed:
+                self._clear_fts_dirty(book_id, fmt.strip().upper())
                 self._touch_book(book_id)
             self._commit()
             return changed
@@ -1572,8 +1651,10 @@ class WritableCalibreDB:
         This is the row half of swapping a repaired file into place: the
         file itself stays the caller's atomic-replace job (Calibre's layout
         never changes for a same-format swap), and this only keeps ``data``
-        truthful. Raises ValueError on a negative size or empty fmt/name,
-        exactly like :meth:`add_format`.
+        truthful. The replacement is queued for FTS re-extraction and a
+        pages rescan when the sidecar exists, so Calibre's content index
+        and page counts follow the repaired file. Raises ValueError on a
+        negative size or empty fmt/name, exactly like :meth:`add_format`.
         """
         fmt = fmt.strip().upper()
         name = name.strip()
@@ -1581,6 +1662,8 @@ class WritableCalibreDB:
             raise ValueError("Format and name must not be empty")
         if size < 0:
             raise ValueError(f"Format size must not be negative, got {size}")
+        # ATTACH must precede the transaction (see _ensure_fts_attached).
+        self._ensure_fts_attached()
         self._begin()
         try:
             self._require_book(book_id)
@@ -1603,6 +1686,7 @@ class WritableCalibreDB:
                 "VALUES (?, ?, ?, ?)",
                 (book_id, fmt, size, name),
             )
+            self._mark_fts_dirty(book_id, fmt)
             self._touch_book(book_id)
             self._commit()
             return True
