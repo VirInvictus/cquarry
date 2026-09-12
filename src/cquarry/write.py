@@ -38,7 +38,7 @@ import re
 import shutil
 import sqlite3
 import uuid as _uuid
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from datetime import UTC, date, datetime
 from typing import Any, Self
 
@@ -313,6 +313,10 @@ class WritableCalibreDB:
         # connection. Tried lazily before the first format write (ATTACH
         # is illegal inside a transaction, so never after _begin()).
         self._fts_state: bool | None = None
+        # File placements/removals deferred by set_cover and the
+        # original-format verbs: callables appended inside the transaction,
+        # run only after the outermost COMMIT (a rollback drops them).
+        self._pending_fs_ops: list[Callable[[], None]] = []
 
     # -- lifecycle --
 
@@ -382,6 +386,7 @@ class WritableCalibreDB:
                     self.conn.commit()
                     self._flush_pending_removals()
                     self._flush_pending_relayouts()
+                    self._flush_pending_fs_ops()
                 else:
                     with contextlib.suppress(sqlite3.Error):
                         self.conn.rollback()
@@ -398,6 +403,7 @@ class WritableCalibreDB:
                     # against rows the rollback brought back.
                     self._pending_removals.clear()
                     self._pending_relayouts.clear()
+                    self._pending_fs_ops.clear()
                 self._batch_dirs.clear()
                 self._batch_poisoned = False
             elif not ok:
@@ -1942,6 +1948,85 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    # -- Cover management (1.19; the approved C.3) --
+
+    def set_cover(self, book_id: int, data: bytes | str | os.PathLike) -> bool:
+        """Write the book's cover file and set ``has_cover``.
+
+        ``data`` is the image bytes, or a path to read them from. The
+        sniff-or-raise rule is ``add_book``'s: a JPEG lands as
+        ``cover.jpg``, a PNG as ``cover.png``, and anything unparseable
+        raises rather than being catalogued with ``has_cover=1``; a stale
+        cover under the OTHER extension is removed so
+        :meth:`cquarry.db.CalibreDB.get_cover_path` can never prefer it.
+        The file lands only after the commit (deferred inside a
+        :meth:`batch`), so a failed pass never catalogues a cover it did
+        not keep. Returns True; use :meth:`remove_cover` to clear.
+        """
+        if data is None:
+            raise TypeError(
+                "set_cover(book_id, None) is not supported; use remove_cover()"
+            )
+        if isinstance(data, (str, os.PathLike)):
+            with open(os.fspath(data), "rb") as f:
+                data = f.read()
+        data = bytes(data)
+        ext = sniff_image_format(data)
+        if ext is None:
+            raise ValueError(
+                "Cover is neither JPEG nor PNG (sniff-or-raise: an "
+                "unparseable cover must not be catalogued with has_cover=1)"
+            )
+        with self.batch():
+            self._require_book(book_id)
+            book_dir = self._book_dir_path(book_id)
+            if book_dir is None:
+                raise ValueError(f"Book {book_id} has no path to place a cover in")
+            self.conn.execute(
+                "UPDATE books SET has_cover = 1, last_modified = ? WHERE id = ?",
+                (self._now(), book_id),
+            )
+            self._mark_dirty(book_id)
+            new_name = f"cover.{ext}"
+            other = "cover.png" if ext == "jpg" else "cover.jpg"
+
+            def _place(book_dir=book_dir, new_name=new_name, other=other, data=data):
+                os.makedirs(book_dir, exist_ok=True)
+                _place_bytes(data, os.path.join(book_dir, new_name))
+                with contextlib.suppress(OSError):
+                    os.unlink(os.path.join(book_dir, other))
+
+            self._pending_fs_ops.append(_place)
+        return True
+
+    def remove_cover(self, book_id: int) -> bool:
+        """Clear the cover: ``has_cover`` goes to 0 and both cover files
+        (``cover.jpg``/``cover.png``) are removed after the commit.
+        Returns True when the catalogued flag actually changed."""
+        with self.batch():
+            self._require_book(book_id)
+            current = self.conn.execute(
+                "SELECT has_cover FROM books WHERE id = ?", (book_id,)
+            ).fetchone()["has_cover"]
+            changed = bool(current)
+            book_dir = self._book_dir_path(book_id)
+            if changed:
+                self.conn.execute(
+                    "UPDATE books SET has_cover = 0, last_modified = ? WHERE id = ?",
+                    (self._now(), book_id),
+                )
+                self._mark_dirty(book_id)
+
+            def _remove(book_dir=book_dir):
+                if book_dir is None:
+                    return
+                for name in ("cover.jpg", "cover.png"):
+                    with contextlib.suppress(OSError):
+                        os.unlink(os.path.join(book_dir, name))
+
+            self._pending_fs_ops.append(_remove)
+        return changed
+
     # -- Book creation (Phase 10) --
 
     def add_book(
@@ -2322,6 +2407,15 @@ class WritableCalibreDB:
             self._pending_relayouts.append(op)
         else:
             self._apply_relayout(op)
+
+    def _flush_pending_fs_ops(self) -> None:
+        """Run the file placements/removals deferred by set_cover and the
+        original-format verbs, only after the outermost COMMIT: a rollback
+        that resurrected old rows must not leave new cover or format files
+        on disk, so the queued ops are dropped instead."""
+        for op in self._pending_fs_ops:
+            op()
+        self._pending_fs_ops.clear()
 
     def _flush_pending_relayouts(self) -> None:
         """Perform path re-lays deferred by setters inside a batch.

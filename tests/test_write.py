@@ -2237,3 +2237,89 @@ class TestEntityRename(_WriteSideFixture, unittest.TestCase):
                 wdb.rename_entity("authors", "Missing", "Whatever")
             with self.assertRaises(ValueError):
                 wdb.remove_entity_everywhere("authors", "  ")
+
+
+class TestCoverManagement(_WriteSideFixture, unittest.TestCase):
+    """C.3: set_cover / remove_cover (1.19)."""
+
+    def setUp(self):
+        super().setUp()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE books SET path = ? WHERE id = 1",
+                ("Zed A. Writer/Old Title (1)",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.book_dir = os.path.join(self.temp_dir, "Zed A. Writer", "Old Title (1)")
+        os.makedirs(self.book_dir)
+
+    def test_set_cover_jpeg_sniffs_and_places(self):
+        # A real minimal JPEG header: sniff_image_format must see JPEG.
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 32 + b"\xff\xd9"
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_cover(1, jpeg))
+        self.assertEqual(
+            self._sql2("SELECT has_cover FROM books WHERE id = 1")[0][0], 1
+        )
+        self.assertTrue(os.path.isfile(os.path.join(self.book_dir, "cover.jpg")))
+        with open(os.path.join(self.book_dir, "cover.jpg"), "rb") as f:
+            self.assertEqual(f.read(), jpeg)
+
+    def test_set_cover_png_replaces_stale_jpeg(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+        with open(os.path.join(self.book_dir, "cover.jpg"), "wb") as f:
+            f.write(b"STALE")
+        with self._wdb() as wdb:
+            wdb.set_cover(1, png)
+        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.jpg")))
+        self.assertTrue(os.path.isfile(os.path.join(self.book_dir, "cover.png")))
+
+    def test_set_cover_rejects_unparseable_data(self):
+        with self._wdb() as wdb, self.assertRaises(ValueError):
+            wdb.set_cover(1, b"not an image")
+        self.assertEqual(
+            self._sql2("SELECT has_cover FROM books WHERE id = 1")[0][0], 0
+        )
+
+    def test_failed_batch_leaves_no_cover_file(self):
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 32 + b"\xff\xd9"
+        wdb = WritableCalibreDB(self.db_path)
+        with self.assertRaises(RuntimeError), wdb.batch():
+            wdb.set_cover(1, jpeg)
+            raise RuntimeError("boom")
+        wdb.close()
+        self.assertEqual(
+            self._sql2("SELECT has_cover FROM books WHERE id = 1")[0][0], 0
+        )
+        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.jpg")))
+
+    def test_remove_cover_clears_flag_and_files(self):
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 32 + b"\xff\xd9"
+        with self._wdb() as wdb:
+            wdb.set_cover(1, jpeg)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("UPDATE books SET has_cover = 0 WHERE id = 1")
+            conn.commit()
+        finally:
+            conn.close()
+        # A stray file with the flag already off still gets swept.
+        with self._wdb() as wdb:
+            changed = wdb.remove_cover(1)
+        self.assertFalse(changed)
+        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.jpg")))
+
+        with self._wdb() as wdb:
+            wdb.set_cover(1, jpeg)
+            self.assertTrue(wdb.remove_cover(1))
+        self.assertEqual(
+            self._sql2("SELECT has_cover FROM books WHERE id = 1")[0][0], 0
+        )
+        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.jpg")))
+        # The removal queued OPF resync for the book.
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied WHERE book = 1")[0][0], 1
+        )

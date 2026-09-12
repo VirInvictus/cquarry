@@ -1436,9 +1436,18 @@ candidates at :1131-1175 except where a box says promotion candidate.
   author_sort and re-lay paths post-commit; series merges renumber
   incoming books to max+1 over the survivor's other books; series
   removal nulls series_index like set_series(None).)*
-- [ ] **Promotion candidate: `set_cover(book_id, data)` /
+- [x] **Promotion candidate: `set_cover(book_id, data)` /
   `remove_cover(book_id)`** (upstream `cache.py:2237-2253`,
   `backend.py:1962-1992`). S.
+  *(APPROVED 2026-09-12 (Brandon, "four loop-closers") and SHIPPED in
+  1.19.0: JPEG/PNG sniff-or-raise with add_book's decided rule, written
+  to cover.jpg/cover.png; a stale cover under the other extension is
+  removed so get_cover_path can never prefer it; remove_cover sweeps
+  both extensions and clears the flag. File placement defers to the
+  outermost commit via the new `_pending_fs_ops` queue -- a failed
+  batch never catalogues a cover it did not keep. Upstream's
+  image-conversion (save_cover_data_to → JPEG) stays out of scope:
+  stdlib-only, so the sniff-or-raise stands in.)*
 - [x] **FTS + pages dirtying alongside format writes** (internal): when
   `full-text-search.db` exists, insert into `dirtied_formats` and set
   `books_pages_link.needs_scan` (upstream `fts_triggers.sql`,
