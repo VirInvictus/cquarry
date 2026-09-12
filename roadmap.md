@@ -1360,3 +1360,45 @@ lane); the promotion-candidate boxes stay shut until Brandon approves
 them per the standing rule. The functional matrix: every A/B item gets
 a pinning test; every C item ships with its trigger-census test in the
 test_write.py style.
+
+### D. The consumer wave (the four-program rule; Brandon, 2026-09-12)
+
+This is a FOUR-PROGRAM update: cquarry, bindery-cli, CalibreQuarry,
+Hermitage. Policy: keep the three consumers current with the newest
+cquarry — no pinning to old versions when building against upstream is
+cheap. A feature with no purpose for a consumer does not force that
+consumer's floor requirement, but everything comes up if able, in the
+logical order (cquarry ships and pushes first; consumers follow).
+Propagation checkboxes per item, so the wave cannot be lost in the mix:
+
+- [ ] **Ship the research lane** (A/B/C ungated boxes) as 1.18.0 with
+  the full sync set; push; CI green; PyPI live. THE WAVE TRIGGERS ON
+  THIS BOX.
+- [ ] **CalibreQuarry brings up** (the heavy consumer; its Phase 19
+  hard-depends on parts of this phase): floor -> 1.18.0, lock regen,
+  both suites + CI, adoption note in patchnotes. Consumes: A.1 (its
+  --fts search reads books_text), A.2 (the pages-provenance/truncation
+  audit rows), A.4 (the failed-extraction audit row), B.1-B.5 (search
+  correctness on its search surface), C.1 (write-curation renames keep
+  the on-disk layout truthful), and the C promotion candidates as their
+  approvals land (C.3 is the cover-remediation verb's dependency).
+- [ ] **bindery-cli brings up**: floor -> 1.18.0, lock regen,
+  run_tests.sh + CI, adoption note. Consumes: C.4 (its set_format
+  repair lane leaves Calibre's FTS index and page counts honest — the
+  exact stale-index hole the research flagged), C.8 when approved
+  (save/restore_original_format is bindery's undo-able repair), plus
+  the search/runtime fixes riding the install.
+- [ ] **Hermitage brings up**: floor/lock -> 1.18.0 AND the Flatpak pin
+  (data/io.github.virinvictus.hermitage.yml:153) -> the 1.18.0 release
+  commit in the same wave (1.18 touches Hermitage's search correctness
+  through the shared read layer: A.3 + B.1-B.5); system-python3 suite;
+  adoption note; Hermitage release/tag on its own go.
+- [ ] **The promotion-candidate riders** (C.2, C.3, C.5-C.8): on
+  approval, ship in the next cquarry minor and bump ONLY the consuming
+  consumer's floor in that wave (C.3 -> CalibreQuarry's cover verb;
+  C.8 -> bindery's repair lane; C.7 -> the acquisition bootstrap; C.2/
+  C.5/C.6 -> CalibreQuarry's curation verbs). No approval, no rider.
+- [ ] **Ecosystem close-out**: all three consumers' adoption notes
+  recorded in this roadmap's cascade block; the per-consumer floors
+  stated in each consumer's pyproject; nothing left pinned below
+  1.18.0 anywhere in the ecosystem.
