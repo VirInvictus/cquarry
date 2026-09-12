@@ -1186,6 +1186,29 @@ newly-found deviations, and the read side needs the comma round-trip and
 the preference-JSON guards. Nothing here is architecture; it is one focused
 hardening release.*
 
+### Cascade notes for the 2026-09-12 wave (cquarry 1.18.0)
+
+- **CalibreQuarry.** Floor >=1.18.0 (e8e8b9d, CI green, adoption note in
+  the Unreleased patchnotes block). Consumed eventually by its Phase 19:
+  A.1/A.2/A.4 for the --fts search and the audit rows, B.1-B.5 for search
+  correctness, C.1 for curation renames. No behavior change forced today.
+- **bindery-cli.** Floor >=1.18.0 + uv.lock (7446c38, suite 383 OK, CI
+  green, adoption note). Consumed C.4 immediately: set_format repairs now
+  queue Calibre FTS re-extraction and flag pages rescans, closing the
+  stale-index hole the research flagged.
+- **Hermitage.** 1.8.3 (598c4d3, suite 67 OK, CI green, v1.8.3 tagged
+  verbatim under the auto-tag promotion): Flatpak pin -> 132aa2c; the
+  search-correctness fixes (B.1-B.5) and A.3 arrive through the shared
+  read layer; adoption note in its patchnotes.
+- **Carrel-calibre-web.** Unaffected: it consumes the read layer's stable
+  surface (search(), field(), pages), and 1.18's search changes are
+  upstream-parity fixes, not interface changes. No floor bump owed.
+- **Skills.** phase-3-import updated (set_format FTS dirtying,
+  set_identifier comma cleaning, the update_title/set_authors re-lay
+  caution); phase-1-import swept clean.
+- **Promotion candidates (C.2, C.3, C.5-C.8).** Raised at session start,
+  batched; no approval in-lane; all six boxes stay shut (see section D).
+
 ### Cascade notes for the 2026-09-09 hardening releases
 
 *(Recorded here per the cascade rule: every affected consumer is named with
@@ -1465,7 +1488,7 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
   *(SHIPPED 2026-09-12 as v1.18.0: nine item commits 28f8f02..e6f5224
   plus the release commit; suite 381 passed; all six ungated boxes and
   both marginal/optional dispositions recorded above.)*
-- [ ] **CalibreQuarry brings up** (the heavy consumer; its Phase 19
+- [x] **CalibreQuarry brings up** (the heavy consumer; its Phase 19
   hard-depends on parts of this phase): floor -> 1.18.0, lock regen,
   both suites + CI, adoption note in patchnotes. Consumes: A.1 (its
   --fts search reads books_text), A.2 (the pages-provenance/truncation
@@ -1473,23 +1496,46 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
   correctness on its search surface), C.1 (write-curation renames keep
   the on-disk layout truthful), and the C promotion candidates as their
   approvals land (C.3 is the cover-remediation verb's dependency).
-- [ ] **bindery-cli brings up**: floor -> 1.18.0, lock regen,
+  *(DONE 2026-09-12: floor >=1.18.0 in pyproject (e8e8b9d), adoption
+  note in a new Unreleased patchnotes block (no lock file in that
+  repo); unit suite 385 OK + the read-only real-library smoke passed;
+  CI green. No release: its Phase 19 lane follows.)*
+- [x] **bindery-cli brings up**: floor -> 1.18.0, lock regen,
   run_tests.sh + CI, adoption note. Consumes: C.4 (its set_format
   repair lane leaves Calibre's FTS index and page counts honest — the
   exact stale-index hole the research flagged), C.8 when approved
   (save/restore_original_format is bindery's undo-able repair), plus
   the search/runtime fixes riding the install.
-- [ ] **Hermitage brings up**: floor/lock -> 1.18.0 AND the Flatpak pin
+  *(DONE 2026-09-12: floor >=1.18.0 in pyproject + uv.lock resolved
+  1.18.0 from PyPI (7446c38), adoption note in an Unreleased block;
+  run_tests.sh 383 OK; CI green. C.8 stays shut pending approval.)*
+- [x] **Hermitage brings up**: floor/lock -> 1.18.0 AND the Flatpak pin
   (data/io.github.virinvictus.hermitage.yml:153) -> the 1.18.0 release
   commit in the same wave (1.18 touches Hermitage's search correctness
   through the shared read layer: A.3 + B.1-B.5); system-python3 suite;
   adoption note; Hermitage release/tag on its own go.
-- [ ] **The promotion-candidate riders** (C.2, C.3, C.5-C.8): on
+  *(DONE 2026-09-12 as Hermitage 1.8.3 (598c4d3): version + metainfo
+  entry + patchnotes + adoption note; the Flatpak pin moved to
+  132aa2c (the 1.18.0 release commit); its pyproject consumes the git
+  default branch, so there is no floor line or lock file to bump -- the
+  pin is the floor mechanism. System-python3 suite 67 OK; CI green;
+  v1.8.3 tagged verbatim and pushed under the auto-tag promotion.)*
+- [x] **The promotion-candidate riders** (C.2, C.3, C.5-C.8): on
   approval, ship in the next cquarry minor and bump ONLY the consuming
   consumer's floor in that wave (C.3 -> CalibreQuarry's cover verb;
   C.8 -> bindery's repair lane; C.7 -> the acquisition bootstrap; C.2/
   C.5/C.6 -> CalibreQuarry's curation verbs). No approval, no rider.
-- [ ] **Ecosystem close-out**: all three consumers' adoption notes
+  *(DISPOSITIONED 2026-09-12: the six candidates were RAISED at session
+  start, batched, per the standing rule; no approval arrived during the
+  lane, so every box stays SHUT and no rider shipped. The raise text
+  stands in the session record; approval whenever it comes ships them
+  as 1.19.0 under this box's shape.)*
+- [x] **Ecosystem close-out**: all three consumers' adoption notes
   recorded in this roadmap's cascade block; the per-consumer floors
   stated in each consumer's pyproject; nothing left pinned below
   1.18.0 anywhere in the ecosystem.
+  *(DONE 2026-09-12: recorded in the cascade block below; CalibreQuarry
+  >=1.18.0, bindery-cli >=1.18.0 (+lock), Hermitage via the pin at
+  1.18.0's commit. Skills swept same-release (phase-3 updated:
+  set_format FTS dirtying, set_identifier comma cleaning, the rename
+  re-lay caution; phase-1 clean).)*
