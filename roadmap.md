@@ -1459,9 +1459,12 @@ consumer's floor requirement, but everything comes up if able, in the
 logical order (cquarry ships and pushes first; consumers follow).
 Propagation checkboxes per item, so the wave cannot be lost in the mix:
 
-- [ ] **Ship the research lane** (A/B/C ungated boxes) as 1.18.0 with
+- [x] **Ship the research lane** (A/B/C ungated boxes) as 1.18.0 with
   the full sync set; push; CI green; PyPI live. THE WAVE TRIGGERS ON
   THIS BOX.
+  *(SHIPPED 2026-09-12 as v1.18.0: nine item commits 28f8f02..e6f5224
+  plus the release commit; suite 381 passed; all six ungated boxes and
+  both marginal/optional dispositions recorded above.)*
 - [ ] **CalibreQuarry brings up** (the heavy consumer; its Phase 19
   hard-depends on parts of this phase): floor -> 1.18.0, lock regen,
   both suites + CI, adoption note in patchnotes. Consumes: A.1 (its

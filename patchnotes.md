@@ -1,3 +1,116 @@
+## v1.18.0 (2026-09-12)
+
+### Phase 13: the upstream comparison (FTS reads, search honesty, write completions)
+
+Everything below ships against REPORT-12-Sept.md, three read-only research
+passes that compared this repo line-for-line against the upstream Calibre
+clone (schema + upgrade map, search stack, write paths). The promotion
+candidates the report surfaced stay shut pending approval; every ungated
+box in Phase 13 (roadmap sections A-D) is closed here, each with its
+pinning or regression test.
+
+### Read coverage
+
+- **The `full-text-search.db` sidecar is now read** (the last unread
+  Calibre data file). `CalibreDB.get_book_text(book_id, fmt)` returns one
+  format's full `books_text` row including `searchable_text`;
+  `get_text_extractions(book_id=None)` returns the bulk status rows WITHOUT
+  the megabyte texts (`err_msg` audit, format-hash change detection);
+  `search_book_text(query, *, fmt=None, ids=None)` is a case- and
+  accent-folded Python-side content search returning
+  `{book_id: {FORMAT, ...}}`. Same lock-escape snapshot handling as
+  metadata.db; a missing sidecar degrades every read to empty; `refresh()`
+  drops the sidecar connection with the rest. No FTS5 machinery: the index
+  tables tokenize through Calibre's custom tokenizer and are unqueryable
+  outside Calibre, so the plain table is the read surface.
+- **`integrity.find_failed_text_extraction(db)`** returns
+  `{book_id: {FORMAT: err_msg}}` for scans, DRM, and corrupt files; the
+  third sanctioned non-cached read in the module after the two cover-file
+  checks.
+- **`CalibreDB.get_page_metadata(book_id=None)`** exposes the
+  `books_pages_link` auxiliary columns (`algorithm`, `format`,
+  `format_size`, `timestamp`, `needs_scan` as bool): provenance for
+  displayed page counts, with `needs_scan=True` meaning Calibre has queued
+  a recount.
+- **`#label_index` is real for custom series columns.** The engine
+  registered the location but it could never resolve (`#myseries_index:>3`
+  silently matched nothing); `load_custom_column` now reads the link
+  table's `extra` float and the engine serves it. An exact label literally
+  ending in `_index` keeps the token; ancient schemas degrade. Also riding
+  the same SQL: `CalibreDB.custom_column_links(col_name)` surfaces the
+  normalized value tables' `link` URL column (no Calibre UI populates it).
+- **Doc line** (spec 3.2, CLAUDE.md, API.md): a stored annotation's notes
+  follow its highlighted text joined by LF + unit separator + LF; the
+  research line dropped the leading LF and is corrected in the roadmap.
+
+### Search parity (behavior changes)
+
+- **Fixed: `identifiers:KEY:TRUE/FALSE` inverted on uppercase** (the one
+  real bug the research found). The presence gate folded the value but the
+  selection compared the raw one, so `identifiers:isbn:TRUE` matched the
+  COMPLEMENT of the right answer. Upstream lowercases once and uses that
+  value for both; so does cquarry now.
+- **Bare `true`/`false` are the sweep-wide presence test** (upstream
+  parity), not substring matches: `true` matches books where any swept
+  field holds a non-blank value, and the identifiers store and cover flag
+  count as present. Identifier keys never text-sweep (the old spec claim
+  was wrong; the code now matches upstream instead of the claim). Bare
+  numeric probes lost `id` (upstream excludes it) and cover-as-0/1 (cover
+  joins via presence), leaving series_index, rating, pages, size.
+- **Super-quotes `"""..."""` ported** (upstream's documented escape hatch
+  for quote/paren/regex-heavy queries): `title:"""a "b" (c)"""` parses and
+  matches; it used to mis-tokenize.
+- **`template:` raises a clear ParseException** naming the missing
+  template engine (model: upstream TemplatesNotAllowed) instead of
+  silently matching nothing. The optional template implementation stays
+  out of scope.
+- **Strictness fixes (the honesty pass, each pinned):** date locations
+  take exactly `true`/`false` as presence words and no match-kind
+  prefixes -- `pubdate:blank` or `pubdate:~2020` now raise, like
+  upstream's date-conversion error, instead of matching dateless books.
+  Numeric locations take exactly `true`/`false` -- `rating:checked`/
+  `rating:blank` raise like upstream's non-numeric error (the tristate
+  vocabulary is bool-only, where it still works). Text fields' presence
+  words narrowed to exact `true`/`false` (`title:yes` is substring text
+  again). New dated spec-deviation entries: tristate bool fidelity (9),
+  lexer strictness (10), the benign extensions consolidated (11), the
+  entity case-change policy (12).
+
+### Write completions
+
+- **Path re-laying on `update_title`/`set_authors`.** Curation renames no
+  longer leave the `Author/Title (id)` directory and `Title - Author.ext`
+  format files under the old names: the layout moves with the rows
+  (directory rename, per-format file renames, emptied-parent removal,
+  stale-target replacement, case-only spelling fix, db-only correction for
+  path-less legacy rows). The fs half lands only after the commit,
+  deferred to the outermost `batch()` commit via `_pending_relayouts` and
+  dropped on rollback, so a failed pass never leaves rows pointing at
+  renamed directories.
+- **Fixed in the same machinery:** a failed batch never cleared
+  `_pending_removals`, so a later successful batch could flush stale
+  removals against rows the rollback had resurrected. The rollback path
+  now clears both deferred queues; regression test included.
+- **FTS + pages dirtying alongside format writes.** `add_format` and
+  `set_format` queue the (book, format) pair into the sidecar's
+  `dirtied_formats` and set `books_pages_link.needs_scan`, so a repaired
+  file no longer leaves Calibre's content index and page counts stale
+  forever (Calibre never re-reads a file on its own; it processes its
+  queues). `remove_format` clears the queue entry so Calibre never
+  re-extracts a vanished file. The sidecar is attached before the
+  transaction opens, the queue writes roll back with the batch, and a
+  missing sidecar degrades to a no-op. The stale `books_text` row of a
+  removed format stays Calibre's own to clean (the sidecar's delete
+  triggers need Calibre's custom tokenizer; deleting here would corrupt
+  the index).
+- **`clean_identifier` parity.** `set_identifier` (and the mirrored
+  `clear_identifier` normalization) cleans both halves like upstream: the
+  type is stripped, lowercased, and stripped of `:`/`,`; the value is
+  stripped with `,` mapped to `|` -- Calibre's comma-free stored shape.
+
+Suite: 381 passed (was 327). Consumers bring up per roadmap Phase 13
+section D (the four-program wave).
+
 ## v1.17.0 (2026-09-09)
 
 ### The approved promotion candidates
