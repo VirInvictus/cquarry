@@ -784,6 +784,20 @@ _BOOL_FALSE = {
 # ============================================================================
 
 
+def _present(value: Any) -> bool:
+    """Upstream's bare true/false presence test over a raw field value
+    (DS:849-855): truthy, and a non-blank string when it is a string."""
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return bool(value)
+    if isinstance(value, (list, tuple)):
+        return any(str(v).strip() for v in value)
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
 class SearchEngine:
     """Evaluate Calibre search expressions against a MetadataProvider."""
 
@@ -1054,8 +1068,13 @@ class SearchEngine:
 
         # Upstream's keypair search: only the exact words 'true'/'false'
         # are presence tests (the wider yes/no/checked vocabulary does not
-        # leak into identifier values).
-        if valq.lower() in ("true", "false"):
+        # leak into identifier values). Upstream lowercases the query inside
+        # _matchkind and reuses that one value for both the gate and the
+        # selection (DS:424-430); gating on the folded value while selecting
+        # on the raw one used to invert identifiers:KEY:TRUE/FALSE on
+        # uppercase, returning the complement of the right answer.
+        valq_l = valq.lower()
+        if valq_l in ("true", "false"):
             found = set()
             for b in candidates:
                 ids = self.provider.field(b, "identifiers") or {}
@@ -1064,7 +1083,7 @@ class SearchEngine:
                         found.add(b)
                 elif ids:
                     found.add(b)
-            return found if valq in _BOOL_TRUE else (candidates - found)
+            return found if valq_l == "true" else (candidates - found)
 
         out = set()
         for b in candidates:
@@ -1079,9 +1098,10 @@ class SearchEngine:
         return out
 
     # The numeric fields upstream's bare-term sweep compares by exact
-    # equality (DS:857-877): id, series_index, rating, pages, size and
-    # cover-as-0/1. Date fields take no part in the sweep upstream.
-    _ALL_NUMERIC_FIELDS = ("id", "series_index", "rating", "pages", "size", "cover")
+    # equality (DS:857-877): series_index, rating, pages, size. Upstream
+    # excludes `id` from the sweep (DS:811) and cover joins only through
+    # the true/false presence branch, so neither is probed numerically.
+    _ALL_NUMERIC_FIELDS = ("series_index", "rating", "pages", "size")
 
     def _match_all(self, query, candidates) -> set[int]:
         kind, q = _matchkind(query)
@@ -1093,9 +1113,24 @@ class SearchEngine:
             for loc, dt in self._custom.items()
             if dt in (DT_TEXT, DT_TEXT_MULTI, DT_HIER)
         ]
+        # The bare true/false presence branch (upstream DS:849-855): with
+        # contains semantics, exactly these words test field PRESENCE across
+        # the sweep instead of matching text. The sweep's identifiers store
+        # and cover flag live only here -- a bare term never text-matches
+        # identifier keys or values (DS:808-818), and a non-empty identifier
+        # dict or a set cover flag counts as present.
+        ql = q.lower()
+        if kind == CONTAINS and ql in ("true", "false"):
+            probe = fields + ["identifiers", "cover"]
+            found = {
+                b
+                for b in candidates
+                if any(_present(self.provider.field(b, loc)) for loc in probe)
+            }
+            return found if ql == "true" else (candidates - found)
         # Bare terms reach numeric fields as exact-equality probes (upstream
         # parity); languages are canonicalized in the sweep like any other
-        # path, and identifier KEYS sweep as text (never values).
+        # path.
         lang_q = _canonical_languages(q) if ":" not in q else q
         try:
             n = float(q)
@@ -1121,8 +1156,6 @@ class SearchEngine:
                         val = self.provider.field(b, loc)
                         if val is None:
                             continue
-                        if loc == "cover":
-                            val = 1 if val else 0
                         try:
                             if float(val) == n:
                                 out.add(b)

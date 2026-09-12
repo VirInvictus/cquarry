@@ -252,6 +252,14 @@ class TestMatching(unittest.TestCase):
         self.assertEqual(self.s("isbn:9780765311788"), {2})
         self.assertEqual(self.s("identifiers:false"), {3, 4})
 
+    def test_identifiers_presence_gate_is_case_insensitive(self):
+        # The 1.18 pin: the presence gate folded the value but the selection
+        # compared the raw one, so uppercase TRUE/FALSE silently inverted
+        # (returning the complement of the right answer).
+        self.assertEqual(self.s("identifiers:isbn:TRUE"), {1, 2})
+        self.assertEqual(self.s("identifiers:isbn:False"), {3, 4})
+        self.assertEqual(self.s("identifiers:GOODREADS:True"), {2})
+
     def test_accent_insensitive(self):
         self.assertEqual(self.s("Bear"), {4})  # query 'Bear' matches 'Beär'
 
@@ -693,9 +701,73 @@ class TestSearchParityFixes(unittest.TestCase):
         self.assertEqual(self.s("1965"), set())  # dates are not swept
         self.assertEqual(self.s("5"), {1})  # book 1 rated 5 stars
         # "3" matches book 4 via the rating probe (the fake provider has no
-        # id/size fields; the real view probes id, series_index, pages and
-        # size the same way).
+        # id/size fields; the real view probes series_index, rating, pages
+        # and size the same way -- id is excluded from the sweep, upstream
+        # parity since 1.18).
         self.assertEqual(self.s("3"), {4})
+
+    def test_all_sweep_bare_true_false_is_the_presence_test(self):
+        # The 1.18 pin: with contains semantics, a bare true/false term is
+        # upstream's presence branch across the sweep (DS:849-855), not a
+        # substring match. Every fixture book has a title, so true matches
+        # everything and false matches nothing.
+        self.assertEqual(self.s("true"), {1, 2, 3, 4})
+        self.assertEqual(self.s("false"), set())
+
+    def test_all_sweep_presence_counts_identifiers_and_cover(self):
+        # Isolated sweep: books with no text at all -- identifiers and the
+        # cover flag are the only presence signals, and identifier KEYS are
+        # never text-matched by a bare term (the old spec claim, corrected
+        # in 1.18 to match upstream DS:808-818).
+        books = {
+            1: {
+                "title": "",
+                "authors": [],
+                "tags": [],
+                "comments": "",
+                "identifiers": {"isbn": "x"},
+                "cover": False,
+            },
+            2: {
+                "title": "",
+                "authors": [],
+                "tags": [],
+                "comments": "",
+                "identifiers": {},
+                "cover": True,
+            },
+            3: {
+                "title": "",
+                "authors": [],
+                "tags": [],
+                "comments": "",
+                "identifiers": {},
+                "cover": False,
+            },
+        }
+
+        class _BareProvider:
+            def all_ids(self):
+                return set(books)
+
+            def field(self, book_id, location):
+                return books[book_id].get(location)
+
+            def vl_expression(self, name):
+                return None
+
+            def saved_search(self, name):
+                return None
+
+            def custom_locations(self):
+                return {}
+
+        engine = SearchEngine(_BareProvider())
+        self.assertEqual(engine.search("true"), {1, 2})
+        self.assertEqual(engine.search("false"), {3})
+        # Identifier keys do not text-sweep: a bare term matching an
+        # identifier key or value matches nothing here.
+        self.assertEqual(engine.search("isbn"), set())
 
     def test_search_with_exact_prefix_resolves_saved_search(self):
         # Upstream removeprefix's the '=' before the saved-search lookup;
