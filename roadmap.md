@@ -1640,7 +1640,7 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
 
 ## New findings 2026-09-12 (six-lens full audit; detail: audit/FULL-AUDIT-2026-09-12.md, Wave 13)
 
-- [ ] **HIGH: save_original_format poisons FTS dirtying for the whole
+- [x] **HIGH: save_original_format poisons FTS dirtying for the whole
       connection.** write.py:2221 opens its batch without
       _ensure_fts_attached(); the nested add_format/set_format then ATTACH
       inside BEGIN IMMEDIATE, the OperationalError is caught, and
@@ -1648,19 +1648,42 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
       format verb silently skips dirtied_formats queueing and needs_scan.
       One-line fix: ensure before the batch, mirroring
       restore_original_format:2284.
-- [ ] **Flush-failure state corruption:** in batch()'s finally, the three
+      (SHIPPED 1.20.1: ensure-before-batch added; two tests, one pinning
+      fresh-connection queueing and one simulating the pre-3.21.0
+      attach-ban. SEVERITY CORRECTION found while fixing: modern SQLite
+      allows ATTACH inside a transaction since 3.21.0 (2017-10-24), and the
+      existing suite already exercised exactly this flow green, so the
+      poison cannot fire on any supported build; the fix is attach-first
+      discipline plus armor for old builds, and _ensure_fts_attached's
+      docstring no longer claims modern SQLite forbids it. Recorded here
+      per the new-findings rule because the audit's live-damage premise
+      was version-dependent.)
+- [x] **Flush-failure state corruption:** in batch()'s finally, the three
       flushes run BEFORE _batch_dirs.clear()/_batch_poisoned reset, so a
       flush OSError leaves the caller with a committed transaction plus
       leaked dirs a later failed exit will rmtree (rows pointing at
       deleted directories). Reset state in a finally before propagating;
       make _remove_book_dir idempotent.
-- [ ] **FTS contract gaps:** remove_book never clears dirtied_formats
+      (SHIPPED 1.20.1: nested finally resets _batch_dirs/_batch_poisoned
+      before propagating; _remove_book_dir skips a directory that is
+      already gone; a failed flush's committed removals stay queued and a
+      later flush completes them idempotently. TestBatchFlushFailure pins
+      the corruption scenario, the retry, and the idempotency.)
+- [x] **FTS contract gaps:** remove_book never clears dirtied_formats
       (docstring + API.md claim the queues are cleaned; needs
       ensure-before-begin + per-format clearing); add_book bypasses FTS/
       pages dirtying for seeded formats; non-batched update_title/
       set_authors apply the fs relayout before commit (a failed commit
       diverges rows from files - remove_book's after-commit ordering is
       the correct pattern).
+      (SHIPPED 1.20.1: remove_book attaches before _begin, captures the
+      book's formats before the cascade, and _clear_fts_dirty each, with
+      the docstring and API.md wording now naming the FTS queue;
+      add_book attaches before its batch and _mark_fts_dirty per seeded
+      row, rolling back with the batch; _relayout_book_path queues in
+      every path and bare update_title/set_authors flush right after
+      their own commit, a failed commit dropping the queued op. Tests in
+      TestRemoveBook, TestAddBook, and TestPathRelaying cover all three.)
 - [ ] **Blitz candidates:** list_books ids-order mode (S; retires Carrel-
       calibre-web's live preserve_order shim - the only parked item with a
       consumer); metadata-quality predicates in integrity.py

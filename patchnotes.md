@@ -1,3 +1,68 @@
+## v1.20.1 (2026-09-13)
+
+### The six-lens audit's write-path findings
+
+A bug-fix release from the 2026-09-12 six-lens audit (Wave 13): five
+write-path defects plus a LOW hardening batch, no API changes. Two of
+the fixes restore contract claims the docs already made; the release
+closes the gap instead of rewording the promise.
+
+- **`save_original_format` attaches the FTS sidecar before its batch
+  (HIGH).** The save opened its transaction without
+  `_ensure_fts_attached()`, so the nested `add_format`/`set_format`
+  attached inside it; on SQLite builds that forbid in-transaction ATTACH
+  (pre-3.21.0) the caught failure cached `_fts_state=False` for the
+  connection lifetime, silently killing `dirtied_formats` queueing and
+  `needs_scan` for every later format verb. The one-line fix mirrors
+  `restore_original_format`. On modern SQLite the poison cannot fire
+  (in-transaction ATTACH has been legal since 3.21.0, 2017), so this is
+  attach-first discipline plus armor for old builds, and the docstring
+  no longer claims modern SQLite forbids it.
+- **A failed batch flush can no longer strand committed books'
+  directories.** `batch()`'s finally ran the three post-commit flushes
+  BEFORE resetting `_batch_dirs`/`_batch_poisoned`; a flush OSError left
+  the caller with a COMMITTED transaction plus registered directories
+  that a LATER failed exit would rmtree (rows pointing at deleted
+  directories). The state now resets in a nested finally before the
+  error propagates, and `_remove_book_dir` is idempotent (a retried
+  flush skips directories that are already gone instead of raising on
+  the missing source). A failed flush's committed removals stay queued
+  and a later flush completes them.
+- **`remove_book` clears the FTS queue for the book's formats.** It
+  cleaned `metadata_dirtied` and `annotations_dirtied` but never the
+  sidecar's `dirtied_formats`, while its docstring and API.md claimed
+  the queues are cleaned; Calibre would have re-extracted vanished
+  files. The sidecar attaches before the transaction, the book's
+  formats are captured before the cascade, and each queue entry is
+  cleared; the docstring and API.md now name the FTS queue explicitly.
+- **`add_book` seeds the FTS/pages queue for its formats.** Seeded
+  formats were inserted directly, bypassing `add_format`, so new books
+  never entered `dirtied_formats` or got `needs_scan`; upstream's own
+  add path queues every `data` INSERT. `add_book` now attaches before
+  its batch and queues each seeded format; the queue writes join the
+  batch and roll back with it.
+- **A failed commit no longer diverges rows from files.** Bare
+  (non-batched) `update_title`/`set_authors` applied the filesystem
+  re-lay BEFORE the commit, so a commit failure left rolled-back rows
+  under moved/renamed files (exactly what `_relayout_book_path`'s
+  docstring promised could not happen). The re-lay now queues in every
+  path and lands after the rows commit: the outermost batch commit
+  inside a batch, the setter's own commit otherwise, and a failed
+  commit drops the queued op instead of leaking it into a later batch.
+- **LOW hardening.** `expire_trash` counts only actual removals (a
+  failed rmtree used to be counted as removed); `refresh()`'s docstring
+  no longer overpromises on the locked-DB snapshot path (the snapshot
+  is not retaken; reopen the CalibreDB for current data); `load_config`
+  catches only `OSError`/`JSONDecodeError` and notes a broken config on
+  stderr instead of failing silently into "no config";
+  `get_tag_browser_counts` narrows its label-map suppress to
+  `sqlite3.Error` and double-quotes the view identifiers it reads
+  (defense-in-depth: the names come from sqlite_master).
+
+Both import skills swept: they teach "since 1.18 format writes queue
+FTS", which these fixes restore rather than change; no skill edits
+needed. Patch release: consumer floors stay where they are.
+
 ## v1.20.0 (2026-09-12)
 
 ### The last two promotion candidates, figured out
