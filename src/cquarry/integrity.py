@@ -18,6 +18,7 @@ and the FTS sidecar is a separate database, so they ride
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from cquarry.helpers import (
@@ -31,14 +32,17 @@ if TYPE_CHECKING:
 
 __all__ = [
     "find_authorless",
+    "find_bad_language_codes",
     "find_coverless",
     "find_deprecated_formats",
     "find_duplicate_books",
     "find_failed_text_extraction",
     "find_formatless",
     "find_identifierless",
+    "find_invalid_uuids",
     "find_low_res_covers",
     "find_missing_cover_files",
+    "find_sentinel_pubdates",
     "find_series_gaps",
     "find_unrated",
     "find_untagged",
@@ -168,6 +172,61 @@ def find_identifierless(db: CalibreDB) -> list[int]:
     store). The curation-facing opposite of :meth:`CalibreDB.get_identifiers`;
     promoted from Hermitage's inline Insights predicate."""
     return sorted(b["id"] for b in db.get_all_books() if not b["identifiers"])
+
+
+def find_invalid_uuids(db: CalibreDB) -> list[int]:
+    """Books whose ``uuid`` is empty or does not parse as a UUID.
+
+    The metadata-quality half of the uuid story: the reader degrades
+    pre-``uuid``-column schemas to ``""``, and hand-built rows can carry
+    any garbage, so an unparseable id is reported as seen rather than
+    assumed away."""
+    out: list[int] = []
+    for b in _books(db):
+        value = b.get("uuid") or ""
+        try:
+            uuid.UUID(value)
+        except ValueError, AttributeError:
+            out.append(b["id"])
+    return sorted(out)
+
+
+def find_sentinel_pubdates(db: CalibreDB) -> list[int]:
+    """Books whose ``pubdate`` is the undefined-date sentinel (Calibre's
+    ``0101-01-01``, or its ``0100-01-01`` ancestor -- the same pair the
+    search engine and the listing sort treat as dateless). A real
+    publication date of year 1 would be indistinguishable; nobody has
+    one."""
+    return sorted(
+        b["id"]
+        for b in _books(db)
+        if isinstance(b.get("pubdate"), str)
+        and b["pubdate"].startswith(("0101-01-01", "0100-01-01"))
+    )
+
+
+def find_bad_language_codes(db: CalibreDB) -> list[int]:
+    """Books linked to a language code that is not an ISO 639-2 code.
+
+    Calibre stores three-letter lowercase codes in ``languages.lang_code``;
+    a bare name (``English``), a two-letter code, or an empty string is
+    the data-quality smell the OPF linters flag. Shape check only: the
+    code must be exactly three ASCII letters (no registry, so a valid
+    but rare code never false-positives)."""
+    out: list[int] = []
+    for b in _books(db):
+        if any(
+            not (
+                isinstance(code, str)
+                and len(code) == 3
+                and code.isascii()
+                and code.isalpha()
+                and code.islower()
+            )
+            for code in b.get("languages") or []
+        ):
+            out.append(b["id"])
+    return sorted(out)
 
 
 def find_failed_text_extraction(db: CalibreDB) -> dict[int, dict[str, str]]:

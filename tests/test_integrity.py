@@ -9,18 +9,22 @@ import os
 import sqlite3
 import tempfile
 import unittest
+import uuid
 
 from cquarry.db import CalibreDB
 from cquarry.integrity import (
     find_authorless,
+    find_bad_language_codes,
     find_coverless,
     find_deprecated_formats,
     find_duplicate_books,
     find_failed_text_extraction,
     find_formatless,
     find_identifierless,
+    find_invalid_uuids,
     find_low_res_covers,
     find_missing_cover_files,
+    find_sentinel_pubdates,
     find_series_gaps,
     find_unrated,
     find_untagged,
@@ -277,6 +281,117 @@ class TestFailedTextExtraction(unittest.TestCase):
         os.link(self.db_path, os.path.join(other, "metadata.db"))
         with CalibreDB(os.path.join(other, "metadata.db")) as db:
             self.assertEqual(find_failed_text_extraction(db), {})
+
+
+class TestMetadataQuality(unittest.TestCase):
+    """The 1.21 metadata-quality trio (find_invalid_uuids,
+    find_sentinel_pubdates, find_bad_language_codes): the routed bindery
+    OPF-085 item, promoted to the shared predicate family."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        self.conn = sqlite3.connect(self.db_path)
+        c = self.conn
+        c.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,"
+            " series_index REAL, path TEXT, has_cover INTEGER, uuid TEXT)"
+        )
+        rows = [
+            (1, "Clean", "2001-01-01"),
+            (2, "Sentinel", "0101-01-01 00:00:00+00:00"),
+            (3, "Ancient", "0100-01-01 00:00:00+00:00"),
+            (4, "Real", "1998-06-01"),
+        ]
+        for bid, title, pub in rows:
+            c.execute(
+                "INSERT INTO books (id, title, sort, pubdate, path, has_cover)"
+                " VALUES (?, ?, ?, ?, ?, 0)",
+                (bid, title, title, pub, f"p{bid}"),
+            )
+        c.execute("CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT)")
+        c.execute(
+            "CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY,"
+            " book INTEGER, author INTEGER)"
+        )
+        c.execute("CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)")
+        c.execute(
+            "CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY,"
+            " book INTEGER, tag INTEGER)"
+        )
+        c.execute("CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER)")
+        c.execute(
+            "CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY,"
+            " book INTEGER, rating INTEGER)"
+        )
+        c.execute(
+            "CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,"
+            " format TEXT, uncompressed_size INTEGER, name TEXT)"
+        )
+        c.execute("CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT)")
+        c.execute(
+            "CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY,"
+            " book INTEGER, publisher INTEGER)"
+        )
+        c.execute("CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT)")
+        c.execute(
+            "CREATE TABLE books_series_link (id INTEGER PRIMARY KEY,"
+            " book INTEGER, series INTEGER)"
+        )
+        c.execute("CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT)")
+        c.executemany(
+            "INSERT INTO languages (id, lang_code) VALUES (?, ?)",
+            [(1, "eng"), (2, "English"), (3, "ja"), (4, ""), (5, "fra")],
+        )
+        c.execute(
+            "CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY,"
+            " book INTEGER, lang_code INTEGER, item_order INTEGER DEFAULT 0)"
+        )
+        c.executemany(
+            "INSERT INTO books_languages_link (book, lang_code, item_order)"
+            " VALUES (?, ?, ?)",
+            [(1, 1, 0), (2, 2, 0), (3, 3, 0), (3, 5, 1), (4, 4, 0)],
+        )
+        c.execute(
+            "CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER,"
+            " type TEXT, val TEXT)"
+        )
+        c.commit()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        self.conn.close()
+        import shutil
+
+        shutil.rmtree(self.temp_dir)
+
+    def _add_uuids(self):
+        self.conn.executemany(
+            "UPDATE books SET uuid = ? WHERE id = ?",
+            [
+                (str(uuid.uuid4()), 1),
+                ("", 2),  # pre-uuid-column degrade spelling
+                ("not-a-uuid", 3),  # garbage
+                (None, 4),  # NULL
+            ],
+        )
+        self.conn.commit()
+        self.db.refresh()  # the documented coherence boundary
+
+    def test_find_invalid_uuids(self):
+        self._add_uuids()
+        self.assertEqual(find_invalid_uuids(self.db), [2, 3, 4])
+
+    def test_find_sentinel_pubdates(self):
+        self.assertEqual(find_sentinel_pubdates(self.db), [2, 3])
+
+    def test_find_bad_language_codes(self):
+        # Book 1 = eng (good), book 2 = the bare NAME 'English', book 3 =
+        # a two-letter code beside a good fra link (one bad code flags the
+        # book), book 4 = the empty string.
+        self.assertEqual(find_bad_language_codes(self.db), [2, 3, 4])
 
 
 if __name__ == "__main__":

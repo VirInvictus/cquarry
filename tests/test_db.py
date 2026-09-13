@@ -114,6 +114,39 @@ class TestListBooks(unittest.TestCase):
         self.assertEqual(self._ids(self.db.list_books(offset=1, limit=1)), [2])
         self.assertEqual(len(self.db.list_books(offset=2)), 1)
 
+    def test_ids_sort_preserves_the_caller_order(self):
+        # The 1.21 ids-order mode: a caller that carries its own ordering
+        # (relevance rank, shelf order) gets its sequence back verbatim.
+        # (Retires Carrel-calibre-web's preserve_order re-sort shim.)
+        self.assertEqual(
+            self._ids(self.db.list_books(ids=[2, 3, 1], sort="ids")), [2, 3, 1]
+        )
+        self.assertEqual(self._ids(self.db.list_books(ids=[3, 1], sort="ids")), [3, 1])
+
+    def test_ids_sort_edges(self):
+        # A duplicated id keeps its first slot; unknown ids are skipped;
+        # empty ids are an empty page; descending reverses the sequence;
+        # offset/limit slice after the ordering.
+        self.assertEqual(
+            self._ids(self.db.list_books(ids=[3, 3, 1], sort="ids")), [3, 1]
+        )
+        self.assertEqual(self._ids(self.db.list_books(ids=[999, 2], sort="ids")), [2])
+        self.assertEqual(self.db.list_books(ids=[], sort="ids"), [])
+        self.assertEqual(
+            self._ids(self.db.list_books(ids=[1, 3, 2], sort="ids", descending=True)),
+            [2, 3, 1],
+        )
+        self.assertEqual(
+            self._ids(self.db.list_books(ids=[1, 2, 3], sort="ids", offset=1, limit=1)),
+            [2],
+        )
+
+    def test_ids_sort_validation(self):
+        with self.assertRaises(ValueError):
+            self.db.list_books(sort="ids")  # requires ids
+        with self.assertRaises(ValueError):
+            self.db.list_books(ids=[1], sort=("ids", "title"))  # stands alone
+
     def test_multi_key_sort_with_one_direction(self):
         # The authaz shape: author_sort primary, series name then series
         # index tie-breaking, one direction for all keys. Book 3 has no

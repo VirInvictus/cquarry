@@ -837,6 +837,7 @@ class CalibreDB:
         "author_sort",
         "series",
         "id",
+        "ids",
     )
 
     # Public API key -> hydrated-row field, where the two differ.
@@ -858,14 +859,20 @@ class CalibreDB:
         it. Pure over get_all_books()'s cache — no SQL of its own.
 
         ``ids`` restricts the listing (None = whole library; the listing's
-        order comes from ``sort``, never from the id order). ``sort`` is one
-        key or a sequence of keys (primary first, one direction for all —
-        author sort tie-breaks on series name then series index); each is
-        one of ``sort`` (Calibre's title-sort), ``title``, ``timestamp``,
-        ``pubdate``, ``rating``, ``series_index``, ``author_sort``,
-        ``series``, ``id``; None values sort last regardless of direction.
-        ``offset``/``limit`` slice after sorting; ``limit=None`` runs to the
-        end. Unknown keys raise ValueError.
+        order comes from ``sort``). ``sort`` is one key or a sequence of
+        keys (primary first, one direction for all — author sort tie-breaks
+        on series name then series index); each is one of ``sort``
+        (Calibre's title-sort), ``title``, ``timestamp``, ``pubdate``,
+        ``rating``, ``series_index``, ``author_sort``, ``series``, ``id``;
+        None values sort last regardless of direction. The special key
+        ``ids`` (since 1.21.0, requires ``ids``) replaces the sort instead
+        of naming one: the rows come back in the caller's id sequence, so
+        a frontend that carries its own ordering (relevance rank, shelf
+        order, download counts) keeps it; a duplicated id keeps its first
+        slot, ids absent from the library are skipped, ``descending``
+        reverses the sequence, and ``offset``/``limit`` slice after the
+        ordering. ``offset``/``limit`` slice after sorting; ``limit=None``
+        runs to the end. Unknown keys raise ValueError.
         """
         keys = (sort,) if isinstance(sort, str) else tuple(sort)
         if not keys:
@@ -880,6 +887,20 @@ class CalibreDB:
             raise ValueError("offset must be >= 0")
         if limit is not None and limit < 0:
             raise ValueError("limit must be >= 0")
+
+        end = offset + limit if limit is not None else None
+        if "ids" in keys:
+            if len(keys) > 1:
+                raise ValueError("sort='ids' must stand alone")
+            if ids is None:
+                raise ValueError("sort='ids' requires ids (the caller's id order)")
+            rank: dict[int, int] = {}
+            for n, bid in enumerate(ids):
+                if bid not in rank:  # a duplicated id keeps its first slot
+                    rank[bid] = n
+            rows = [r for r in self.get_all_books() if r["id"] in rank]
+            rows.sort(key=lambda r: rank[r["id"]], reverse=descending)
+            return rows[offset:end]
 
         wanted = set(ids) if ids is not None else None
         rows = [r for r in self.get_all_books() if wanted is None or r["id"] in wanted]
