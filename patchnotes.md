@@ -1,3 +1,39 @@
+## v1.21.0 (2026-09-13)
+
+### The two blitz candidates with live demand
+
+The six-lens audit's riders decision, executed: 1.20.1 shipped green and
+pushed, so the two recorded candidates that have a real consumer rode as
+this minor release. Additive API only; no floor bumps owed anywhere.
+
+- **`list_books(sort="ids", ids=...)`: the caller's-order mode.** The
+  listing's contract said its order comes from `sort`, never from the
+  id order; the special key `ids` (requires `ids`, stands alone) now
+  replaces the sort with the caller's id sequence verbatim. A duplicated
+  id keeps its first slot, ids absent from the library are skipped,
+  `descending` reverses the sequence, and `offset`/`limit` slice after
+  the ordering. This is the mode Carrel-calibre-web's `preserve_order`
+  re-sort shim (added page-by-page after `list_books` came back
+  title-sorted) has been waiting for; the fork can retire the shim at
+  its own release.
+- **The metadata-quality trio in `integrity.py`.** The routed bindery
+  OPF-085 item (51 warnings counted in the audit), promoted to the
+  shared predicate family so every consumer answers identically:
+  `find_invalid_uuids(db)` (books whose `uuid` is empty or does not
+  parse as a UUID; the pre-uuid-column degrade spelling `""` reports
+  honestly), `find_sentinel_pubdates(db)` (the `0101-01-01` undefined
+  date sentinel and its `0100-01-01` ancestor, the same pair the
+  search engine already treats as dateless), and
+  `find_bad_language_codes(db)` (a linked language code that is not
+  exactly three lowercase ASCII letters: bare names like `English`,
+  two-letter codes, empty strings; shape check only, so a valid but
+  rare code never false-positives). CalibreQuarry renders the audit
+  rows in its own lane.
+
+Both import skills swept; neither rider touches the import loops, so no
+skill edits. Consumer floors stay where they are (adoption notes in the
+roadmap's cascade block).
+
 ## v1.20.1 (2026-09-13)
 
 ### The six-lens audit's write-path findings

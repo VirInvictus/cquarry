@@ -1225,6 +1225,35 @@ hardening release.*
   bootstrap (with the flag-only delete caveat); phase-1-import needs
   nothing.
 
+### Cascade notes for the 2026-09-13 releases (cquarry 1.20.1 + 1.21.0)
+
+- **1.20.1 (the six-lens write-path fixes): patch release, floors
+  unchanged.** Bug fixes within the existing contract; consumer version
+  ranges resolve automatically. Consumers that hold long-lived write
+  handles gain honesty for free (remove_book now clears the FTS queue,
+  add_book seeds it, a failed commit no longer diverges rows from
+  files) but need no code changes.
+- **1.21.0 riders: additive API only, no floor bumps owed.**
+  - **Carrel-calibre-web:** the only consumer with live demand --
+    `list_books(sort="ids", ids=...)` retires its preserve_order
+    re-sort shim (cps/quarry_grid.py:702-731) whenever that repo
+    adopts; adoption is that repo's lane, the shim keeps working until
+    then. WAIVED here per the four-program rule (no floor bump without
+    a consuming release; the fork has no cquarry floor to bump).
+  - **bindery-cli:** the metadata-quality trio is the routed OPF-085
+    item; adoption (floors + lock) lands in bindery's own lane when it
+    consumes the predicates. WAIVED here for the same reason.
+  - **CalibreQuarry:** renders the audit rows in ITS lane (Wave 14's
+    recorded carrier); no adoption owed from this release.
+  - **Hermitage:** consumes neither rider; exempt, Flatpak pin
+    unchanged (it pins 1.18.0-era 132aa2c; Hermitage-touching releases
+    bump it, and neither 1.20.1 nor 1.21.0 touches Hermitage).
+- **Skills.** Both import skills swept for 1.20.1 (they teach "since
+  1.18 format writes queue FTS"; the fixes restore that contract, no
+  edits) and for 1.21.0 (neither rider touches the import loops; the
+  ids-order mode is a read-side frontend aid and the predicates are
+  audit-side). No edits either release.
+
 ### Cascade notes for the 2026-09-12 rider wave (cquarry 1.19.0)
 
 - **CalibreQuarry.** Floor >=1.19.0 (57a0985, suite 385 OK, CI green,
@@ -1684,13 +1713,32 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
       every path and bare update_title/set_authors flush right after
       their own commit, a failed commit dropping the queued op. Tests in
       TestRemoveBook, TestAddBook, and TestPathRelaying cover all three.)
-- [ ] **Blitz candidates:** list_books ids-order mode (S; retires Carrel-
+- [x] **Blitz candidates (1.21.0 riders decision, executed per the lane
+      brief):** list_books ids-order mode (S; retires Carrel-
       calibre-web's live preserve_order shim - the only parked item with a
       consumer); metadata-quality predicates in integrity.py
       (find_invalid_uuids, sentinel pubdate, bad language codes - the
       routed bindery item, 51 OPF-085 warnings counted); PRAGMA
       data_version external_changes_detected() (S); annotations N+1 fix +
       optional decoded view.
+      (THE TWO WITH LIVE DEMAND SHIPPED as 1.21.0, per the lane's
+      recorded riders decision: 1.20.1 was green and pushed, so the
+      riders rode. `list_books(sort="ids", ids=...)` returns the
+      caller's id sequence verbatim - duplicates keep their first slot,
+      absent ids skip, descending reverses, slicing applies after;
+      Carrel-calibre-web can now retire its preserve_order re-sort shim
+      at its own release (adoption is that repo's lane). The
+      metadata-quality trio joined the integrity predicate family:
+      find_invalid_uuids (empty/unparseable uuid),
+      find_sentinel_pubdates (the 0101/0100 sentinels the search engine
+      already treats as dateless), find_bad_language_codes (shape check:
+      exactly three lowercase ASCII letters, so a valid rare code never
+      false-positives); bindery's OPF-085 routing and CalibreQuarry's
+      audit-row rendering are those repos' lanes. Still OPEN in this
+      box:)
+- [ ] **Blitz candidates (remaining):** PRAGMA data_version
+      external_changes_detected() (S); annotations N+1 fix + optional
+      decoded view.
 - [ ] **GitHub presentation (workspace batch):** description rewrite
       (discloses the write path, drops backticks); drop the cli topic, add
       library-management/ebook-management/search; homepage = PyPI;

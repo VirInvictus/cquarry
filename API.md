@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.20.1
+**Version:** 1.21.0
 
 ## Public API
 
@@ -62,7 +62,7 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_all_series()` | `list[dict[str, Any]]` | Per-series rollups: `name`, `book_count`, `indices` (comma-separated), `max_index`, `titles` (comma-separated, sorted by index). |
 | `get_custom_columns()` | `dict[str, dict[str, Any]]` | Metadata for all user-defined custom columns, keyed by display name (the historical key; since 1.9.0 column *lookup* that accepts `#label` or a bare label goes through `find_custom_column()` / `load_custom_column()`). Each value contains `id`, `label`, `name`, `datatype`, `is_multiple`, `editable`, `normalized`, and `display` (a decoded JSON config dict). |
 | `find_custom_column(key)` | `dict[str, Any] \| None` | One custom-columns record by `#label`, bare label, or display name. A leading `#` matches the label only (never ambiguous); otherwise an exact display-name match wins (the historical key) and a bare label is the graceful fallback; label matching is case-insensitive, mirroring the write module. Returns `None` when nothing matches. |
-| `list_books(*, ids=None, sort="sort", descending=False, offset=0, limit=None)` | `list[dict[str, Any]]` | Paginated, sorted listing over the cached rows (1.10). `ids` restricts (order still comes from `sort`); `sort` is one key or a sequence of keys (primary first, one direction for all) drawn from `sort`/`title`/`timestamp`/`pubdate`/`rating`/`series_index`/`author_sort`/`series`/`id`; None-valued keys sort last regardless of direction; `offset`/`limit` slice after sorting. Pure — no SQL of its own. Raises `ValueError` on unknown keys or negative offsets/limits. |
+| `list_books(*, ids=None, sort="sort", descending=False, offset=0, limit=None)` | `list[dict[str, Any]]` | Paginated, sorted listing over the cached rows (1.10). `ids` restricts (order still comes from `sort`); `sort` is one key or a sequence of keys (primary first, one direction for all) drawn from `sort`/`title`/`timestamp`/`pubdate`/`rating`/`series_index`/`author_sort`/`series`/`id`; None-valued keys sort last regardless of direction; `offset`/`limit` slice after sorting. Since 1.21.0 the special key `sort="ids"` (requires `ids`, stands alone) returns the rows in the CALLER's id sequence instead: a duplicated id keeps its first slot, ids absent from the library are skipped, `descending` reverses the sequence, and `offset`/`limit` slice after -- the frontend-ordering mode that retires Carrel-calibre-web's preserve_order re-sort shim. Pure — no SQL of its own. Raises `ValueError` on unknown keys or negative offsets/limits. |
 | `load_custom_column(col_name)` | `dict[int, Any]` | Values for one custom column, addressed by `#label`, bare label, or display name (since 1.9.0; resolution via `find_custom_column()`), returned as `{book_id: value}`. Normalized columns (text, enumeration, series, rating) are read via their link table; direct columns (int, float, bool, datetime, comments) are read from the value table. Multi-valued columns return a native `list[str]` (since 1.16.0; the old comma-joined string made stored values like `Doe, John` round-trip as phantom values; do not `.split(",")` these, same rule as book rows); rating-typed columns surface the same 0-5 star scale as the builtin rating (Calibre's stored 0-10 converted), so `field(book, "#myrat")` and `field(book, "rating")` compare alike. Raises `ValueError` if the column does not exist. |
 | `custom_column_links(col_name)` | `dict[int, str]` | The normalized value table's `link` URL column (upstream schema_upgrades.py:836; no Calibre UI populates it): `{book_id: url}`, filled as a side effect of `load_custom_column`. Empty until then, and for direct-storage columns, unknown columns, and schemas predating the column. |
 | `get_virtual_libraries()` | `dict[str, str]` | Virtual library names mapped to their Calibre search expressions, read from the `preferences` table. Cached after the first call. A corrupt or non-dict stored payload degrades to `{}` (since 1.16.0; it used to crash every read touching virtual libraries). |
@@ -266,7 +266,7 @@ Persistent configuration for database path discovery.
 ```python
 import cquarry
 
-print(cquarry.__version__)  # "1.20.1"
+print(cquarry.__version__)  # "1.21.0"
 ```
 
 ### Writes (from `cquarry.write`)
@@ -346,6 +346,9 @@ sorted.
 | `find_duplicate_books(db)` | `dict[tuple[str, str], list[int]]` | `(title.lower(), primary_author.lower())` groups with more than one member. |
 | `find_series_gaps(db)` | `dict[str, list[int]]` | `{series: [missing indices]}` composing `get_all_series()` + `detect_series_gaps()`. |
 | `find_identifierless(db)` | `list[int]` | Books carrying no identifiers at all (since 1.17.0; promoted from Hermitage's inline Insights predicate). |
+| `find_invalid_uuids(db)` | `list[int]` | Books whose `uuid` is empty or does not parse as a UUID (since 1.21.0; the reader degrades pre-`uuid`-column schemas to `""`, which reports honestly). |
+| `find_sentinel_pubdates(db)` | `list[int]` | Books whose `pubdate` is the undefined-date sentinel `0101-01-01` (or the `0100-01-01` ancestor -- the same pair the search engine treats as dateless; since 1.21.0). |
+| `find_bad_language_codes(db)` | `list[int]` | Books linked to a language code that is not an ISO 639-2 code (not exactly three lowercase ASCII letters: bare names like `English`, two-letter codes, empty strings; since 1.21.0 -- shape check only, so a valid rare code never false-positives). |
 
 ### Analytics (from `cquarry.analytics`)
 

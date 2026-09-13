@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.20.1
+**Version:** 1.21.0
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
@@ -34,7 +34,7 @@ These are invariants. Violating any of them is a spec breach.
 
 **Custom column dispatch.** `load_custom_column()` checks `sqlite_master` for the existence of `books_custom_column_N_link` to decide between the normalized path (text, enumeration, series, rating: value table joined through a link table) and the direct path (int, float, bool, datetime, comments: value table with a `book` column). This is safer than keying off `is_multiple`, because a single-valued enumeration is normalized but not multi-valued. Multi-valued columns yield native `list[str]` values end to end (cquarry >= 1.16): the old comma-join-on-load, re-split-on-use round-trip turned stored values like `Doe, John` into phantom values.
 
-**Paginated listing (cquarry ≥ 1.10).** `list_books(ids=, sort=, descending=, offset=, limit=)` pages the cached rows for frontends that resolve an id set through the search engine and then paginate. `sort` takes one key or a sequence (primary first, one direction for all — the author-sort/series-name/series-index shape). Pure over the cache (no SQL of its own); None-valued sort keys sort last regardless of direction; unknown sort keys and negative offsets/limits raise.
+**Paginated listing (cquarry ≥ 1.10).** `list_books(ids=, sort=, descending=, offset=, limit=)` pages the cached rows for frontends that resolve an id set through the search engine and then paginate. `sort` takes one key or a sequence (primary first, one direction for all — the author-sort/series-name/series-index shape). Pure over the cache (no SQL of its own); None-valued sort keys sort last regardless of direction; unknown sort keys and negative offsets/limits raise. The special key ``ids`` (cquarry ≥ 1.21, requires ``ids``, stands alone) replaces the sort with the caller's id sequence (duplicates keep their first slot, absent ids are skipped, ``descending`` reverses, slicing applies after) for frontends that carry their own ordering.
 
 **Custom column lookup parity (cquarry ≥ 1.9).** Columns are addressable by `#label`, bare label, or display name through `find_custom_column()` / `load_custom_column()`: a leading `#` matches the label only (labels are unique, never ambiguous), otherwise an exact display-name match wins (the historical key, so existing callers keep working) and a bare label is the graceful fallback; label matching is case-insensitive, mirroring the write module's `_custom_column_meta`. `get_custom_columns()` stays keyed by display name.
 
@@ -131,7 +131,7 @@ The read side exposes the same queue for observability: `CalibreDB.get_dirtied_b
 
 ### 3.7 Integrity predicates (`integrity.py`, cquarry ≥ 1.8)
 
-The mechanical definitions of "incomplete" promoted from CalibreQuarry's frontend so every consumer shares one answer. Pure functions over the cached rows; no SQL of their own; the two cover-file checks ride `get_cover_path()` + `get_image_size()` because a flag cannot see the disk. Every id list is sorted: `find_untagged`, `find_unrated` (`None`/`0`), `find_authorless` (empty or `["Unknown"]`), `find_formatless`, `find_coverless` (catalogued flag), `find_missing_cover_files` (flag set, file absent; empty `books.path` skipped), `find_deprecated_formats(db, formats)` (caller supplies the deprecated set; cquarry owns only the subset-of mechanism), `find_low_res_covers(db, min_dimension=500) → {id: (w, h)}` (missing files excluded; unreadable images skipped), `find_duplicate_books` → `{(title-lower, primary-author-lower): [ids]}` (multi-member only), `find_identifierless` (books with an empty identifiers store; cquarry ≥ 1.17), `find_series_gaps` composing `get_all_series()` + `detect_series_gaps()`.
+The mechanical definitions of "incomplete" promoted from CalibreQuarry's frontend so every consumer shares one answer. Pure functions over the cached rows; no SQL of their own; the two cover-file checks ride `get_cover_path()` + `get_image_size()` because a flag cannot see the disk. Every id list is sorted: `find_untagged`, `find_unrated` (`None`/`0`), `find_authorless` (empty or `["Unknown"]`), `find_formatless`, `find_coverless` (catalogued flag), `find_missing_cover_files` (flag set, file absent; empty `books.path` skipped), `find_deprecated_formats(db, formats)` (caller supplies the deprecated set; cquarry owns only the subset-of mechanism), `find_low_res_covers(db, min_dimension=500) → {id: (w, h)}` (missing files excluded; unreadable images skipped), `find_duplicate_books` → `{(title-lower, primary-author-lower): [ids]}` (multi-member only), `find_identifierless` (books with an empty identifiers store; cquarry ≥ 1.17), `find_series_gaps` composing `get_all_series()` + `detect_series_gaps()`. The metadata-quality trio (cquarry ≥ 1.21, the routed bindery OPF-085 item): `find_invalid_uuids` (empty or unparseable uuid), `find_sentinel_pubdates` (the `0101-01-01`/`0100-01-01` undefined-date sentinels), and `find_bad_language_codes` (a linked code that is not three lowercase ASCII letters; shape check only, so a valid rare code never false-positives).
 
 ### 3.8 Analytics derivations (`analytics.py`, cquarry ≥ 1.8)
 
