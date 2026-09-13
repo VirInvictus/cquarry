@@ -138,6 +138,11 @@ class CalibreDB:
         ``search`` from another. One ``refresh()`` call clears everything,
         the built search engine and the FTS-sidecar connection included; the
         next read repopulates from current database state.
+
+        One boundary: when the connection itself rides a locked-database
+        snapshot copy (see ``_open``), the snapshot is NOT retaken -- the
+        next read still answers from the copy taken at open time. Reopen
+        the ``CalibreDB`` for truly current data in that situation.
         """
         if self._fts_conn is not None:
             self._fts_conn.close()
@@ -1626,7 +1631,7 @@ class CalibreDB:
         except sqlite3.OperationalError:
             return {}
         label_by_id: dict[int, str] = {}
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(sqlite3.Error):
             label_by_id = {
                 col["id"]: col["label"] for col in self.get_custom_columns().values()
             }
@@ -1645,10 +1650,13 @@ class CalibreDB:
                 if m:
                     key = "#" + label_by_id.get(int(m.group(1)), key)
                 rows = None
+                # Defense-in-depth: the name comes from sqlite_master, but
+                # it still enters SQL only as a quoted identifier.
+                quoted = '"' + name.replace('"', '""') + '"'
                 for select in (
-                    f"SELECT id, name, count, avg_rating, sort FROM {name} ",
-                    f"SELECT id, value AS name, count, avg_rating, sort FROM {name} ",
-                    f"SELECT id, CAST(rating AS TEXT) AS name, count, avg_rating, sort FROM {name} ",
+                    f"SELECT id, name, count, avg_rating, sort FROM {quoted} ",
+                    f"SELECT id, value AS name, count, avg_rating, sort FROM {quoted} ",
+                    f"SELECT id, CAST(rating AS TEXT) AS name, count, avg_rating, sort FROM {quoted} ",
                 ):
                     try:
                         # ORDER BY lives outside the attempted SQL so a

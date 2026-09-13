@@ -677,6 +677,48 @@ class TestRemoveBook(unittest.TestCase):
         # prune such orphans instead.
         self.assertEqual(self._sql("SELECT value FROM custom_column_1"), [("Rin",)])
 
+    def test_remove_book_clears_the_fts_queue_for_its_formats(self):
+        # The six-lens-audit contract gap: remove_book cleaned
+        # metadata_dirtied and annotations_dirtied but never the sidecar's
+        # dirtied_formats, while the docstring and API.md claimed the queues
+        # are cleaned. Calibre would have re-extracted vanished files.
+        conn = sqlite3.connect(self.db_path)
+        conn.executemany(
+            "INSERT INTO data (book, format, uncompressed_size, name) VALUES (?,?,?,?)",
+            [(1, "EPUB", 1, "One"), (1, "MOBI", 1, "One"), (2, "EPUB", 1, "Two")],
+        )
+        conn.commit()
+        conn.close()
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.executescript(
+            """
+            CREATE TABLE dirtied_formats (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, format TEXT NOT NULL COLLATE NOCASE,
+                in_progress INTEGER NOT NULL DEFAULT FALSE, UNIQUE(book, format));
+            """
+        )
+        fts.executemany(
+            "INSERT INTO dirtied_formats (book, format) VALUES (?, ?)",
+            [(1, "EPUB"), (1, "MOBI"), (2, "EPUB")],
+        )
+        fts.commit()
+        fts.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1)
+        fts = sqlite3.connect(self.temp_dir + "/full-text-search.db")
+        try:
+            left = sorted(fts.execute("SELECT book, format FROM dirtied_formats"))
+        finally:
+            fts.close()
+        # The doomed book's entries are gone; the kept book's survive.
+        self.assertEqual(left, [(2, "EPUB")])
+
+    def test_remove_book_without_a_sidecar_still_cleans(self):
+        # The degrade rule: no sidecar file, no queue to clean, no error.
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1)
+        self.assertEqual(self._sql("SELECT id FROM books"), [(2,)])
+
     def _book_dir(self, book_id, title):
         path = os.path.join(self.temp_dir, f"{title} ({book_id})")
         os.makedirs(path, exist_ok=True)
@@ -1526,6 +1568,70 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
         with open(source, "rb") as f:
             self.assertEqual(f.read(), b"EXACT-PAYLOAD")
 
+    def test_add_book_seeds_formats_queue_extraction_and_pages_scan(self):
+        # The six-lens-audit gap: add_book inserted data rows directly, so
+        # seeded formats never entered dirtied_formats or needs_scan;
+        # upstream's own add path queues every data INSERT for extraction.
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.executescript(
+            """
+            CREATE TABLE dirtied_formats (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, format TEXT NOT NULL COLLATE NOCASE,
+                in_progress INTEGER NOT NULL DEFAULT FALSE, UNIQUE(book, format));
+            """
+        )
+        fts.commit()
+        fts.close()
+        source = self._epub(b"INDEXME")
+        with self._wdb() as wdb:
+            book_id = wdb.add_book(
+                "The Fifth Head of Data", ["Ann Leckie"], formats=[source]
+            )
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        try:
+            self.assertEqual(
+                {r[0] for r in fts.execute("SELECT format FROM dirtied_formats")},
+                {"EPUB"},
+            )
+        finally:
+            fts.close()
+        self.assertEqual(
+            self._sql2(
+                "SELECT needs_scan FROM books_pages_link WHERE book = ?", (book_id,)
+            ),
+            [(1,)],
+        )
+
+    def test_failed_add_book_leaves_no_queue_entry(self):
+        # The queue write joins the add's batch: a rolled-back add leaves
+        # nothing behind for Calibre to chew on.
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.executescript(
+            """
+            CREATE TABLE dirtied_formats (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, format TEXT NOT NULL COLLATE NOCASE,
+                in_progress INTEGER NOT NULL DEFAULT FALSE, UNIQUE(book, format));
+            """
+        )
+        fts.commit()
+        fts.close()
+        wdb = WritableCalibreDB(self.db_path)
+        with self.assertRaises(RuntimeError), wdb.batch():
+            wdb.add_book(
+                "The Fifth Head of Data",
+                ["Ann Leckie"],
+                formats=[self._epub(b"ROLLBACK")],
+            )
+            raise RuntimeError("boom")
+        wdb.close()
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        try:
+            self.assertEqual(
+                fts.execute("SELECT COUNT(*) FROM dirtied_formats").fetchone()[0], 0
+            )
+        finally:
+            fts.close()
+
     def test_add_book_cover_places_and_flags(self):
         for sig, expected in (
             (b"\xff\xd8\xff\xe0jpegbody", "cover.jpg"),
@@ -1888,6 +1994,55 @@ class TestPathRelaying(_WriteSideFixture, unittest.TestCase):
         self.assertTrue(os.path.exists(self._dir("Zed A. Writer/Old Title (1)")))
         self.assertFalse(os.path.exists(self._dir("Zed A. Writer/New Title (1)")))
 
+    def test_failed_commit_leaves_rows_and_files_in_agreement(self):
+        # The six-lens-audit catch: bare (non-batched) update_title/
+        # set_authors applied the fs half BEFORE the commit, so a failed
+        # commit diverged rows from files (remove_book's ordering was the
+        # correct one). The re-lay queues now and lands only after COMMIT.
+        class CommitFails:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def commit(self):
+                raise sqlite3.OperationalError("database or disk is full")
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        for setter, new_rel in (
+            ("update_title", "Zed A. Writer/New Title (1)"),
+            ("set_authors", "Ann Leckie/Old Title (1)"),
+        ):
+            with self.subTest(setter=setter):
+                self._seed_layout(
+                    1,
+                    "Zed A. Writer/Old Title (1)",
+                    [("Old Title - Zed A. Writer.epub", b"EPUB")],
+                )
+                wdb = WritableCalibreDB(self.db_path)
+                wdb.conn = CommitFails(wdb.conn)
+                with self.assertRaises(sqlite3.OperationalError):
+                    if setter == "update_title":
+                        wdb.update_title(1, "New Title")
+                    else:
+                        wdb.set_authors(1, ["Ann Leckie"])
+                wdb.close()
+                # The rollback reverted every row...
+                self.assertEqual(
+                    self._sql2("SELECT path FROM books WHERE id = 1")[0][0],
+                    "Zed A. Writer/Old Title (1)",
+                )
+                self.assertEqual(
+                    self._sql2("SELECT title FROM books WHERE id = 1")[0][0],
+                    "Old Title",
+                )
+                # ...and the fs half never ran, so files agree with rows.
+                self.assertTrue(
+                    os.path.exists(self._dir("Zed A. Writer/Old Title (1)"))
+                )
+                self.assertFalse(os.path.exists(self._dir(new_rel)))
+                self.assertEqual(wdb._pending_relayouts, [])
+
     def test_no_path_row_gets_the_db_only_correction(self):
         # Book 2 has no path and no directory (legacy rows): the setter
         # writes the computed path without touching the filesystem.
@@ -1941,6 +2096,173 @@ class TestPathRelaying(_WriteSideFixture, unittest.TestCase):
             wdb2.add_tag(1, "Safe")
         self.assertTrue(os.path.exists(self._dir("Zed A. Writer/Other (2)")))
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM books WHERE id = 2")[0][0], 1)
+
+
+class TestBatchFlushFailure(unittest.TestCase):
+    """The six-lens-audit corruption: a flush OSError AFTER the commit used
+    to skip the batch-state reset (the resets ran after the flushes), so the
+    failed pass's directories stayed registered and a LATER failed exit
+    rmtreed directories of already-committed books."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT,
+                timestamp TEXT, pubdate TEXT, series_index REAL,
+                has_cover INTEGER DEFAULT 0, uuid TEXT, path TEXT,
+                last_modified TEXT
+            );
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER UNIQUE);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT UNIQUE);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER);
+            CREATE TABLE custom_columns (
+                id INTEGER PRIMARY KEY, label TEXT UNIQUE, name TEXT, datatype TEXT,
+                editable BOOL DEFAULT 1, display TEXT DEFAULT '{}',
+                is_multiple BOOL DEFAULT 0, normalized BOOL DEFAULT 0
+            );
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, UNIQUE(book));
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,
+                format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TRIGGER books_delete_trg AFTER DELETE ON books
+            BEGIN
+                DELETE FROM books_authors_link WHERE book = OLD.id;
+                DELETE FROM books_tags_link WHERE book = OLD.id;
+                DELETE FROM books_publishers_link WHERE book = OLD.id;
+                DELETE FROM books_series_link WHERE book = OLD.id;
+                DELETE FROM books_ratings_link WHERE book = OLD.id;
+                DELETE FROM books_languages_link WHERE book = OLD.id;
+                DELETE FROM data WHERE book = OLD.id;
+            END;
+            INSERT INTO books (id, title) VALUES (1, 'Doomed'), (2, 'Kept');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql(self, query):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query).fetchall()]
+        finally:
+            conn.close()
+
+    def _book_dir(self, book_id, title):
+        """Give a book a real directory and matching path row."""
+        path = os.path.join(self.temp_dir, f"{title} ({book_id})")
+        os.makedirs(path)
+        with open(os.path.join(path, "book.epub"), "w") as f:
+            f.write("x")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE books SET path = ? WHERE id = ?", (f"{title} ({book_id})", book_id)
+        )
+        conn.commit()
+        conn.close()
+        return path
+
+    def _new_book_dir(self, book_id):
+        row = self._sql(f"SELECT path FROM books WHERE id = {book_id}")[0][0]
+        return os.path.join(self.temp_dir, *row.split("/"))
+
+    def test_flush_failure_resets_batch_state_before_propagating(self):
+        # add_book registers its directory for the batch's compensation;
+        # remove_book queues its file removal; the flush after the COMMIT
+        # fails. The state must already be reset when the caller sees the
+        # error, or a later failed exit would rmtree the committed book.
+        wdb = WritableCalibreDB(self.db_path)
+        self._book_dir(1, "Doomed")
+
+        def disk_full(book_id, book_dir, mode):
+            raise OSError("disk full")
+
+        wdb._remove_book_dir = disk_full
+        with self.assertRaises(OSError), wdb.batch():
+            new_id = wdb.add_book("Added Later", [])
+            wdb.remove_book(1, delete_files="permanent")
+        # The COMMIT landed before the failing flush: the new row is real
+        # and the doomed book's rows are gone (book 2 survives).
+        self.assertEqual(
+            self._sql("SELECT id FROM books"),
+            [(2,), (new_id,)],
+        )
+        # Reset BEFORE propagating: nothing left registered for a later
+        # failed exit to rmtree.
+        self.assertEqual(wdb._batch_dirs, [])
+        self.assertFalse(wdb._batch_poisoned)
+        new_dir = self._new_book_dir(new_id)
+        self.assertTrue(os.path.isdir(new_dir))
+        # The doomed book's removal is still pending (the flush failed
+        # before performing any of it), not silently lost.
+        self.assertEqual(len(wdb._pending_removals), 1)
+        # A later FAILED batch must leave the committed book's files alone
+        # (and drops the stale queue with its rollback, the 1.18 rule).
+        del wdb._remove_book_dir  # reveal the class's real method again
+        with self.assertRaises(RuntimeError), wdb.batch():
+            raise RuntimeError("boom")
+        self.assertTrue(os.path.isdir(new_dir))
+        self.assertEqual(wdb._pending_removals, [])
+        wdb.close()
+
+    def test_a_failed_flush_retries_cleanly(self):
+        # The committed removals stay pending after a failed flush; a retry
+        # must skip the directories the first pass already removed (trash
+        # mode used to raise on the missing source) and finish the rest.
+        wdb = WritableCalibreDB(self.db_path)
+        dir1 = self._book_dir(1, "Doomed")
+        dir2 = self._book_dir(2, "Kept")
+        real = wdb._remove_book_dir
+        calls = {"n": 0}
+
+        def flaky(book_id, book_dir, mode):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("transient")
+            real(book_id, book_dir, mode)
+
+        wdb._remove_book_dir = flaky
+        with self.assertRaises(OSError), wdb.batch():
+            wdb.remove_book(1, delete_files="trash")
+            wdb.remove_book(2, delete_files="trash")
+        self.assertEqual(calls["n"], 2)
+        del wdb._remove_book_dir  # reveal the class's real method again
+        wdb._flush_pending_removals()  # the retry: must not raise
+        self.assertEqual(wdb._pending_removals, [])
+        self.assertFalse(os.path.exists(dir1))
+        self.assertFalse(os.path.exists(dir2))
+        self.assertEqual(
+            sorted(e["book_id"] for e in wdb.list_trash() if e["category"] == "book"),
+            [1, 2],
+        )
+        wdb.close()
+
+    def test_remove_book_dir_is_idempotent(self):
+        wdb = WritableCalibreDB(self.db_path)
+        try:
+            # A directory that is already gone: no move, no rmtree, no
+            # trash entry.
+            wdb._remove_book_dir(
+                9, os.path.join(self.temp_dir, "Unknown", "Gone (9)"), "trash"
+            )
+            self.assertEqual(wdb.list_trash(), [])
+        finally:
+            wdb.close()
 
 
 class TestFtsDirtying(unittest.TestCase):
@@ -2506,6 +2828,44 @@ class TestOriginalFormat(unittest.TestCase):
             with self.assertRaises(ValueError):
                 wdb.restore_original_format(1, "EPUB")
 
+    def test_save_first_on_a_fresh_connection_keeps_later_verbs_queueing(self):
+        # The six-lens-audit HIGH: save_original_format opened its batch
+        # without the sidecar attach, leaving the nested add_format/set_format
+        # to attach INSIDE the transaction; on SQLite builds that forbid that
+        # (pre-3.21.0) the failure was caught and _fts_state=False was cached
+        # for the whole connection, silently killing queueing for every later
+        # format verb. The save must attach up front so the connection keeps
+        # queueing.
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.save_original_format(1, "EPUB"))
+            self.assertTrue(wdb.set_format(1, "EPUB", "One - Zed A. Writer", 99))
+        self.assertEqual({"ORIGINAL_EPUB", "EPUB"}, self.fts_fmts())
+
+    def test_save_queues_even_when_attach_inside_a_transaction_raises(self):
+        # The audit's poison trigger, simulated: an SQLite build with the
+        # pre-3.21.0 rule (in-transaction ATTACH raises). The queue must
+        # still fill, because the attach already happened before the batch.
+        class NoAttachInTransaction:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *args):
+                if sql.lstrip().upper().startswith("ATTACH") and (
+                    self._conn.in_transaction
+                ):
+                    raise sqlite3.OperationalError(
+                        "cannot ATTACH database within transaction"
+                    )
+                return self._conn.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.conn = NoAttachInTransaction(wdb.conn)
+            self.assertTrue(wdb.save_original_format(1, "EPUB"))
+        self.assertIn("ORIGINAL_EPUB", self.fts_fmts())
+
     def _data(self):
         return sorted(
             self._sql_rows("SELECT format, uncompressed_size, name FROM data")
@@ -2581,6 +2941,21 @@ class TestTrashLifecycle(unittest.TestCase):
         self.assertEqual(n, 0)  # an hour old is far under 30 days
         n = wdb.expire_trash(0)  # <= 0 expires everything, like upstream
         self.assertEqual(n, 1)
+
+    def test_expire_trash_counts_only_actual_removals(self):
+        # The six-lens-audit LOW: an entry whose removal fails (here: a
+        # read-only entry directory, unwritable for the runner user) used
+        # to be counted as removed.
+        self._entry("b", 1, age_seconds=40 * 86400)
+        self._entry("b", 2, age_seconds=40 * 86400)
+        stuck = os.path.join(self.trash, "b", "2")
+        os.chmod(stuck, 0o500)  # no write bit: rmtree cannot unlink inside
+        try:
+            with self._wdb() as wdb:
+                self.assertEqual(wdb.expire_trash(), 1)
+                self.assertEqual([e["book_id"] for e in wdb.list_trash()], [2])
+        finally:
+            os.chmod(stuck, 0o700)  # let tearDown's rmtree work
 
     def test_missing_trash_is_an_honest_zero(self):
         with self._wdb() as wdb:

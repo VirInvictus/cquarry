@@ -382,30 +382,36 @@ class WritableCalibreDB:
         finally:
             self._batch_depth -= 1
             if self._batch_depth == 0:
-                if ok and not self._batch_poisoned:
-                    self.conn.commit()
-                    self._flush_pending_removals()
-                    self._flush_pending_relayouts()
-                    self._flush_pending_fs_ops()
-                else:
-                    with contextlib.suppress(sqlite3.Error):
-                        self.conn.rollback()
-                    # The SQL is undone; directories created inside the
-                    # batch would survive as orphans that look like real
-                    # books no row points at. add_book's own failure path
-                    # already removed its directory; rmtree of a missing
-                    # path is a no-op (ignore_errors).
-                    for orphan in self._batch_dirs:
-                        shutil.rmtree(orphan, ignore_errors=True)
-                    # The rollback resurrected whatever the queued removals
-                    # and re-lays were aimed at: both queues are dropped
-                    # with the transaction, never flushed by a LATER batch
-                    # against rows the rollback brought back.
-                    self._pending_removals.clear()
-                    self._pending_relayouts.clear()
-                    self._pending_fs_ops.clear()
-                self._batch_dirs.clear()
-                self._batch_poisoned = False
+                try:
+                    if ok and not self._batch_poisoned:
+                        self.conn.commit()
+                        self._flush_pending_removals()
+                        self._flush_pending_relayouts()
+                        self._flush_pending_fs_ops()
+                    else:
+                        with contextlib.suppress(sqlite3.Error):
+                            self.conn.rollback()
+                        # The SQL is undone; directories created inside the
+                        # batch would survive as orphans that look like real
+                        # books no row points at. add_book's own failure path
+                        # already removed its directory; rmtree of a missing
+                        # path is a no-op (ignore_errors).
+                        for orphan in self._batch_dirs:
+                            shutil.rmtree(orphan, ignore_errors=True)
+                        # The rollback resurrected whatever the queued removals
+                        # and re-lays were aimed at: both queues are dropped
+                        # with the transaction, never flushed by a LATER batch
+                        # against rows the rollback brought back.
+                        self._pending_removals.clear()
+                        self._pending_relayouts.clear()
+                        self._pending_fs_ops.clear()
+                finally:
+                    # Reset BEFORE propagating: a flush failure after the
+                    # COMMIT must not leave this batch's directories queued
+                    # for a LATER failed exit to rmtree -- those directories
+                    # hold committed books now.
+                    self._batch_dirs.clear()
+                    self._batch_poisoned = False
             elif not ok:
                 # An inner batch's exception must stick even when the caller
                 # catches it: the inner segment's partial writes are still
@@ -501,8 +507,17 @@ class WritableCalibreDB:
             first_author = self._first_author_name(book_id)
             self._relayout_book_path(book_id, new_title, first_author)
             self._commit()
+            if not self._batch_depth:
+                # The queued re-lay is this call's own: apply it now that
+                # the rows are committed (inside a batch the outermost
+                # exit flushes it instead).
+                self._flush_pending_relayouts()
         except BaseException:
             self._rollback()
+            if not self._batch_depth:
+                # A failed commit must not leave its fs op queued for a
+                # LATER batch to flush against resurrected rows.
+                self._pending_relayouts.clear()
             raise
 
     def _first_author_name(self, book_id: int) -> str:
@@ -829,9 +844,15 @@ class WritableCalibreDB:
                 self._first_author_name(book_id),
             )
             self._commit()
+            if not self._batch_depth:
+                # Same post-commit flush rule as update_title.
+                self._flush_pending_relayouts()
             return True
         except BaseException:
             self._rollback()
+            if not self._batch_depth:
+                # Same no-leaked-fs-op rule as update_title.
+                self._pending_relayouts.clear()
             raise
 
     # -- Entity-wide renames and removals (1.19; the approved C.2) --
@@ -1824,8 +1845,11 @@ class WritableCalibreDB:
         """Attach the library's full-text-search.db for writing, once.
 
         Returns True when ``fts_db`` is attached and the dirty-queue writes
-        can run. The attach must happen BEFORE a transaction opens (SQLite
-        forbids ATTACH inside one), so format setters call this before
+        can run. The attach happens BEFORE a transaction opens so the queue
+        is guaranteed available once writes begin (SQLite builds before
+        3.21.0 forbid ATTACH inside a transaction; resolving the state up
+        front keeps the queue working on those and keeps the queue-vs-
+        transaction coupling uniform). Format setters call this before
         ``_begin()``; a missing sidecar or a failed attach (locked,
         unreadable) marks this connection FTS-unavailable -- dirtying is
         best-effort and degrades to a no-op, never blocks a format write.
@@ -2193,7 +2217,10 @@ class WritableCalibreDB:
             base = os.path.join(root, category)
             for name, mtime in self._trash_entries(category):
                 if age <= 0 or mtime + age <= now:
-                    shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+                    try:
+                        shutil.rmtree(os.path.join(base, name))
+                    except OSError:
+                        continue  # a failed removal is not a removal
                     removed += 1
         for category in self._TRASH_CATEGORIES:
             os.makedirs(os.path.join(root, category), exist_ok=True)
@@ -2218,6 +2245,9 @@ class WritableCalibreDB:
             raise ValueError("Format must not be empty")
         if "ORIGINAL" in fmt:
             raise ValueError("Cannot save an original of an original format")
+        # Attach before the batch opens so the nested add_format/set_format
+        # can always queue (see _ensure_fts_attached).
+        self._ensure_fts_attached()
         with self.batch():
             self._require_book(book_id)
             src = self.conn.execute(
@@ -2463,6 +2493,9 @@ class WritableCalibreDB:
             )
 
         book_dir: str | None = None
+        # Attach before the batch opens so the seeded formats can be queued
+        # for extraction (see _ensure_fts_attached).
+        self._ensure_fts_attached()
         try:
             with self.batch():
                 # Insert FIRST, id from lastrowid (books_insert_trg fills
@@ -2502,6 +2535,12 @@ class WritableCalibreDB:
                         "VALUES (?, ?, ?, ?)",
                         (book_id, fmt, placed, stem),
                     )
+                    # Upstream's own add path queues every data INSERT for
+                    # extraction (the TEMP triggers); so does ours -- a new
+                    # book's formats are indexed and page-counted like any
+                    # repaired format. The queue write joins the batch, so
+                    # a rollback undoes it.
+                    self._mark_fts_dirty(book_id, fmt)
                 if cover_data is not None and cover_ext is not None:
                     _place_bytes(
                         cover_data, os.path.join(book_dir, f"cover.{cover_ext}")
@@ -2992,10 +3031,11 @@ class WritableCalibreDB:
                 (new_stem, book_id, fmt),
             )
         op = (book_id, old_rel, new_rel, renames, new_stem)
-        if self._batch_depth:
-            self._pending_relayouts.append(op)
-        else:
-            self._apply_relayout(op)
+        # Always queued: the fs half lands only after the rows COMMIT.
+        # Inside a batch that is the outermost exit's flush; a bare setter
+        # flushes right after its own commit (a failed commit then leaves
+        # rows and files in agreement: both old).
+        self._pending_relayouts.append(op)
 
     def _flush_pending_fs_ops(self) -> None:
         """Run the file placements/removals deferred by set_cover and the
@@ -3074,6 +3114,11 @@ class WritableCalibreDB:
         self._pending_removals.clear()
 
     def _remove_book_dir(self, book_id: int, book_dir: str, mode: str) -> None:
+        if not os.path.isdir(book_dir):
+            # Idempotent: a retried flush (an earlier pass's flush failure
+            # leaves its queue populated) must not move or rmtree a
+            # directory that is already gone.
+            return
         if mode == "trash":
             trash_b = os.path.join(
                 os.path.dirname(self.db_path), self._TRASH_DIR_NAME, "b"
@@ -3098,8 +3143,10 @@ class WritableCalibreDB:
         annotations, comments, conversion options and plugin data when the
         books row goes. What the trigger does NOT cover is cleaned here:
         custom-column rows (both storage patterns, every column), the dirtied
-        queues, and now-orphaned entity rows (pruned AFTER the cascade so the
-        fkc_delete_on_* guards pass). Irreversible - callers own confirmation.
+        queues (metadata, annotations, and the FTS sidecar's
+        ``dirtied_formats`` when the sidecar exists), and now-orphaned entity
+        rows (pruned AFTER the cascade so the fkc_delete_on_* guards pass).
+        Irreversible - callers own confirmation.
 
         ``delete_files`` extends the removal to the book's on-disk directory
         (``Author/Title (id)/``), matching upstream's remove flow:
@@ -3115,6 +3162,9 @@ class WritableCalibreDB:
                 f"delete_files must be None, 'permanent', or 'trash', "
                 f"got {delete_files!r}"
             )
+        # ATTACH must precede the transaction (see _ensure_fts_attached):
+        # the dirtied_formats clears below join it.
+        self._ensure_fts_attached()
         self._begin()
         try:
             self._require_book(book_id)
@@ -3122,6 +3172,18 @@ class WritableCalibreDB:
             # path) must exist to resolve it, and the fs step only runs
             # after a commit anyway.
             book_dir = self._book_dir_path(book_id) if delete_files else None
+            # The book's formats, captured before the cascade drops the data
+            # rows: each format's FTS queue entry must not outlive the book.
+            book_fmts: list[str] = []
+            with contextlib.suppress(sqlite3.OperationalError):
+                book_fmts = [
+                    r[0]
+                    for r in self.conn.execute(
+                        "SELECT DISTINCT format FROM data WHERE book = ?",
+                        (book_id,),
+                    ).fetchall()
+                    if r[0]
+                ]
             # Custom columns: both patterns, for every defined column.
             col_ids = [
                 r[0]
@@ -3153,6 +3215,11 @@ class WritableCalibreDB:
                 with contextlib.suppress(sqlite3.OperationalError):
                     # schema predating the queue skips the delete
                     self.conn.execute(f"DELETE FROM {queue} WHERE book = ?", (book_id,))
+            # The FTS sidecar's queue too (the attach above preceded this
+            # transaction, so the clears run; a missing sidecar degrades
+            # to a no-op inside _clear_fts_dirty).
+            for fmt in book_fmts:
+                self._clear_fts_dirty(book_id, fmt)
             # The cascade trigger does the rest.
             self.conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
             # Orphan pruning AFTER the cascade: links are gone, so the

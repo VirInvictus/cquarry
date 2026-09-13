@@ -1,7 +1,8 @@
 import json
 import os
+import sys
 
-VERSION = "1.20.0"
+VERSION = "1.20.1"
 
 DEFAULT_DB_PATHS = [
     "metadata.db",
@@ -19,8 +20,11 @@ def load_config() -> dict:
         try:
             with open(CONFIG_FILE, encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            # A broken config must not silently look like "no config".
+            print(
+                f"NOTE: ignoring unreadable config {CONFIG_FILE}: {e}", file=sys.stderr
+            )
     return {}
 
 
