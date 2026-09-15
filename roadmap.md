@@ -1754,23 +1754,95 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
       false-positives); bindery's OPF-085 routing and CalibreQuarry's
       audit-row rendering are those repos' lanes. Still OPEN in this
       box:)
-- [ ] **Blitz candidates (remaining):** PRAGMA data_version
+- [x] **Blitz candidates (remaining):** PRAGMA data_version
       external_changes_detected() (S); annotations N+1 fix + optional
       decoded view.
-- [ ] **GitHub presentation (workspace batch):** description rewrite
+      (SHIPPED 1.23.0: external_changes_detected() is the level-triggered
+      PRAGMA data_version token, True until refresh() re-primes; the
+      annotations: location bulk-loads its text map in one query, and
+      get_annotations_decoded() is the decoded view Hermitage's Codex
+      wiring can consume.)
+- [x] **GitHub presentation (workspace batch):** description rewrite
       (discloses the write path, drops backticks); drop the cli topic, add
       library-management/ebook-management/search; homepage = PyPI;
       Releases for v1.18-v1.20; wiki off; README badges + the 3.14+ line.
+      (EXECUTED 2026-09-15, gated and approved: the canonical identity-
+      first description set in BOTH GitHub and pyproject; homepage to the
+      PyPI page; topics rebalanced; Releases backfilled for ALL sixteen
+      pre-1.22 tags verbatim from patchnotes (v1.22.0's was already
+      minted by the publish workflow); wiki AND Projects disabled;
+      FUNDING.yml added (liberapay; BTC has no FUNDING key); the README
+      badge row landed with the release; the 3.14+ line predates this
+      box.)
 
 ### Final audit 2026-09-13 (THE FINAL AUDIT: NEW findings, one line each; full detail in audit-final/cquarry/FINAL-REPORT.md)
-- [ ] MED — Release-sync misses from the 2026-09-13 blitz (the carriers updated but not the behavioral prose): README:102 glance table missing the 1.21.0 integrity trio; the refresh() locked-DB boundary clause (db.py:141-145) never propagated to README:12, spec:33, API.md:105 ("never contradicts itself" is unconditional); spec.md:170 omits formats+languages from the bare-term sweep.
-- [ ] MED — API.md truth pair: :394 allocates the tristate vocabulary exactly backwards (numerics take only true/false; bools take the tristate set; re-date to 1.18); :429 still claims "identifier KEYS sweep as text", the exact claim spec.md:87 disavows.
-- [ ] MED — Comment contract: write.py:13-19 module docstring says EVERY mutation bumps last_modified + records metadata_dirtied (false for remove_book, which clears the queues, and the trash/schema verbs); write.py:313-314 _fts_state comment is the last site asserting the retired unconditional ATTACH claim.
-- [ ] MED — PyPI page shows a broken logo (relative src ships unrewritten; use the absolute raw.githubusercontent URL); pyproject [project.urls] has Homepage only (add Bug Tracker/Changelog/Documentation — graduation-gate touch).
-- [x] MED — Publish workflow: pypa/gh-action-pypi-publish@release/v1 is a moving branch holding id-token: write, no workflow-level permissions block; SHA-pin + contents:read + actions-only dependabot + a v* deployment policy on the pypi environment; no-force-push ruleset on main is the one protection piece worth taking. *(v1.22.0, 2026-09-15, the CalibreQuarry blitz lane under grant #117: all but the ruleset shipped — SHA pins, permissions split, concurrency, ruff+twine+smoke in publish, the create-release job, dependabot, and the actions-only dependabot file. CORRECTION, same day: the v*.*.* deployment policy was attempted and REVERTED -- the REST API only creates branch-type policies, and a tag deployment is rejected outright whenever custom branch policies exist, so the policy broke the publish (the v1.22.0 tag needed a failed-job rerun after reverting). Tag policies are UI-only today (Settings -> Environments -> pypi -> Deployment branches and tags); recorded as a reopen item. The no-force-push ruleset on main remains for cquarry's own lane.)*
-- [ ] LOW — Code tail (all LOW): pubdate:Ndaysago OverflowError escapes the ParseException contract (search.py:713); set_format stores float sizes (missing the int() cast add_format has); set_custom_column bool vocabulary lacks _checked/_blank/_empty that search accepts; uuid4 registered deterministic=True; custom_columns.id interpolated bare into f-string table names on both sides (the Wave-13 fix's siblings); _custom_column_meta raises raw OperationalError on pre-editable schemas; genre_distribution recurses unguarded per dot-segment; empty_trash/expire_trash recreate .caltrash unconditionally; list_books dead recompute; vestigial _batch_depth guard; snapshot copy is copy2 not the sqlite backup API (torn-snapshot shape); load_custom_column composite degradation is stderr+{} not a documented answer.
-- [ ] LOW — Docs smalls: README:7 names "Bindery" with the 301-redirect URL (bindery-cli now); config.py's four public functions are the only undocumented publics; README:19 is a single ~230-word write-verb mega-bullet (split per verb family; also duplicates the add_book trio internally); spec.md:120 garbled identifier-cleaning clause (five unbalanced backticks; clean form at patchnotes.md:307) + :130 semicolon seam; three live-doc em-dashes (spec:37, CLAUDE:41, API:65); roadmap.md:3 scaffolding-era opener names retired database_report.md as current; db.py lacks a module docstring while owning the read-only contract; search.py field list omits ids/lang aliases; _pending_fs_ops lists omit remove_cover; extlen default=9 unexplained; normalize_rating alias comment has zero in-repo adopters; find_db auto-persists config on a default-path hit (document or gate on TTY).
-- [ ] LOW — Housekeeping: .gitignore is the whole stock GitHub template (~25 inapplicable framework sections; testing_facility/ sits under "# Streamlit"; latent-hazard generic patterns); version-sync guard test covers six of eight carriers (add the patchnotes-head assertion); add [tool.pytest.ini_options] pythonpath=["src"]; local repo testing_facility/ is 28 MB of byte-identical bootstrap duplicates (canonical facility is ~/docs/testing_facility).
-- [ ] Feature candidates logged (FINAL-REPORT L4, ranked): find_missing_format_files integrity predicate (closes the family's last hole); external_changes_detected() over PRAGMA data_version (consumer case materialized in Hermitage + Carrel); snapshot copy via sqlite3 backup API (fixes the lock-escape tear; optional backup_to retires CalibreQuarry's copy2 site); annotations N+1 fix + decoded view (Hermitage rider); integrity aggregate runner (under CalibreQuarry --health). GATED: set_series_index (write-API approval round), merge_books (acquisition lane pulls), facet_counts + the Carrel residue trio (Carrel's lane), schema_version() (no requester).
+- [x] MED — Release-sync misses from the 2026-09-13 blitz (the carriers updated but not the behavioral prose): README:102 glance table missing the 1.21.0 integrity trio; the refresh() locked-DB boundary clause (db.py:141-145) never propagated to README:12, spec:33, API.md:105 ("never contradicts itself" is unconditional); spec.md:170 omits formats+languages from the bare-term sweep. *(SHIPPED: the docs-truth batch, 2026-09-15; find_db's config auto-persist documented alongside.)*
+- [x] MED — API.md truth pair: :394 allocates the tristate vocabulary exactly backwards (numerics take only true/false; bools take the tristate set; re-date to 1.18); :429 still claims "identifier KEYS sweep as text", the exact claim spec.md:87 disavows. *(SHIPPED: the docs-truth batch, 2026-09-15.)*
+- [x] MED — Comment contract: write.py:13-19 module docstring says EVERY mutation bumps last_modified + records metadata_dirtied (false for remove_book, which clears the queues, and the trash/schema verbs); write.py:313-314 _fts_state comment is the last site asserting the retired unconditional ATTACH claim. *(SHIPPED: the comment-contract batch, 2026-09-15, with the L5 smalls (pending_fs_ops remove_cover, extlen 9, normalize_rating alias, search alias list, db.py module docstring, list_books dedupe, config.py docstrings).)*
+- [x] MED — PyPI page shows a broken logo (relative src ships unrewritten; use the absolute raw.githubusercontent URL); pyproject [project.urls] has Homepage only (add Bug Tracker/Changelog/Documentation — graduation-gate touch). *(SHIPPED in 1.23.0: absolute logo URL, the three project.urls, the canonical pyproject description (graduation acknowledged and recorded), pytest pythonpath, the version-sync guard extended to the patchnotes head + __init__.py, and the stale API.md version example fixed.)*
+- [x] MED — Publish workflow: pypa/gh-action-pypi-publish@release/v1 is a moving branch holding id-token: write, no workflow-level permissions block; SHA-pin + contents:read + actions-only dependabot + a v* deployment policy on the pypi environment; no-force-push ruleset on main is the one protection piece worth taking. *(v1.22.0, 2026-09-15, the CalibreQuarry blitz lane under grant #117: all but the ruleset shipped — SHA pins, permissions split, concurrency, ruff+twine+smoke in publish, the create-release job, dependabot, and the actions-only dependabot file. CORRECTION, same day: the v*.*.* deployment policy was attempted and REVERTED -- the REST API only creates branch-type policies, and a tag deployment is rejected outright whenever custom branch policies exist, so the policy broke the publish (the v1.22.0 tag needed a failed-job rerun after reverting). Tag policies are UI-only today (Settings -> Environments -> pypi -> Deployment branches and tags); recorded as a reopen item. The no-force-push ruleset on main remains for cquarry's own lane. UPDATED 2026-09-15, the final blitz: the ruleset is now APPLIED (rulesets API, non-fast-forward + deletion blocked on main), ci.yml's mutable @v4/@v5 refs are SHA-pinned like publish.yml's, and the UI-only tag policy stays the recorded reopen item.)*
+- [x] LOW — Code tail (all LOW): pubdate:Ndaysago OverflowError escapes the ParseException contract (search.py:713); set_format stores float sizes (missing the int() cast add_format has); set_custom_column bool vocabulary lacks _checked/_blank/_empty that search accepts; uuid4 registered deterministic=True; custom_columns.id interpolated bare into f-string table names on both sides (the Wave-13 fix's siblings); _custom_column_meta raises raw OperationalError on pre-editable schemas; genre_distribution recurses unguarded per dot-segment; empty_trash/expire_trash recreate .caltrash unconditionally; list_books dead recompute; vestigial _batch_depth guard; snapshot copy is copy2 not the sqlite backup API (torn-snapshot shape); load_custom_column composite degradation is stderr+{} not a documented answer.
+      *(ALL SHIPPED in 1.23.0, commit-level: eda7173, plus the empty_trash/
+      expire_trash no-materialize rule, the list_books dead recompute, the
+      vestigial _batch_depth guard, and the composite documented-empty.)*
+- [x] LOW — Docs smalls: README:7 names "Bindery" with the 301-redirect URL (bindery-cli now); config.py's four public functions are the only undocumented publics; README:19 is a single ~230-word write-verb mega-bullet (split per verb family; also duplicates the add_book trio internally); spec.md:120 garbled identifier-cleaning clause (five unbalanced backticks; clean form at patchnotes.md:307) + :130 semicolon seam; three live-doc em-dashes (spec:37, CLAUDE:41, API:65); roadmap.md:3 scaffolding-era opener names retired database_report.md as current; db.py lacks a module docstring while owning the read-only contract; search.py field list omits ids/lang aliases; _pending_fs_ops lists omit remove_cover; extlen default=9 unexplained; normalize_rating alias comment has zero in-repo adopters; find_db auto-persists config on a default-path hit (document or gate on TTY).
+      *(ALL SHIPPED: the prose batch + comment-contract batch + docs-truth
+      batch, 2026-09-15; the three em-dashes recast, the mega-bullet split,
+      the spec garble and seam, the roadmap opener, db.py's module
+      docstring, config.py one-liners, and the find_db side effect
+      documented.)*
+- [x] LOW — Housekeeping: .gitignore is the whole stock GitHub template (~25 inapplicable framework sections; testing_facility/ sits under "# Streamlit"; latent-hazard generic patterns); version-sync guard test covers six of eight carriers (add the patchnotes-head assertion); add [tool.pytest.ini_options] pythonpath=["src"]; local repo testing_facility/ is 28 MB of byte-identical bootstrap duplicates (canonical facility is ~/docs/testing_facility). *(ALL SHIPPED 2026-09-15: .gitignore trimmed; the guard now asserts the patchnotes head and __init__.py; pytest pythonpath added; the 28 MB facility deleted per Brandon's gate answer (md5-verified duplicates; the ignore entry kept as a tripwire).)*
+- [x] Feature candidates logged (FINAL-REPORT L4, ranked): find_missing_format_files integrity predicate (closes the family's last hole); external_changes_detected() over PRAGMA data_version (consumer case materialized in Hermitage + Carrel); snapshot copy via sqlite3 backup API (fixes the lock-escape tear; optional backup_to retires CalibreQuarry's copy2 site); annotations N+1 fix + decoded view (Hermitage rider); integrity aggregate runner (under CalibreQuarry --health). GATED: set_series_index (write-API approval round), merge_books (acquisition lane pulls), facet_counts + the Carrel residue trio (Carrel's lane), schema_version() (no requester).
+      *(RANKS 1-4 SHIPPED in 1.23.0 with tests and API.md rows; set_series_index was APPROVED in the 2026-09-15 gate round and shipped in the same release (phase-3-import skill synced); the integrity aggregate stays with CalibreQuarry's --health lane; merge_books stays waiting for the acquisition lane; facet_counts + the Carrel residue trio wait for Carrel's lane; schema_version() stays requester-less.)*
 
 **CONFIRMED-prior (final-audit verification):** the entire GitHub presentation batch (Releases zero — now correctly counted at 16 tags, description still claims read-only + backticks, homepage null, topics carry cli, badges absent; the 3.14+ prereq half is FIXED), unpinned-latest-ruff (accepted), v1.16.x/v1.17.0 tag-message blank-line strips (left alone, subjects correct), 2026-09-06 scratch litter stays gone. SUPERSEDED (verified fixed in 1.20.1/1.21.0, re-inspected): all ten Wave-13 code findings. Audit-side corrections: tag count is 16 not 20+; test census now 420 functions/434 collected. Slop-reader verdict: human end to end; the spec.md:120 garble is the only rendering defect.
+
+### Cascade notes for the 2026-09-15 final blitz (cquarry 1.23.0) and the Hermitage ledger
+
+- **1.23.0 (the feature spine + bug tail + docs truth): additive API,
+  no floor bumps owed.**
+  - **CalibreQuarry:** floor stays >=1.22. The 1.23 surface it will
+    eventually consume -- find_missing_format_files audit rows, the
+    backup_to-consistent --backup, precedent_tags (already shipped
+    1.22 under #117) -- is adoption, not obligation. WAIVED here per
+    the four-program rule; adoption rides its own release.
+  - **bindery-cli:** floor stays >=1.9.0 (bump rides its own release).
+    Nothing in 1.23 changes behavior it relies on; the integrity trio
+    routing it already consumed is untouched. WAIVED.
+  - **Hermitage (dev @main):** 1.23 is additive (the decoded
+    annotations view is the recorded Codex-wiring aid; adoption is that
+    repo's wire-or-reword lane). Hermitage-touching cquarry releases
+    must bump the Flatpak pin: the pin question for THIS lane is the
+    3.13-compat branch below, not 1.23.0 (the manifest pins a commit
+    for the 3.13 runtime, which 1.23.0's >=3.14 floor cannot serve).
+  - **Carrel-calibre-web:** deployment venv installs editable; external_changes_detected()
+    is the staleness token its (mtime, uuid) cache key wanted; adoption
+    is that repo's lane. WAIVED.
+- **The Hermitage ledger (recorded decision #81, executed 2026-09-15):
+  the 3.13-compat branch.** The Flatpak manifest's cquarry pin
+  (132aa2c = 1.18.0) cannot build on the GNOME 50 runtime's Python
+  3.13 (requires-python >=3.14 + PEP 758 bare except-groups). Brandon
+  chose an upstream compat branch over a runtime bump: branch
+  `compat-py3.13` cut from 132aa2c (NOT main), requires-python >=3.13,
+  the bare except-groups parenthesized (verified count at the branch
+  point), a distinct version series, tagged verbatim, branch and tag
+  pushed, and Hermitage's manifest pin bumped to the branch commit
+  under cross-repo grant #117 (logged in both repos).
+- **The quoted custom-column question (Hermitage's finding:
+  `#reading_status:"Read"` matched all 7,875 books live):** reproduced
+  and recorded this lane; see the FINAL-REPORT executed section for the
+  verdict and evidence.
+- **Graduation check-in (recorded trigger: the pyproject touches):
+  ACKNOWLEDGED 2026-09-15, per Brandon's gate answer.** cquarry has
+  been a standalone, PyPI-published library with its own
+  README/spec/roadmap/release cadence since the extraction; the
+  storefront touches (canonical description disclosing the write path,
+  project.urls, Releases, badges) complete that posture rather than
+  opening a new commitment. No deprecation windows or support-matrix
+  policy owed; the four consumers remain the compatibility surface.
+- **Reopen items recorded in project.done:** merge_books (acquisition
+  lane), facet_counts + the Carrel residue trio (Carrel's lane), the
+  UI-only pypi tag policy (REST cannot create it; a branch-type policy
+  actively rejects tag deployments, per the 1.22.0 erratum),
+  schema_version() (requester-less), the Hermitage manifest's
+  forward-only tagging policy (that repo's gate).

@@ -1,3 +1,92 @@
+## v1.23.0 (2026-09-15)
+
+### The final blitz: the integrity family closes, staleness gets cheap, the snapshot turns consistent
+
+THE FINAL AUDIT's feature spine (L4 ranks 1-4) plus the approved bare
+setter, the LOW bug tail, the docs-truth debt, and the storefront
+polish, in one release.
+
+- **`integrity.find_missing_format_files(db)`**: catalogued format rows
+  whose file is absent on disk; the integrity family's last disk hole.
+  Rides `get_format_path(verify=True)`'s check exactly the way the cover
+  checks ride `get_cover_path`; empty `books.path` books are skipped
+  (nowhere to look, same rule as `find_missing_cover_files`).
+- **`CalibreDB.external_changes_detected()`**: `PRAGMA data_version` as
+  the cheap staleness token long-lived holders (Hermitage, Carrel) have
+  had recorded twice; poll it and call `refresh()` only on True. The
+  answer stays True until `refresh()` re-primes the baseline, so a poll
+  loop cannot miss a change; on a locked-database snapshot connection it
+  can never fire, which is that boundary's reminder to reopen.
+- **Consistent snapshots.** The locked-database lock-escape now copies
+  through sqlite3's backup API: one consistent page image with the WAL
+  folded in, replacing three racing `copy2` calls (the same torn-snapshot
+  shape Wave 14 flagged in CalibreQuarry's own backup). Python's backup
+  retries a busy source forever, so the copy runs on a leash:
+  `CalibreDB.SNAPSHOT_LEASH` (10 s) bounds the wait, and a writer still
+  holding the lock past it trips a documented fallback to the old raw
+  file copy rather than hanging the reader. **`backup_to(dest)`** gives
+  consumers the same consistency for their own backups; CalibreQuarry's
+  `copy2` site can retire onto it at that repo's release.
+- **Annotations.** The `annotations:` search location bulk-loads its
+  text map in one query (the per-book probe was an N+1), and
+  **`get_annotations_decoded()`** projects Calibre's raw rows onto
+  `{book, format, kind, annot_id, timestamp, text, notes, title}` so a
+  renderer never re-learns `annot_data`'s shape (wiring it into
+  Hermitage's Codex is that repo's recorded lane).
+- **`write.set_series_index(book_id, index)`** (the approved write API):
+  the bare index correction completing the 1.19 passthrough family.
+  Updates `books.series_index` in place, the link row untouched (no
+  delete-and-reinsert like `set_series`); the book must already belong
+  to a series, `None` raises, and an equal value is an honest no-op.
+- **The LOW bug tail** (L2, all eight): `pubdate:Ndaysago` with a
+  gigantic count converts to `ParseException` instead of a raw
+  OverflowError; `set_format` stores integer sizes like `add_format`;
+  the boolean vocabulary is one shared constant pair (`BOOL_TRUE_WORDS`
+  / `BOOL_FALSE_WORDS`) so search and write agree on `_checked`,
+  `_blank`, `_empty` and friends; `custom_columns.id` is int()-cast
+  before every f-string table name on both sides (the Wave-13 defense's
+  siblings); `_custom_column_meta` raises the house ValueError on
+  schemas predating editable/display; `genre_distribution`'s node
+  emission is iterative (a hostile deep tag no longer risks
+  RecursionError, output order identical); `uuid4` registers without
+  deterministic=True (SQLite may reuse a deterministic result within a
+  statement); `empty_trash`/`expire_trash` no longer materialize a
+  `.caltrash` tree in libraries that never trashed; `list_books`' dead
+  end-recompute and `add_book`'s always-true batch guard are gone;
+  composite custom columns read as a documented empty instead of a
+  stderr warning.
+- **Docs truth** (the release-sync debt from the 2026-09-13 blitz):
+  API.md's tristate note now allocates correctly (numeric/rating/date
+  locations take exactly true/false; boolean locations take the tristate
+  set; re-dated 1.18), the false "identifier keys sweep as text" claim
+  is gone, the refresh() locked-snapshot boundary clause reached
+  README/spec/API, the README glance table gained the metadata-quality
+  trio, spec section 4 lists formats+languages in the bare-term sweep,
+  and `find_db`'s config auto-persist is documented. Prose batch:
+  README's write mega-bullet split per verb family, the bindery-cli
+  rename and link, the spec identifier-cleaning garble and dossier seam
+  fixed, the three live em-dashes recast, the roadmap opener rewritten,
+  and the comment contracts (the module-docstring "EVERY mutation"
+  overclaim and the last retired ATTACH claim) corrected.
+- **Storefront**: pyproject carries the canonical description (it
+  discloses the opt-in write path; the library-graduation check-in
+  closes as acknowledged), Bug Tracker/Changelog/Documentation project
+  URLs, an absolute logo URL (PyPI rendered a broken image), a README
+  badge row, pytest `pythonpath = ["src"]`, and the version-sync guard
+  now covers the patchnotes head and `__init__.py` (eight of eight
+  carriers guarded).
+- Housekeeping: .gitignore trimmed to what a stdlib library produces;
+  REPORT-12-Sept.md retired per the :988 precedent (the declined-lines
+  payload extracted into the roadmap, archive copy in audit-final); the
+  repo-local `testing_facility/` (28 MB of byte-identical bootstrap
+  duplicates) reclaimed; ci.yml SHA-pinned like publish.yml; the
+  no-force-push/no-delete ruleset applied on main; wiki and Projects
+  disabled (repo settings, outside the file tree).
+- Both import skills swept per the skill-sync rule: phase-3-import
+  gains the set_series_index line; the spine touches nothing the
+  phase-1 import loop teaches.
+- Suite: 439 -> 464 tests.
+
 ## v1.22.0 (2026-09-15)
 
 ### The precedent-tags read comes home, and the publish path hardens

@@ -1,7 +1,12 @@
 <div align="center">
-  <img src="logo.svg" width="96" height="96" alt="cquarry logo"/>
+  <img src="https://raw.githubusercontent.com/VirInvictus/cquarry/main/logo.svg" width="96" height="96" alt="cquarry logo"/>
   <h1>cquarry</h1>
   <p>Canonical Calibre database layer and search grammar engine for Calibre libraries.</p>
+  <p><a href="https://pypi.org/project/cquarry/"><img alt="PyPI" src="https://img.shields.io/pypi/v/cquarry"></a>
+     <a href="https://pypi.org/project/cquarry/"><img alt="Python" src="https://img.shields.io/pypi/pyversions/cquarry"></a>
+     <a href="https://github.com/VirInvictus/cquarry/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/VirInvictus/cquarry/actions/workflows/ci.yml/badge.svg"></a>
+     <a href="https://github.com/VirInvictus/cquarry/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/pypi/l/cquarry"></a>
+     <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-zero-39ace0"></p>
 </div>
 
 This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry) (CLI/TUI), [Hermitage](https://github.com/VirInvictus/Hermitage) (GTK4 gallery), [Carrel-calibre-web](https://github.com/VirInvictus/Carrel-calibre-web) (web reader), and [bindery-cli](https://github.com/VirInvictus/bindery-cli) (EPUB repair & audit). By centralizing the search grammar parser and metadata access, cquarry evaluates virtual library definitions and search queries consistently across frontends.
