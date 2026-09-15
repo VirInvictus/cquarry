@@ -23,10 +23,18 @@ grant #117 (decision 2026-09-15), shipped as one additive release.
   the CI ruff gates first, the build gets a strict twine check and a
   wheel smoke-install, and a create-release job mints the GitHub
   Release from the tag's verbatim message. actions-only dependabot
-  keeps the pins current. Repo settings: the pypi environment's
-  deployment policies now admit only the v*.*.* pattern. The
-  no-force-push ruleset on main remains recorded for cquarry's own
-  lane.
+  keeps the pins current. The no-force-push ruleset on main remains
+  recorded for cquarry's own lane.
+
+  Erratum (2026-09-15, post-release): this entry as tagged also said
+  the pypi environment's deployment policies now admit only the
+  v*.*.* pattern. That part was reverted the same day: the REST API
+  only creates branch-type policies, and a tag deployment is rejected
+  outright whenever custom branch policies exist, so the policy broke
+  this very publish (the v1.22.0 tag shipped only after the policy was
+  reverted and the failed job re-ran). Tag policies are UI-only today;
+  the workflow's v*.*.* tag trigger remains the effective gate, and a
+  UI-applied tag policy is a recorded reopen item.
 - Suite: 434 → 438 tests.
 
 ## v1.21.0 (2026-09-13)
