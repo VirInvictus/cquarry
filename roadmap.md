@@ -1,6 +1,13 @@
 # cquarry Roadmap
 
-This roadmap outlines the planned evolution of `cquarry` from a read-only metadata extractor to a full-featured Calibre ecosystem bridge, utilizing the structural discoveries documented in `database_report.md`.
+This roadmap tracks `cquarry`'s evolution from the read-only metadata
+extractor CalibreQuarry grew into the ecosystem's canonical database layer
+and search engine: strictly read-only reads for every consumer, one opt-in
+write module, and a Calibre-parity search grammar. Phases are numbered in
+the order the work happened; the newest findings live in the dated audit
+blocks near the bottom of the file. (The scaffolding-era structural survey
+that guided Phases 1-5 was `database_report.md`, retired since; upstream
+research now lands as dated comparison reports and roadmap boxes.)
 
 > **Status (v1.7.0, 2026-08-28):** Phases 1–5 are implemented and covered by tests.
 > Phase 6 is complete: write-path correctness + dirtied visibility (v1.2.0),
