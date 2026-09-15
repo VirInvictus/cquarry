@@ -1,0 +1,57 @@
+cquarry: DONE in THE FINAL BLITZ 2026-09-15
+
+What shipped (commit range 5856122..4433460 on main, all pushed, CI
+green; release v1.23.0 with the verbatim tag, PyPI published green,
+18 GitHub Release pages total):
+
+- The final-audit ranked list executed in full: the GitHub
+  presentation batch (Releases backfill x16, canonical description in
+  GitHub + pyproject, homepage, topics, wiki/Projects off, FUNDING.yml,
+  README badges), the PyPI polish pair (absolute logo URL,
+  Bug Tracker/Changelog/Documentation project.urls, pytest pythonpath,
+  the version-sync guard extended to all eight carriers), the
+  publish-workflow remainder (ci.yml SHA pins, the no-force-push +
+  no-delete ruleset on main), the docs-truth batch (API.md tristate
+  note and identifiers-sweep claim fixed, the refresh() locked-snapshot
+  boundary propagated, the README glance trio, spec section 4),
+  the comment-contract batch, the LOW bug tail (all twelve findings),
+  the LOW docs batch, and the housekeeping (gitignore trim,
+  REPORT-12-Sept.md retired + archived, the 28 MB local
+  testing_facility reclaimed).
+- Release 1.23.0: find_missing_format_files, external_changes_detected,
+  the backup-API consistent snapshot (leashed, with backup_to), the
+  annotations bulk read + get_annotations_decoded, and the approved
+  bare set_series_index. Suite 439 -> 465 tests.
+- The Hermitage ledger (recorded decision #81) closed on this repo's
+  side: compat-py313 branch (from 132aa2c, >=3.13, seven bare
+  except-groups parenthesized, distinct 1.18.0+py313.x series, publish
+  defused) tagged v1.18.0+py313.1 and pushed; Hermitage's Flatpak pin
+  moved to it under grant #117 and a real flatpak-builder run builds
+  and imports cquarry on the runtime's Python 3.13.15.
+- The quoted custom-column question (#reading_status:"Read" matching
+  the whole live library) ruled deliberate upstream semantics with
+  evidence and test pins; quotes never imply exact; =Read is exact.
+- Nine gates asked and answered; all answers executed. Graduation
+  check-in closed as acknowledged (cquarry is the graduated library;
+  the storefront work is its completion, not a new commitment).
+
+Reopen conditions (none are this repo's active work):
+
+- merge_books(book, duplicate, policy): waits for the acquisition-
+  importer lane to pull it (recorded standing gate).
+- facet_counts + the Carrel residue trio (get_book_by_uuid,
+  entity-to-ids resolver, bulk formats map): wait for Carrel's lane.
+- schema_version(): requester-less; only on a consumer ask.
+- The pypi-environment TAG deployment policy: UI-only today (the REST
+  API creates branch-type policies, and any branch policy rejects tag
+  deployments outright -- the v1.22.0 erratum). Apply it in
+  Settings -> Environments -> pypi if and when GitHub ships REST/UI
+  parity.
+- Hermitage's side of the Flatpak story: the pip-floor policy decision
+  (requires-python >=3.14 vs the now-3.13-capable data layer), the
+  version-bump across its sync set, and the forward-only tag the
+  manifest's hermitage module pins. The build currently stops at that
+  metadata, with cquarry's half verified end to end.
+- Dependabot's two open major-bump PRs on this repo
+  (actions/checkout 4 -> 7, actions/setup-python 5 -> 7) are a merge
+  decision for Brandon; the pins are correct and green either way.
