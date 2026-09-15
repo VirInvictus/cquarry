@@ -1,3 +1,19 @@
+"""The read-only Calibre database layer.
+
+:class:`CalibreDB` is the primary public interface: it opens Calibre's
+``metadata.db`` strictly read-only (``?mode=ro``, with a lock-escape snapshot
+copy when Calibre holds the lock), hydrates book rows over a 6-JOIN cache,
+and implements the :class:`cquarry.search.MetadataProvider` protocol so the
+search engine evaluates against it directly. This module owns the read-only
+contract: it never writes to the database, and the only sanctioned mutation
+path lives in the separate, opt-in :mod:`cquarry.write` module (never
+imported from here).
+
+Everything the module surfaces rides the lazy caches initialized in
+:meth:`CalibreDB._init_caches` (``refresh()`` clears them all); reads degrade
+to empty results rather than errors on schemas that predate a table.
+"""
+
 import contextlib
 import functools
 import json
@@ -811,6 +827,7 @@ class CalibreDB:
         }
 
     def get_all_tags(self) -> list[str]:
+        """Every distinct tag name, sorted alphabetically."""
         cur = self.conn.cursor()
         cur.execute("SELECT DISTINCT name FROM tags ORDER BY name")
         return [row["name"] for row in cur.fetchall()]
@@ -895,8 +912,8 @@ class CalibreDB:
         order, download counts) keeps it; a duplicated id keeps its first
         slot, ids absent from the library are skipped, ``descending``
         reverses the sequence, and ``offset``/``limit`` slice after the
-        ordering. ``offset``/``limit`` slice after sorting; ``limit=None``
-        runs to the end. Unknown keys raise ValueError.
+        ordering (``limit=None`` runs to the end). Unknown keys raise
+        ValueError.
         """
         keys = (sort,) if isinstance(sort, str) else tuple(sort)
         if not keys:
@@ -1316,6 +1333,7 @@ class CalibreDB:
         return out
 
     def count_books(self) -> int:
+        """Total book count; the caches when populated, else a COUNT(*)."""
         if self._all_ids_cache is not None:
             return len(self._all_ids_cache)
         if self._books_cache is not None:
@@ -1885,6 +1903,7 @@ class CalibreDB:
     # --- search.MetadataProvider interface ---
 
     def all_ids(self) -> set[int]:
+        """MetadataProvider hook: every book id in the library."""
         return set(self._get_all_book_ids())
 
     def vl_expression(self, name: str) -> str | None:
@@ -1904,12 +1923,18 @@ class CalibreDB:
         return None
 
     def custom_locations(self) -> dict[str, str]:
+        """MetadataProvider hook: ``{#label: engine datatype}`` per custom column."""
         cache = self._custom_loc_cache
         if cache is None:
             cache = self._custom_loc_cache = self._build_custom_locations()
         return cache
 
     def field(self, book_id: int, location: str) -> Any:
+        """One book's value for a canonical location (MetadataProvider hook).
+
+        Custom columns are addressed by ``#label``; comments, pages, and
+        annotations have dedicated lazy paths; everything else reads the
+        search view."""
         if location.startswith("#"):
             return self._custom_value(book_id, location)
 

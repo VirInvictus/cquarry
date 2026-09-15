@@ -188,7 +188,9 @@ def calibre_rating_to_stars(rating: int | None) -> float | None:
     return rating / CALIBRE_RATING_SCALE
 
 
-# Canonical name for the rating conversion; consumers should prefer this.
+# Canonical name for the rating conversion: renderers (Hermitage's Insights)
+# import this spelling. calibre_rating_to_stars stays as the historical and
+# in-repo alias (db.py/analytics.py were seeded with it); the two are identical.
 normalize_rating = calibre_rating_to_stars
 
 

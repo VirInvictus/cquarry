@@ -10,13 +10,16 @@ Safety contract:
   - Registers the custom SQL functions Calibre's triggers call (``title_sort``,
     ``uuid4``) plus its ``PYNOCASE`` collation BEFORE any statement runs;
     without them ``books_insert_trg`` / ``books_update_trg`` abort writes.
-  - Every mutation bumps ``books.last_modified`` AND records the book id in
-    the ``metadata_dirtied`` queue. Calibre only regenerates a book's sidecar
-    .opf (and pushes it to wireless readers) for ids present in that table
-    (backend.py ``dirtied_books()``), so skipping the insert would leave
-    external edits invisible to Calibre's sync machinery forever. Databases
-    from before the table existed keep working: the insert is guarded by an
-    existence check.
+  - Every row-level mutation bumps ``books.last_modified`` AND records the
+    book id in the ``metadata_dirtied`` queue. Removals invert the rule:
+    ``remove_book`` clears the queues instead (metadata, annotations, FTS),
+    so Calibre never resyncs a deleted book; the trash lifecycle and the
+    custom-column schema verbs touch no rows at all. Calibre only
+    regenerates a book's sidecar .opf (and pushes it to wireless readers)
+    for ids present in that table (backend.py ``dirtied_books()``), so
+    skipping the insert would leave external edits invisible to Calibre's
+    sync machinery forever. Databases from before the table existed keep
+    working: the insert is guarded by an existence check.
   - Mutations run inside explicit ``BEGIN IMMEDIATE`` transactions.
   - Tag deletion cleans ``books_tags_link`` before ``tags`` to satisfy the
     ``fkc_delete_on_tags`` trigger ordering.
@@ -310,12 +313,14 @@ class WritableCalibreDB:
         ] = []
         # full-text-search.db attach state: None = not tried yet, True =
         # attached as fts_db, False = absent or unusable for this
-        # connection. Tried lazily before the first format write (ATTACH
-        # is illegal inside a transaction, so never after _begin()).
+        # connection. Tried lazily before the first format write (SQLite
+        # builds before 3.21.0 forbid ATTACH inside a transaction, so never
+        # after _begin()).
         self._fts_state: bool | None = None
-        # File placements/removals deferred by set_cover and the
-        # original-format verbs: callables appended inside the transaction,
-        # run only after the outermost COMMIT (a rollback drops them).
+        # File placements/removals deferred by set_cover, remove_cover, and
+        # the original-format verbs: callables appended inside the
+        # transaction, run only after the outermost COMMIT (a rollback drops
+        # them).
         self._pending_fs_ops: list[Callable[[], None]] = []
 
     # -- lifecycle --
@@ -3005,6 +3010,10 @@ class WritableCalibreDB:
             ]
         except sqlite3.OperationalError:
             formats = []  # schema predates the data table
+        # No formats means no renames, but keep the ORIGINAL_ prefix budget
+        # (len("ORIGINAL_") = 9, +1 for the dot) so the stem width matches a
+        # book that has formats; _construct_file_name's own floor (14) rules
+        # either way today.
         extlen = max((len(f) for f in formats), default=9) + 1
         new_stem = _construct_file_name(title, first_author, extlen)
         try:
@@ -3038,10 +3047,10 @@ class WritableCalibreDB:
         self._pending_relayouts.append(op)
 
     def _flush_pending_fs_ops(self) -> None:
-        """Run the file placements/removals deferred by set_cover and the
-        original-format verbs, only after the outermost COMMIT: a rollback
-        that resurrected old rows must not leave new cover or format files
-        on disk, so the queued ops are dropped instead."""
+        """Run the file placements/removals deferred by set_cover,
+        remove_cover, and the original-format verbs, only after the outermost
+        COMMIT: a rollback that resurrected old rows must not leave new cover
+        or format files on disk, so the queued ops are dropped instead."""
         for op in self._pending_fs_ops:
             op()
         self._pending_fs_ops.clear()

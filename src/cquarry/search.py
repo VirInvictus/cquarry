@@ -18,10 +18,10 @@ Coverage:
     ``identifiers:#<5`` compare the number of values in a multi-valued field.
   - Field locations: title, title_sort, authors/author, author_sort, series,
     publisher, series_sort, tags/tag (hierarchical), rating, formats/format,
-    languages/language (canonicalized: ``languages:English`` matches ``eng``,
-    and two-letter codes work: ``languages:ja`` matches ``jpn``),
+    languages/language/lang (canonicalized: ``languages:English`` matches
+    ``eng``, and two-letter codes work: ``languages:ja`` matches ``jpn``),
     pubdate, timestamp/date, last_modified, size (bytes with k/m/g suffixes),
-    pages, identifiers/identifier/isbn, comments/comment, annotations (the
+    pages, identifiers/identifier/ids/isbn, comments/comment, annotations (the
     book's concatenated annotation text; presence via ``true``/``false``),
     cover, id, uuid, ``#custom`` columns, ``all``, ``vl:`` and ``search:``.
   - User categories: ``@Name:query`` matches books holding any of the user
