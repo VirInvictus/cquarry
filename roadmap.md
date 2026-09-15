@@ -1346,6 +1346,17 @@ lane.)*
 
 ## Phase 13: the upstream comparison, FTS reads, search honesty, write completions (proposed 2026-09-12, from REPORT-12-Sept.md)
 
+The source report's only unextracted payload, carried here before the
+file's retirement (2026-09-15, per the :988 retire-per-precedent rule).
+Everything else in REPORT-12-Sept.md shipped or is tracked in the boxes
+above and below; these five lines are the record of what was deliberately
+NOT recommended, found nowhere else:
+
+> Deliberately not recommended: embed_metadata into format files
+> (stdlib-violating), annotation/reading-position writers (consumer, not
+> curation), library clone/restore/export (out of write scope),
+> OPF-dump-now (decided), notes (declined by recorded decision).
+
 Three research passes compared this repo line-for-line against the
 upstream Calibre clone (schema + upgrade map, search stack, write
 paths). Full evidence and upstream file:line pointers live in
