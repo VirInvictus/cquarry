@@ -50,6 +50,8 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_formats(book_id)` | `dict[str, dict[str, Any]]` | Per-format detail: `{fmt: {path, size_bytes, name}}` (path unverified; size from the catalogued uncompressed size). `{}` for unknown books. |
 | `get_cover_path(book_id, verify=True)` | `str \| None` | Resolved cover image path (`cover.jpg`, falling back to `cover.png`) from the original DB location. With `verify` (default) returns None when no file exists on disk; without it returns the `.jpg` path unconditionally. Raises `ValueError` for unknown books. |
 | `get_library_uuid()` | `str \| None` | The library's identity UUID (`library_id` table); stable across moves/restores, unlike per-book uuids; the right cache key for per-library state. None on very old schemas. |
+| `backup_to(dest)` | `str` | Copy `metadata.db` to `dest` as one consistent snapshot via sqlite3's backup API (since 1.23.0; a file copy of main+`-wal`+`-shm` can tear when Calibre checkpoints mid-copy). Creates `dest` (replacing an existing file) and returns its absolute path. On a locked-DB snapshot connection, the snapshot is what gets copied. |
+| `external_changes_detected()` | `bool` | True when another connection has committed writes to this database file since this connection last looked (since 1.23.0, via `PRAGMA data_version`): the cheap staleness token for long-lived holders -- poll it and call `refresh()` only on True. Stays True until `refresh()` re-primes the baseline; on a snapshot connection it can never answer True (the copy is isolated), which is that boundary's reminder to reopen. |
 | `get_entities(kind)` | `list[dict[str, Any]]` | Entity rows for `authors` / `series` / `publishers` / `tags` / `languages` / `ratings`: `{id, name, sort, link, count}`, name-sorted (ratings carry the half-star integer as `name`). Raises `ValueError` for unknown kinds. |
 | `get_preference(key, default=None)` | `Any` | Typed read of any Calibre preference from the `preferences` table (JSON decoded where it parses). |
 | `get_field_metadata()` | `dict[str, Any]` | The rich `field_metadata` preference: per-custom-column GUI metadata keyed by label. |
@@ -76,6 +78,7 @@ with CalibreDB("/path/to/metadata.db") as db:
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `get_annotations(book_id=None)` | `list[dict[str, Any]]` | E-reader highlights, bookmarks, and notes from the `annotations` table; `annot_data` is decoded JSON when possible. In `searchable_text`, an annotation's notes follow its highlighted text joined by `\n\x1f\n` (LF, ASCII unit separator, LF). |
+| `get_annotations_decoded(book_id=None)` | `list[dict[str, Any]]` | The renderer-facing annotation view (since 1.23.0): one dict per annotation with `book`, `format`, `kind` (the raw `annot_type`), `annot_id`, `timestamp`, and the decoded payload's `text` (the highlighted passage), `notes`, and `title` (bookmarks), each None when the payload lacks it. The same content `get_annotations()` returns without every consumer re-learning `annot_data`'s shape. |
 | `get_last_read_positions(book_id=None)` | `list[dict[str, Any]]` | Per-device reading progress (`device`, `cfi`, `pos_frac` 0.0–1.0, `epoch`). |
 | `get_plugin_data(book_id=None, name=None)` | `list[dict[str, Any]]` | Third-party payloads from `books_plugin_data` (Goodreads IDs, word counts, ...). |
 | `get_conversion_profiles(book_id=None)` | `list[dict[str, Any]]` | Books with manual conversion overrides; the pickled recipe blob stays raw bytes (`data_size` gives its length). |
@@ -308,6 +311,7 @@ print(cquarry.__version__)  # "1.21.0"
 | `empty_trash()` | `int` | Permanently remove every trash entry and recreate the empty directories (since 1.20.0); returns the count. |
 | `expire_trash(older_than=None)` | `int` | Remove trash entries older than the age (since 1.20.0; seconds or `timedelta`; upstream's 14-day default; `<= 0` expires all). |
 | `set_series(book_id, name, index=None)` | `bool` | Assign/clear series + `series_index` (defaults 1.0 fresh, preserves on reassign). |
+| `set_series_index(book_id, index)` | `bool` | Set the series index verbatim (since 1.23.0): updates `books.series_index` in place, the link row untouched -- no delete-and-reinsert. The book must already belong to a series (`set_series` assigns one); `None` raises. Honest no-op on an equal value. |
 | `set_publisher(book_id, name)` | `bool` | Replace/clear publisher; case-insensitive match; orphans pruned. |
 | `set_rating(book_id, stars)` | `bool` | 0-5 stars stored as x2; UNIQUE(rating) rows deduplicated via find-or-create. |
 | `clear_rating(book_id)` | `bool` | Self-documenting alias of `set_rating(book_id, None)` (since 1.13.0); the orphaned rating row prunes with it. False when the book was already unrated. |
@@ -342,6 +346,7 @@ sorted.
 | `find_formatless(db)` | `list[int]` | Books with no catalogued format rows. |
 | `find_coverless(db)` | `list[int]` | Books whose `has_cover` flag is unset (the catalogued answer). |
 | `find_missing_cover_files(db)` | `list[int]` | Flag set but no cover file resolves on disk (empty `books.path` skipped; nowhere to look). |
+| `find_missing_format_files(db)` | `list[int]` | Catalogued format rows whose file is absent on disk (since 1.23.0; rides `get_format_path`'s verified resolution, the same way the cover check rides `get_cover_path`; empty `books.path` skipped by the same rule). Closes the family's last disk hole beside `find_formatless` (no rows) and `find_missing_cover_files` (the cover). |
 | `find_deprecated_formats(db, formats)` | `list[int]` | Books whose whole format set sits inside the caller's deprecated set (case-insensitive). cquarry owns the subset mechanism; what counts as deprecated is a curation opinion. Formatless books excluded. |
 | `find_low_res_covers(db, min_dimension=500)` | `dict[int, tuple[int, int]]` | `{id: (w, h)}` for resolvable, parseable covers under the dimension floor. Missing files are `find_missing_cover_files`' answer; unreadable images are skipped. |
 | `find_duplicate_books(db)` | `dict[tuple[str, str], list[int]]` | `(title.lower(), primary_author.lower())` groups with more than one member. |

@@ -1697,8 +1697,14 @@ class TestLockedDBSnapshot(unittest.TestCase):
         conn.execute("INSERT INTO books (id, title) VALUES (1, 'Committed')")
         conn.commit()
         conn.close()
+        # The holder keeps the lock for the whole test; the backup-API
+        # snapshot would wait it out on the production leash (10 s), so the
+        # test shortens it to exercise the fallback path instead.
+        self._real_leash = CalibreDB.SNAPSHOT_LEASH
+        CalibreDB.SNAPSHOT_LEASH = 0.2
 
     def tearDown(self):
+        CalibreDB.SNAPSHOT_LEASH = self._real_leash
         shutil.rmtree(self.temp_dir)
 
     def test_locked_db_falls_back_to_snapshot_and_cleans_up(self):
@@ -2205,3 +2211,174 @@ class TestCustomColumnIdCastAndComposite(unittest.TestCase):
         self._make("3", datatype="composite", storage=False)
         with CalibreDB(self.db_path) as db:
             self.assertEqual(db.load_custom_column("#aud"), {})
+
+
+class TestExternalChangesAndBackup(unittest.TestCase):
+    """1.23: external_changes_detected() over PRAGMA data_version (the
+    cheap staleness token) and the backup-API copy (backup_to)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT, series_index REAL, path TEXT, has_cover INTEGER)"
+        )
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'One')")
+        # Empty join partners so get_book()'s 6-JOIN works on the copy.
+        for ddl in (
+            (
+                "CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT,"
+                " sort TEXT, link TEXT)"
+            ),
+            (
+                "CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, author INTEGER)"
+            ),
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)",
+            (
+                "CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, tag INTEGER)"
+            ),
+            (
+                "CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,"
+                " format TEXT, uncompressed_size INTEGER, name TEXT)"
+            ),
+            "CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT)",
+            (
+                "CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, lang_code INTEGER)"
+            ),
+            "CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT)",
+            (
+                "CREATE TABLE books_series_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, series INTEGER)"
+            ),
+            "CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER)",
+            (
+                "CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, rating INTEGER)"
+            ),
+            "CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT)",
+            (
+                "CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, publisher INTEGER)"
+            ),
+        ):
+            conn.execute(ddl)
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_external_changes_flips_after_a_foreign_write(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertFalse(db.external_changes_detected())
+            self.assertFalse(db.external_changes_detected())  # stable
+            other = sqlite3.connect(self.db_path)
+            other.execute("INSERT INTO books (title) VALUES ('Two')")
+            other.commit()
+            other.close()
+            self.assertTrue(db.external_changes_detected())
+            # Level-triggered: it stays True until refresh() re-primes.
+            self.assertTrue(db.external_changes_detected())
+            db.refresh()
+            self.assertFalse(db.external_changes_detected())
+
+    def test_backup_to_copies_the_whole_library(self):
+        with CalibreDB(self.db_path) as db:
+            dest = os.path.join(self.temp_dir, "backup", "copy.db")
+            out = db.backup_to(dest)
+            self.assertEqual(out, os.path.abspath(dest))
+            with CalibreDB(out) as copy:
+                self.assertEqual(copy.count_books(), 1)
+                self.assertEqual(copy.get_book(1)["title"], "One")
+
+
+class TestAnnotationsDecoded(unittest.TestCase):
+    """1.23: the decoded renderer-facing annotation view; the
+    annotations: location keeps answering from the bulk text map."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+        conn.executemany(
+            "INSERT INTO books (id, title) VALUES (?, ?)", [(1, "One"), (2, "Two")]
+        )
+        conn.execute(
+            "CREATE TABLE annotations (id INTEGER PRIMARY KEY, book INTEGER,"
+            " format TEXT, user_type TEXT, user TEXT, timestamp TEXT,"
+            " annot_id TEXT, annot_type TEXT, annot_data TEXT,"
+            " searchable_text TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO annotations (book, format, annot_id, annot_type,"
+            " annot_data, searchable_text) VALUES (?, 'EPUB', ?, ?, ?, ?)",
+            [
+                (
+                    1,
+                    "a1",
+                    "highlight",
+                    '{"type": "highlight", "text": "quoted words", "notes": "a note"}',
+                    "quoted words\x1f a note",
+                ),
+                (1, "a2", "bookmark", '{"type": "bookmark", "title": "Mark"}', "Mark"),
+                (2, "a3", "highlight", "not-json", "raw text"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_decoded_view_projects_renderer_fields(self):
+        with CalibreDB(self.db_path) as db:
+            rows = db.get_annotations_decoded(1)
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "book": 1,
+                    "format": "EPUB",
+                    "kind": "highlight",
+                    "annot_id": "a1",
+                    "timestamp": None,
+                    "text": "quoted words",
+                    "notes": "a note",
+                    "title": None,
+                },
+                {
+                    "book": 1,
+                    "format": "EPUB",
+                    "kind": "bookmark",
+                    "annot_id": "a2",
+                    "timestamp": None,
+                    "text": None,
+                    "notes": None,
+                    "title": "Mark",
+                },
+            ],
+        )
+
+    def test_decoded_view_survives_unparseable_payloads(self):
+        with CalibreDB(self.db_path) as db:
+            rows = db.get_annotations_decoded(2)
+        self.assertEqual(rows[0]["kind"], "highlight")
+        self.assertIsNone(rows[0]["text"])
+        self.assertIsNone(rows[0]["notes"])
+
+    def test_decoded_view_scopes_and_defaults(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(len(db.get_annotations_decoded()), 3)
+            self.assertEqual(db.get_annotations_decoded(99), [])
+
+    def test_annotations_search_still_answers_from_the_text(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.search("annotations:quoted"), {1})
+            self.assertEqual(db.search("annotations:mark"), {1})
+            self.assertEqual(db.search("annotations:true"), {1, 2})
+            self.assertEqual(db.search("annotations:false"), set())

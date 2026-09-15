@@ -1160,6 +1160,50 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    def set_series_index(self, book_id: int, index: float) -> bool:
+        """Set the book's series index verbatim (the bare-setter completion
+        of the 1.19 passthrough family; 1.23).
+
+        Unlike re-calling :meth:`set_series` -- which deletes and reinserts
+        the link row just to change the number -- this updates
+        ``books.series_index`` only. The book must already belong to a
+        series (assigning one is :meth:`set_series`'s job, and an index
+        without a series is not a correction); ``None`` raises too, since
+        clearing the index alone would strand the link (clearing both is
+        ``set_series(book_id, None)``). Returns True when stored state
+        changed; an equal value is an honest no-op."""
+        if index is None:
+            raise ValueError(
+                "set_series_index(None) is not supported; clearing both the "
+                "series and its index is set_series(book_id, None)"
+            )
+        new = float(index)
+        self._begin()
+        try:
+            self._require_book(book_id)
+            row = self.conn.execute(
+                "SELECT b.series_index AS idx, l.id AS link FROM books b "
+                "LEFT JOIN books_series_link l ON l.book = b.id WHERE b.id = ?",
+                (book_id,),
+            ).fetchone()
+            if row["link"] is None:
+                raise ValueError(
+                    f"Book {book_id} has no series to index; set_series() assigns one"
+                )
+            if row["idx"] is not None and float(row["idx"]) == new:
+                self._rollback()
+                return False
+            self.conn.execute(
+                "UPDATE books SET series_index = ?, last_modified = ? WHERE id = ?",
+                (new, self._now(), book_id),
+            )
+            self._mark_dirty(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
     def set_publisher(self, book_id: int, name: str | None) -> bool:
         """Replace (or clear, with ``name=None``) the book's publisher.
 

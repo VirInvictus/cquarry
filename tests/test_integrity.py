@@ -24,6 +24,7 @@ from cquarry.integrity import (
     find_invalid_uuids,
     find_low_res_covers,
     find_missing_cover_files,
+    find_missing_format_files,
     find_sentinel_pubdates,
     find_series_gaps,
     find_unrated,
@@ -195,6 +196,20 @@ class TestIntegrity(unittest.TestCase):
         # Book 3: flag set, file absent. Books 1/4: files exist. Book 5:
         # flag set but no path guard issue (path p5, file absent → flagged).
         self.assertEqual(find_missing_cover_files(self.db), [3, 5])
+
+    def test_find_missing_format_files(self):
+        # Books 1, 2, 4 carry catalogued data rows but no files on disk.
+        # Placing book 1's file clears it; book 5 is formatless and book 3
+        # has no data rows, so neither was ever a candidate.
+        book_dir = os.path.join(self.temp_dir, "p1")
+        format_file = os.path.join(book_dir, "One.epub")
+        with open(format_file, "wb") as f:
+            f.write(b"EPUB")
+        try:
+            self.assertEqual(find_missing_format_files(self.db), [2, 4])
+        finally:
+            os.unlink(format_file)
+        self.assertEqual(find_missing_format_files(self.db), [1, 2, 4])
 
     def test_find_deprecated_formats(self):
         self.assertEqual(find_deprecated_formats(self.db, {"MOBI", "LIT", "LRF"}), [2])

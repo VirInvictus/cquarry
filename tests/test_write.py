@@ -3278,3 +3278,101 @@ class TestUuid4FreshPerCall(unittest.TestCase):
             self.assertEqual(len(set(vals)), 2)
         finally:
             shutil.rmtree(temp_dir)
+
+
+class TestSetSeriesIndex(unittest.TestCase):
+    """set_series_index: the bare index correction (1.23, the approved
+    write API). Updates books.series_index in place; the link row stays."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT, series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY,
+                book INTEGER, series INTEGER, UNIQUE(book));
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, UNIQUE(book));
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY,
+                book INTEGER, rating INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY,
+                book INTEGER, publisher INTEGER);
+            INSERT INTO books (id, title, series_index) VALUES (1, 'One', 3.0);
+            INSERT INTO books (id, title) VALUES (2, 'No Series');
+            INSERT INTO series (id, name) VALUES (1, 'Wing');
+            INSERT INTO books_series_link (book, series) VALUES (1, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_updates_the_index_in_place(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.set_series_index(1, 7.5))
+            self.assertEqual(
+                wdb.conn.execute(
+                    "SELECT series_index FROM books WHERE id = 1"
+                ).fetchone()[0],
+                7.5,
+            )
+            # The link row survives: no delete-and-reinsert.
+            self.assertIsNotNone(
+                wdb.conn.execute(
+                    "SELECT 1 FROM books_series_link WHERE book = 1"
+                ).fetchone()
+            )
+            self.assertEqual(
+                [r[0] for r in wdb.conn.execute("SELECT book FROM metadata_dirtied")],
+                [1],
+            )
+
+    def test_equal_value_is_an_honest_noop(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            stamp = wdb.conn.execute(
+                "SELECT last_modified FROM books WHERE id = 1"
+            ).fetchone()[0]
+            self.assertFalse(wdb.set_series_index(1, 3.0))
+            self.assertEqual(
+                wdb.conn.execute(
+                    "SELECT last_modified FROM books WHERE id = 1"
+                ).fetchone()[0],
+                stamp,
+            )
+            self.assertEqual(
+                wdb.conn.execute("SELECT COUNT(*) FROM metadata_dirtied").fetchone()[0],
+                0,
+            )
+
+    def test_requires_a_series(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError) as cm:
+                wdb.set_series_index(2, 1.0)
+            self.assertIn("no series", str(cm.exception))
+
+    def test_none_raises(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertRaises(ValueError, wdb.set_series_index, 1, None)
+
+    def test_composes_inside_a_batch(self):
+        with (
+            self.assertRaises(RuntimeError),
+            WritableCalibreDB(self.db_path) as wdb,
+            wdb.batch(),
+        ):
+            wdb.set_series_index(1, 9.0)
+            raise RuntimeError("roll it back")
+        with sqlite3.connect(self.db_path) as check:
+            self.assertEqual(
+                check.execute("SELECT series_index FROM books WHERE id = 1").fetchone()[
+                    0
+                ],
+                3.0,
+            )

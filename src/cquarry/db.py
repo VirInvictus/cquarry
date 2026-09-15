@@ -23,6 +23,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from collections.abc import Sequence
 from typing import Any, Self
 
@@ -47,6 +48,46 @@ from cquarry.search import (
 
 # Sentinel distinguishing "cache not populated" from a cached None result.
 _UNSET = object()
+
+
+def _snapshot_copy(src_path: str, tmp: str, leash: float = 10.0) -> None:
+    """Snapshot a live database into ``tmp`` through sqlite3's backup API.
+
+    The backup API takes one consistent page image (WAL content folded
+    in), where the earlier hand-rolled main+``-wal``+``-shm`` copy2 could
+    tear when Calibre checkpointed mid-copy -- the same defect shape Wave
+    14 flagged in CalibreQuarry's own backup. Python's backup retries a
+    busy source forever, so the copy runs on a leash: a writer holding the
+    lock past ``leash`` seconds trips the fallback to the raw file trio,
+    trading the tear risk back for that pathological case rather than
+    hanging the reader.
+    """
+    deadline = time.monotonic() + leash
+
+    def _leash(_status: int, _remaining: int, _total: int) -> None:
+        # Invoked per backup step, busy steps included; raising is how a
+        # caller aborts Python's internal busy-retry loop.
+        if time.monotonic() > deadline:
+            raise TimeoutError("snapshot backup leash tripped")
+
+    src = sqlite3.connect(db_uri_ro(src_path), uri=True)
+    dst = sqlite3.connect(tmp)
+    consistent = False
+    try:
+        try:
+            src.backup(dst, progress=_leash)
+            consistent = True
+        except TimeoutError, sqlite3.Error:
+            pass  # leashed or failed: the fallback below takes over
+    finally:
+        dst.close()
+        src.close()
+    if not consistent:
+        shutil.copy2(src_path, tmp)
+        for suffix in ("-wal", "-shm"):
+            side = src_path + suffix
+            if os.path.exists(side):
+                shutil.copy2(side, tmp + suffix)
 
 
 _DUPLICATE_ARTICLE_RE = re.compile(r"^(the|a|an)\s+", re.IGNORECASE)
@@ -108,6 +149,11 @@ class CalibreDB:
     engine can resolve expressions against this library.
     """
 
+    #: Seconds a held write lock may delay the lock-escape snapshot before
+    #: it degrades to the raw file copy (see :func:`_snapshot_copy`). Class
+    #: attribute so embedders and tests can tune it.
+    SNAPSHOT_LEASH = 10.0
+
     def __init__(self, db_path: str):
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Database not found: {db_path}")
@@ -138,6 +184,8 @@ class CalibreDB:
         self._prefs_cache: dict[str, Any] | None = None
         self._cc_schema_cache: dict[str, bool] | None = None
         self._annotations_text_cache: dict[int, str] | None = None
+        # PRAGMA data_version at last observation (external_changes_detected).
+        self._data_version: int | None = None
         # FTS sidecar (full-text-search.db) connection state; refresh()
         # drops it so sidecar reads re-open against current data.
         self._fts_conn: sqlite3.Connection | None = None
@@ -181,7 +229,8 @@ class CalibreDB:
             conn.close()
             if "locked" not in str(e).lower():
                 raise
-        # Calibre has the DB locked — copy to a temp file and read from there
+        # Calibre has the DB locked — snapshot through the backup API and
+        # read from the copy.
         print(
             "NOTE: Database is locked (Calibre is running). "
             "Reading from a snapshot copy.",
@@ -189,12 +238,7 @@ class CalibreDB:
         )
         fd, tmp = tempfile.mkstemp(suffix=".db", prefix="cquarry_")
         os.close(fd)
-        shutil.copy2(db_path, tmp)
-        # Also copy the WAL and SHM files if they exist so the snapshot is consistent
-        for suffix in ("-wal", "-shm"):
-            src = db_path + suffix
-            if os.path.exists(src):
-                shutil.copy2(src, tmp + suffix)
+        _snapshot_copy(db_path, tmp, self.SNAPSHOT_LEASH)
         self._tmp_path = tmp
         return sqlite3.connect(db_uri_ro(tmp), uri=True)
 
@@ -213,6 +257,52 @@ class CalibreDB:
                 for suffix in ("", "-wal", "-shm"):
                     os.unlink(self._fts_tmp_path + suffix)
             self._fts_tmp_path = None
+
+    def backup_to(self, dest: str) -> str:
+        """Copy the library's ``metadata.db`` to ``dest`` as one consistent
+        snapshot, via sqlite3's backup API (1.23).
+
+        A plain file copy of main+``-wal``+``-shm`` can tear when Calibre
+        checkpointed mid-copy; the backup API cannot. ``dest`` is created
+        (an existing file is replaced wholesale) and returned as the
+        absolute path. When this connection rides a locked-database
+        snapshot copy, the snapshot is what gets copied -- reopen for a
+        copy of the live file. Consumers backing up a library
+        (CalibreQuarry's ``--backup`` shape) belong here instead of
+        re-deriving the copy.
+        """
+        dest = os.path.abspath(os.path.expanduser(dest))
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        dst = sqlite3.connect(dest)
+        try:
+            self.conn.backup(dst)
+        finally:
+            dst.close()
+        return dest
+
+    def external_changes_detected(self) -> bool:
+        """True when another connection has committed writes to this
+        database file since this connection last looked (1.23), via
+        ``PRAGMA data_version``.
+
+        The cheap staleness token: long-lived holders (Hermitage, Carrel)
+        poll this between user actions and call :meth:`refresh()` only when
+        it answers True, instead of clearing every cache defensively. The
+        answer stays True until a :meth:`refresh()` re-primes the baseline,
+        so a polling loop cannot miss a change by reading twice. This
+        connection's own reads never move the value; on a locked-database
+        snapshot connection it can never answer True at all (the copy is
+        isolated from the live file), which is exactly the reopen boundary
+        :meth:`refresh` documents.
+        """
+        row = self.conn.execute("PRAGMA data_version").fetchone()
+        version = row[0]
+        if self._data_version is None:
+            self._data_version = version  # first observation primes only
+            return False
+        return version != self._data_version
 
     def __enter__(self) -> Self:
         return self
@@ -1558,11 +1648,7 @@ class CalibreDB:
         )
         fd, tmp = tempfile.mkstemp(suffix=".db", prefix="cquarry_fts_")
         os.close(fd)
-        shutil.copy2(path, tmp)
-        for suffix in ("-wal", "-shm"):
-            src = path + suffix
-            if os.path.exists(src):
-                shutil.copy2(src, tmp + suffix)
+        _snapshot_copy(path, tmp, self.SNAPSHOT_LEASH)
         self._fts_tmp_path = tmp
         self._fts_conn = sqlite3.connect(db_uri_ro(tmp), uri=True)
         self._fts_conn.row_factory = sqlite3.Row
@@ -1841,25 +1927,64 @@ class CalibreDB:
         book has no annotations or the schema predates the table. Within a
         stored ``searchable_text``, an annotation's notes follow its
         highlighted text joined by ``\n\x1f\n`` (LF, ASCII unit separator,
-        LF; upstream ``annot_db_data``).
+        LF; upstream ``annot_db_data``). The map loads in ONE query for the
+        whole library (the per-book query was an N+1: one annotations:
+        token swept the library one probe per book).
         """
         if self._annotations_text_cache is None:
-            self._annotations_text_cache = {}
-        if book_id not in self._annotations_text_cache:
-            parts: list[str] = []
+            rows: dict[int, list[str]] = {}
             try:
                 cur = self.conn.cursor()
                 cur.execute(
-                    "SELECT searchable_text FROM annotations "
-                    "WHERE book = ? AND searchable_text IS NOT NULL "
-                    "ORDER BY id",
-                    (book_id,),
+                    "SELECT book, searchable_text FROM annotations "
+                    "WHERE searchable_text IS NOT NULL ORDER BY id"
                 )
-                parts = [r[0] for r in cur.fetchall() if r[0]]
+                for r in cur.fetchall():
+                    if r[1]:
+                        rows.setdefault(r[0], []).append(r[1])
             except sqlite3.OperationalError:
-                pass
-            self._annotations_text_cache[book_id] = "\n".join(parts)
-        return self._annotations_text_cache[book_id]
+                pass  # schema predates the table
+            self._annotations_text_cache = {
+                book: "\n".join(parts) for book, parts in rows.items()
+            }
+        return self._annotations_text_cache.get(book_id, "")
+
+    def get_annotations_decoded(
+        self, book_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """The renderer-facing annotation view (1.23): Calibre's raw
+        annotations rows projected onto the fields a detail pane shows.
+
+        One dict per annotation carrying ``book``, ``format``, ``kind``
+        (the raw ``annot_type``), ``annot_id``, ``timestamp``, and the
+        decoded payload's ``text`` (the highlighted passage), ``notes``,
+        and ``title`` (bookmarks), each None when the payload lacks it.
+        Renders the same content :meth:`get_annotations` returns without
+        every consumer re-learning ``annot_data``'s shape. Empty list on
+        schemas predating the table.
+        """
+        out: list[dict[str, Any]] = []
+        for row in self.get_annotations(book_id):
+            data = row.get("annot_data")
+            if not isinstance(data, dict):
+                data = {}
+
+            def _str(value: Any) -> str | None:
+                return value if isinstance(value, str) else None
+
+            out.append(
+                {
+                    "book": row.get("book"),
+                    "format": row.get("format"),
+                    "kind": row.get("annot_type"),
+                    "annot_id": row.get("annot_id"),
+                    "timestamp": row.get("timestamp"),
+                    "text": _str(data.get("text")),
+                    "notes": _str(data.get("notes")),
+                    "title": _str(data.get("title")),
+                }
+            )
+        return out
 
     # --- Search & virtual library resolution ---
 

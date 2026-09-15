@@ -42,6 +42,7 @@ __all__ = [
     "find_invalid_uuids",
     "find_low_res_covers",
     "find_missing_cover_files",
+    "find_missing_format_files",
     "find_sentinel_pubdates",
     "find_series_gaps",
     "find_unrated",
@@ -96,6 +97,31 @@ def find_missing_cover_files(db: CalibreDB) -> list[int]:
             continue
         if db.get_cover_path(b["id"]) is None:
             out.append(b["id"])
+    return sorted(out)
+
+
+def find_missing_format_files(db: CalibreDB) -> list[int]:
+    """Books with a catalogued format whose file is absent on disk.
+
+    Closes the integrity family's last disk hole: :func:`find_formatless`
+    catches books with no ``data`` rows, :func:`find_missing_cover_files`
+    the cover, and this one the format rows whose file is gone (deleted by
+    hand, a moved library, a partial restore) while the catalog keeps
+    offering it. Rides :meth:`CalibreDB.get_format_path`'s
+    verified-by-default resolution, the same way the cover checks ride
+    ``get_cover_path``. Books with an empty ``books.path`` are skipped:
+    there is nowhere to look, so the check cannot be contradicted (the
+    same rule as the cover check)."""
+    out: list[int] = []
+    for b in _books(db):
+        if not b["path"] or not b["formats"]:
+            continue
+        for fmt in b["formats"]:
+            try:
+                db.get_format_path(b["id"], fmt)
+            except FileNotFoundError:
+                out.append(b["id"])
+                break
     return sorted(out)
 
 
