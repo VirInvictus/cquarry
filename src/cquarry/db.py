@@ -827,6 +827,30 @@ class CalibreDB:
         """)
         return [(row["name"], row["count"]) for row in cur.fetchall()]
 
+    def precedent_tags(self, authors: list[str], limit: int = 12) -> list[str]:
+        """Tag-by-precedent: distinct tags across the named authors' books.
+
+        The curation prompt's suggestion source (a fresh import carries no
+        tags; the same author's catalogued books do). Authors match
+        case-insensitively; the result is capped at ``limit`` names,
+        alphabetically ordered for stability. Promoted from
+        CalibreQuarry's run.py (1.22): a four-table JOIN is an engine
+        read, not frontend logic.
+        """
+        if not authors:
+            return []
+        marks = ",".join("?" * len(authors))
+        rows = self.conn.execute(
+            f"SELECT DISTINCT t.name FROM books_tags_link l "
+            f"JOIN tags t ON t.id = l.tag "
+            f"JOIN books_authors_link al ON al.book = l.book "
+            f"JOIN authors a ON a.id = al.author "
+            f"WHERE a.name COLLATE NOCASE IN ({marks}) "
+            f"ORDER BY t.name LIMIT ?",
+            (*authors, limit),
+        ).fetchall()
+        return [row[0] for row in rows]
+
     _LIST_BOOKS_SORT_KEYS = (
         "sort",
         "title",

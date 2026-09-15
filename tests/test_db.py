@@ -2081,5 +2081,69 @@ class TestCustomSeriesIndex(unittest.TestCase):
         self.assertEqual(self.db.field(1, "#old"), "Ancient")
 
 
+class TestPrecedentTags(unittest.TestCase):
+    """precedent_tags: the tag-by-precedent suggestion read (1.22).
+
+    Promoted verbatim from CalibreQuarry's run.py phase-3 prompt, which
+    had grown the only raw four-table JOIN in a consumer: an engine read
+    belongs here. Two deltas from the promoted form, both deliberate:
+    results are ORDER BY name (the original relied on SQLite's arbitrary
+    DISTINCT order) and the limit is a parameter (was a hardcoded 12).
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY,
+                book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY,
+                book INTEGER, tag INTEGER);
+            INSERT INTO authors VALUES (1, 'Herbert, Frank'),
+                (2, 'herbert, frank'), (3, 'Austen, Jane');
+            INSERT INTO books VALUES (1), (2), (3);
+            INSERT INTO books_authors_link VALUES (1, 1, 1), (2, 2, 2),
+                (3, 3, 3);
+            INSERT INTO tags VALUES (1, 'Fic.SciFi'), (2, 'Dune'),
+                (3, 'Fic.Classic');
+            INSERT INTO books_tags_link VALUES (1, 1, 1), (2, 1, 2),
+                (3, 2, 2), (4, 3, 3);
+            """
+        )
+        conn.commit()
+        conn.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_distinct_tags_across_an_authors_books(self):
+        self.assertEqual(
+            self.db.precedent_tags(["Herbert, Frank"]), ["Dune", "Fic.SciFi"]
+        )
+
+    def test_author_match_is_case_insensitive(self):
+        # Both spellings link books carrying Dune; NOCASE resolves them
+        # to the same author set (the promoted JOIN's COLLATE NOCASE).
+        self.assertEqual(
+            self.db.precedent_tags(["HERBERT, FRANK"]), ["Dune", "Fic.SciFi"]
+        )
+
+    def test_unknown_author_yields_nothing(self):
+        self.assertEqual(self.db.precedent_tags(["Nobody, Alice"]), [])
+
+    def test_empty_authors_short_circuits(self):
+        self.assertEqual(self.db.precedent_tags([]), [])
+
+    def test_limit_caps_the_result(self):
+        self.assertEqual(self.db.precedent_tags(["Herbert, Frank"], limit=1), ["Dune"])
+
+
 if __name__ == "__main__":
     unittest.main()
