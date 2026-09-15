@@ -1190,3 +1190,96 @@ class TestDateOverflowGuard(unittest.TestCase):
     def test_large_but_valid_daysago_still_matches(self):
         # 30000 days is ~82 years back (1944): every fixture book follows.
         self.assertEqual(self.s("pubdate:>30000daysago"), {1, 2, 3, 4})
+
+
+class TestQuotedCustomColumnContains(unittest.TestCase):
+    """The Hermitage live-finding pin (recorded 2026-09-15): quotes in
+    Calibre grammar shield the token from the lexer; they NEVER imply
+    exact matching. `#reading_status:"Read"` contains-matches every value
+    holding the word ('Read', 'To Read', 'Reading' -- all 7,874 books in
+    the live library, since every status contains 'read'); exact needs
+    `#reading_status:=Read`. Upstream behaves the same way; recorded as
+    deliberate semantics, not a bug."""
+
+    @classmethod
+    def setUpClass(cls):
+        fd, cls.path = tempfile.mkstemp(suffix=".db", prefix="cq_quote_")
+        os.close(fd)
+        con = sqlite3.connect(cls.path)
+        con.executescript(_SCHEMA)
+        cur = con.cursor()
+        cur.executemany(
+            "INSERT INTO books (id,title,sort,author_sort,timestamp,pubdate,"
+            "has_cover,last_modified,series_index,path,uuid)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (n, f"Book {n}", f"Book {n}", "A", "2020-01-0%d" % n, "2000-01-01",
+                 0, "2020-01-0%d" % n, 1.0, f"p{n}", "u%d" % n)
+                for n in (1, 2, 3)
+            ],
+        )
+        cur.execute(
+            "INSERT INTO custom_columns (id,label,name,datatype,is_multiple)"
+            " VALUES (9,'reading_status','Reading Status','enumeration',0)"
+        )
+        # The live incident's value distribution: To Read >> Read > Reading.
+        for val_id, text in ((1, "Read"), (2, "To Read"), (3, "Reading")):
+            cur.execute(
+                "INSERT INTO custom_column_1 (id,value) VALUES (?,?)",
+                (val_id, text),
+            )
+        for book, val_id in ((1, 1), (2, 2), (3, 3)):
+            cur.execute(
+                "INSERT INTO books_custom_column_1_link (book,value)"
+                " VALUES (?,?)",
+                (book, val_id),
+            )
+        # Retarget the shared schema's #status probes: the quoted test uses
+        # label 9 only, so fix the link table naming via a dedicated table.
+        con.commit()
+        con.close()
+        # custom_column_1 is the shared schema's fixed table for label 9's
+        # storage? No: the schema ties storage to the column NUMBER, so
+        # column id 9 needs custom_column_9. Rebuild the three values there.
+        con = sqlite3.connect(cls.path)
+        cur = con.cursor()
+        cur.execute("CREATE TABLE custom_column_9 (id INTEGER PRIMARY KEY, value TEXT)")
+        cur.execute(
+            "CREATE TABLE books_custom_column_9_link (book INT, value INT)"
+        )
+        for val_id, text in ((1, "Read"), (2, "To Read"), (3, "Reading")):
+            cur.execute(
+                "INSERT INTO custom_column_9 (id,value) VALUES (?,?)",
+                (val_id, text),
+            )
+        for book, val_id in ((1, 1), (2, 2), (3, 3)):
+            cur.execute(
+                "INSERT INTO books_custom_column_9_link (book,value) VALUES (?,?)",
+                (book, val_id),
+            )
+            cur.execute("DELETE FROM books_custom_column_1_link WHERE book=?", (book,))
+        con.commit()
+        con.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        os.unlink(cls.path)
+
+    def setUp(self):
+        self.db = CalibreDB(self.path)
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_quotes_do_not_imply_exact(self):
+        self.assertEqual(self.db.search('#reading_status:"Read"'), {1, 2, 3})
+        self.assertEqual(self.db.search("#reading_status:Read"), {1, 2, 3})
+
+    def test_exact_prefix_is_the_exact_match(self):
+        self.assertEqual(self.db.search("#reading_status:=Read"), {1})
+        self.assertEqual(self.db.search('#reading_status:="Read"'), {1})
+
+    def test_unread_word_matches_only_the_none_value_book(self):
+        # 'To Read' is book 2's value; 'unread' matches nothing here, the
+        # presence test stays word-based.
+        self.assertEqual(self.db.search("#reading_status:unread"), set())
