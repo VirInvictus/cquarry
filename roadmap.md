@@ -1846,3 +1846,8 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
   actively rejects tag deployments, per the 1.22.0 erratum),
   schema_version() (requester-less), the Hermitage manifest's
   forward-only tagging policy (that repo's gate).
+- **Cascade verification (2026-09-15, post-1.23.0):** all four consumer
+  suites ran green with cquarry@main forced onto the path --
+  CalibreQuarry 559 passed, bindery-cli 445 passed, Hermitage 100
+  passed, Carrel-calibre-web 86 OK in its deployment venv. No
+  downstream patching owed; the floor ranges already admit 1.23.0.
