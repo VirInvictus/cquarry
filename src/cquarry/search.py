@@ -1063,7 +1063,7 @@ class SearchEngine:
             if val is not None:
                 try:
                     val = float(val)
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     continue
             if pred(val):
                 out.add(b)
@@ -1212,7 +1212,7 @@ class SearchEngine:
                             if float(val) == n:
                                 out.add(b)
                                 break
-                        except TypeError, ValueError:
+                        except (TypeError, ValueError):
                             continue
         return out
 

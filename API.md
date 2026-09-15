@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.18.0
+**Version:** 1.18.0+py313.1
 
 ## Public API
 

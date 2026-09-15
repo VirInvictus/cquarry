@@ -1,3 +1,32 @@
+## v1.18.0+py313.1 (2026-09-15)
+
+### The Python 3.13 compatibility branch (the Hermitage Flatpak ledger)
+
+Hermitage's Flatpak manifest pins cquarry 132aa2c (= 1.18.0), which
+cannot build on the GNOME 50 runtime's Python 3.13: this line requires
+Python >=3.14 and used PEP 758 bare except-groups (`except A, B:`),
+a SyntaxError on 3.13. Recorded decision #81 chose an upstream compat
+branch over a runtime bump.
+
+- Branch `compat-py313`, cut from 132aa2c (1.18.0), NOT from main:
+  main's 1.19-1.23 line stays Python 3.14+ by contract.
+- `requires-python >=3.13`.
+- The seven bare except-groups parenthesized (verified count at the
+  branch point: db.py x2, helpers.py x1, search.py x2, write.py x2;
+  the recorded count of eight was off by one). No other 3.14-only
+  syntax exists on this line.
+- Distinct version series `1.18.0+py313.x` (PEP 440 local version), so
+  a branch build can never be confused with a mainline release; the
+  version-sync guard's carriers all agree on it.
+- The publish workflow's tag trigger is defused (`v-disabled-*`): the
+  compat line never publishes to PyPI (PyPI stays 3.14-only;
+  Hermitage's Flatpak pins a commit, and a `+local` version is not
+  uploadable anyway).
+
+Mainline consumers (CalibreQuarry, bindery-cli, Carrel-calibre-web)
+are unaffected: PyPI remains the 3.14+ line. Hermitage's manifest pin
+moves to this branch's HEAD under cross-repo grant #117.
+
 ## v1.18.0 (2026-09-12)
 
 ### Phase 13: the upstream comparison (FTS reads, search honesty, write completions)

@@ -116,7 +116,7 @@ def _same_instant(current: str | None, new: str) -> bool:
         return False
     try:
         return datetime.fromisoformat(current) == datetime.fromisoformat(new)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return False
 
 
@@ -1181,7 +1181,7 @@ class WritableCalibreDB:
         meta = dict(row)
         try:
             meta["display"] = json.loads(meta["display"]) if meta["display"] else {}
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             meta["display"] = {}
         return meta
 

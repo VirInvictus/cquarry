@@ -1251,7 +1251,7 @@ class CalibreDB:
                 return None
             try:
                 return json.loads(row["val"])
-            except json.JSONDecodeError, TypeError:
+            except (json.JSONDecodeError, TypeError):
                 return None
 
         hidden = _pref("virt_libs_hidden")
@@ -2066,7 +2066,7 @@ class CalibreDB:
         if location not in self._custom_val_cache:
             try:
                 self._custom_val_cache[location] = self.load_custom_column(col["name"])
-            except ValueError, sqlite3.OperationalError:
+            except (ValueError, sqlite3.OperationalError):
                 self._custom_val_cache[location] = {}
         val = self._custom_val_cache[location].get(book_id)
         if val is None:
