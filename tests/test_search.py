@@ -1213,8 +1213,19 @@ class TestQuotedCustomColumnContains(unittest.TestCase):
             "has_cover,last_modified,series_index,path,uuid)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [
-                (n, f"Book {n}", f"Book {n}", "A", "2020-01-0%d" % n, "2000-01-01",
-                 0, "2020-01-0%d" % n, 1.0, f"p{n}", "u%d" % n)
+                (
+                    n,
+                    f"Book {n}",
+                    f"Book {n}",
+                    "A",
+                    f"2020-01-0{n}",
+                    "2000-01-01",
+                    0,
+                    f"2020-01-0{n}",
+                    1.0,
+                    f"p{n}",
+                    f"u{n}",
+                )
                 for n in (1, 2, 3)
             ],
         )
@@ -1230,8 +1241,7 @@ class TestQuotedCustomColumnContains(unittest.TestCase):
             )
         for book, val_id in ((1, 1), (2, 2), (3, 3)):
             cur.execute(
-                "INSERT INTO books_custom_column_1_link (book,value)"
-                " VALUES (?,?)",
+                "INSERT INTO books_custom_column_1_link (book,value) VALUES (?,?)",
                 (book, val_id),
             )
         # Retarget the shared schema's #status probes: the quoted test uses
@@ -1244,9 +1254,7 @@ class TestQuotedCustomColumnContains(unittest.TestCase):
         con = sqlite3.connect(cls.path)
         cur = con.cursor()
         cur.execute("CREATE TABLE custom_column_9 (id INTEGER PRIMARY KEY, value TEXT)")
-        cur.execute(
-            "CREATE TABLE books_custom_column_9_link (book INT, value INT)"
-        )
+        cur.execute("CREATE TABLE books_custom_column_9_link (book INT, value INT)")
         for val_id, text in ((1, "Read"), (2, "To Read"), (3, "Reading")):
             cur.execute(
                 "INSERT INTO custom_column_9 (id,value) VALUES (?,?)",
