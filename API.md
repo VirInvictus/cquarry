@@ -103,7 +103,7 @@ All of these degrade to `[]`/`{}` on databases whose schema predates the tables;
 | Method | Description |
 |--------|-------------|
 | `close()` | Close the database connection and remove any temporary snapshot files. |
-| `refresh()` | Drop every cache (rows, ids, search view and engine, preferences, custom columns, path index) so subsequent reads re-query the database; the coherence boundary for long-lived holders after an external write (since 1.16.0). |
+| `refresh()` | Drop every cache (rows, ids, search view and engine, preferences, custom columns, path index) so subsequent reads re-query the database; the coherence boundary for long-lived holders after an external write (since 1.16.0). One boundary: when the connection rides a locked-database snapshot copy, the snapshot is NOT retaken -- the next read still answers from the copy taken at open time; reopen the `CalibreDB` for truly current data in that situation. |
 | `__enter__()` / `__exit__()` | Context manager support. Calls `close()` on exit. |
 
 #### Composed reads
@@ -197,7 +197,7 @@ Utility functions used across the ecosystem. All are importable from `cquarry.he
 
 | Function | Returns | Description |
 |----------|-----------|-------------|
-| `find_db(explicit=None)` | `str` | Locate `metadata.db` through a resolution chain: explicit argument, saved config (`~/.config/cquarry/config.json`), default paths (`./metadata.db`, `~/Calibre Library/metadata.db`, `~/calibre/metadata.db`), then an interactive TTY prompt. Raises `FileNotFoundError` if nothing is found. |
+| `find_db(explicit=None)` | `str` | Locate `metadata.db` through a resolution chain: explicit argument, saved config (`~/.config/cquarry/config.json`), default paths (`./metadata.db`, `~/Calibre Library/metadata.db`, `~/calibre/metadata.db`), then an interactive TTY prompt. Raises `FileNotFoundError` if nothing is found. Side effect (since 1.8): a default-path hit is persisted to the config automatically, as are interactive-prompt answers; an explicit argument is never persisted. |
 | `title_sort(title)` | `str` | Generate Calibre's title sort key by moving leading articles ('The ', 'A ', 'An ') to the end of the string. |
 | `db_uri_ro(path)` | `str` | Build a percent-encoded read-only SQLite `file:` URI. Handles paths containing `?` or `#` that would otherwise be parsed as URI syntax. |
 
@@ -392,7 +392,7 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 | `^` | Accent-folded substring |
 | `\` | Escape the next character (treat literally) |
 
-*(Note: Tristate keywords `true`/`false`, `checked`/`unchecked`, `blank`/`empty`, and `_`-prefixed variants are supported for presence/absence on numeric and rating fields; anything else on a boolean location raises `ParseException` (since 1.16.0, upstream parity). An empty query after ANY location matches nothing, never everything (since 1.16.0). Dates accept both `-` and `/` separators, and undefined date sentinels (`0101-01-01`, `0100-01-01`) evaluate as `None`. Multi-token queries in `languages:` split on commas and canonicalize each independently; two-letter ISO 639-1 codes canonicalize too (`languages:ja` matches `jpn`).)*
+*(Note: presence vocabulary is split by datatype (since 1.18.0, upstream parity): numeric, rating, and date locations take exactly `true`/`false` as presence/absence words, and any other word must parse as a number or date or the query raises `ParseException`. Boolean locations are the ones that accept the full tristate set: `true`/`yes`/`checked`, `false`/`no`/`unchecked`/`blank`/`empty`, and the `_`-prefixed variant of each; anything else on a boolean location raises. An empty query after ANY location matches nothing, never everything (since 1.16.0). Dates accept both `-` and `/` separators, and undefined date sentinels (`0101-01-01`, `0100-01-01`) evaluate as `None`. Multi-token queries in `languages:` split on commas and canonicalize each independently; two-letter ISO 639-1 codes canonicalize too (`languages:ja` matches `jpn`).)*
 
 
 ### Field locations
@@ -427,7 +427,7 @@ cquarry implements a three-stage pipeline (lexer, recursive-descent parser, cand
 | `vl` | | virtual library | Cross-reference: `vl:"Wing Name"` |
 | `search` | | saved search | Cross-reference: `search:"Saved Name"` |
 | `@Name` | | user category | Books holding any member value: `@Favorites:true`; leading `.` includes subcategories, `false` inverts |
-| `all` | *(bare terms)* | | Searches title, authors, author_sort, series, publisher, tags, comments, formats, languages (canonicalized) + custom text columns; identifier KEYS sweep as text; numeric fields are probed by exact equality (dates match nothing) |
+| `all` | *(bare terms)* | | Searches title, authors, author_sort, series, publisher, tags, comments, formats, languages (canonicalized) + custom text columns; a bare term never text-matches identifier keys or values (the identifiers store joins only the `true`/`false` presence test); numeric fields are probed by exact equality (dates match nothing) |
 
 Multi-valued locations additionally accept the count operator: `tags:#>3`, `identifiers:#=0`, `formats:#<5`.
 

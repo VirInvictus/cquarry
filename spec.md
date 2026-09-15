@@ -30,7 +30,7 @@ These are invariants. Violating any of them is a spec breach.
 
 **Connection management.** The constructor takes a path to `metadata.db`, opens it read-only via a percent-encoded `file:` URI (§3.4), and issues a `SELECT 1 FROM books LIMIT 1` probe. If the probe raises `OperationalError` with "locked" in the message, the constructor copies the database (and its `-wal`/`-shm` sidecars) to a temp file and opens the copy instead, printing a notice to stderr. The temp path is stored and cleaned up by `close()`.
 
-**Caching.** `get_all_books()` executes a 6-JOIN query over `books` (series, ratings, publishers) and hydrates the list-type fields in Python from per-table reads; the result is cached. `get_virtual_libraries()` reads the `preferences` table once and caches the dict. `count_books()` uses the books cache or the all-IDs cache if either is populated, falling back to a raw `COUNT(*)`. All caches are populated lazily on first access and are otherwise never invalidated (the database is read-only and the connection is short-lived); `refresh()` (cquarry >= 1.16) clears them all in one call, giving long-lived holders a coherence boundary after an external write. To prevent memory exhaustion on large libraries, massive text blocks like `comments` and custom columns of type `comments` are strictly lazy-loaded on-demand per book ID rather than eager-loaded during search view construction.
+**Caching.** `get_all_books()` executes a 6-JOIN query over `books` (series, ratings, publishers) and hydrates the list-type fields in Python from per-table reads; the result is cached. `get_virtual_libraries()` reads the `preferences` table once and caches the dict. `count_books()` uses the books cache or the all-IDs cache if either is populated, falling back to a raw `COUNT(*)`. All caches are populated lazily on first access and are otherwise never invalidated (the database is read-only and the connection is short-lived); `refresh()` (cquarry >= 1.16) clears them all in one call, giving long-lived holders a coherence boundary after an external write. One boundary: when the connection itself rides a locked-database snapshot copy (§3.4), the snapshot is NOT retaken -- the next read still answers from the copy taken at open time, and a holder wanting truly current data reopens the `CalibreDB`. To prevent memory exhaustion on large libraries, massive text blocks like `comments` and custom columns of type `comments` are strictly lazy-loaded on-demand per book ID rather than eager-loaded during search view construction.
 
 **Custom column dispatch.** `load_custom_column()` checks `sqlite_master` for the existence of `books_custom_column_N_link` to decide between the normalized path (text, enumeration, series, rating: value table joined through a link table) and the direct path (int, float, bool, datetime, comments: value table with a `book` column). This is safer than keying off `is_multiple`, because a single-valued enumeration is normalized but not multi-valued. Multi-valued columns yield native `list[str]` values end to end (cquarry >= 1.16): the old comma-join-on-load, re-split-on-use round-trip turned stored values like `Doe, John` into phantom values.
 
@@ -90,7 +90,7 @@ For `token` nodes, the evaluator dispatches to a type-specific matcher based on 
 
 Domain-specific utilities shared across the ecosystem. These are public API; downstream consumers import them.
 
-- **Database discovery** (`find_db`): a four-stage resolution chain (explicit arg, saved config, default paths, interactive prompt).
+- **Database discovery** (`find_db`): a four-stage resolution chain (explicit arg, saved config, default paths, interactive prompt). A default-path hit and an interactive-prompt answer are persisted to the config as a side effect; an explicit argument is never persisted.
 - **Rating conversion** (`normalize_rating`, alias `calibre_rating_to_stars`, `format_stars`): Calibre stores ratings on a 0-10 scale; the portfolio displays them on 0.0-5.0 with Unicode star glyphs.
 - **Author formatting** (`normalize_author_display`, `author_sort_key`): comma-separated to ampersand-joined display, with a `primary_only` mode.
 - **Series analysis** (`detect_series_gaps`): given a series' known indices, return the missing integers.
@@ -167,7 +167,7 @@ Canonical locations, their datatypes, and recognized aliases. Custom columns are
 | `identifiers` | identifiers | `identifier`, `ids`, `isbn` |
 | `cover` | bool | |
 
-The special locations `vl:"Name"` and `search:"Name"` cross-reference virtual libraries and saved searches. `@Name` searches a user-defined tag-browser category (see §3.2). The `all` pseudo-location (used for bare terms) searches: `title`, `authors`, `author_sort`, `series`, `publisher`, `tags`, `comments`, plus every custom column whose engine datatype is text-like.
+The special locations `vl:"Name"` and `search:"Name"` cross-reference virtual libraries and saved searches. `@Name` searches a user-defined tag-browser category (see §3.2). The `all` pseudo-location (used for bare terms) searches: `title`, `authors`, `author_sort`, `series`, `publisher`, `tags`, `comments`, `formats`, `languages` (canonicalized), plus every custom column whose engine datatype is text-like.
 
 ## 5. Documented deviations from Calibre
 
