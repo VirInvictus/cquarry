@@ -3113,3 +3113,168 @@ class TestCustomColumnSchema(unittest.TestCase):
         with self.assertRaises(ValueError):
             wdb.delete_custom_column("#gone")
         wdb.close()
+
+
+class TestSetFormatSizeCast(unittest.TestCase):
+    """set_format stores sizes as integers, mirroring add_format (L2.2):
+    a float size used to land a REAL in uncompressed_size."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                timestamp TEXT, last_modified TEXT, path TEXT);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,
+                format TEXT, uncompressed_size INTEGER, name TEXT);
+            """
+        )
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'One')")
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_float_size_stores_an_integer_row(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.add_format(1, "EPUB", "stem", 1234))
+            self.assertTrue(wdb.set_format(1, "EPUB", "stem2", 2048.0))
+            row = wdb.conn.execute(
+                "SELECT uncompressed_size, typeof(uncompressed_size) FROM data"
+            ).fetchone()
+        self.assertEqual(row[0], 2048)
+        self.assertEqual(row[1], "integer")
+
+
+class TestCustomColumnBoolVocabulary(unittest.TestCase):
+    """The writer accepts the engine's exact tristate vocabulary (L2.3):
+    `_blank` reads as false in search but used to raise on write."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                timestamp TEXT, last_modified TEXT, path TEXT);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT,
+                name TEXT, datatype TEXT, is_multiple INTEGER,
+                editable INTEGER, display TEXT);
+            CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY,
+                book INTEGER, value INTEGER, UNIQUE(book));
+            """
+        )
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'One')")
+        conn.execute(
+            "INSERT INTO custom_columns VALUES (2, 'flag', 'Flag', 'bool', 0, 1, '{}')"
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_every_engine_word_round_trips(self):
+        from cquarry.search import BOOL_FALSE_WORDS, BOOL_TRUE_WORDS
+
+        with WritableCalibreDB(self.db_path) as wdb:
+
+            def stored():
+                return wdb.conn.execute(
+                    "SELECT value FROM custom_column_2 WHERE book = 1"
+                ).fetchone()[0]
+
+            for word in sorted(BOOL_TRUE_WORDS):
+                # Flip first: every word must land as a real write, not an
+                # equal-value honest no-op (the writer returns False then).
+                wdb.set_custom_column(1, "flag", "false")
+                self.assertTrue(wdb.set_custom_column(1, "flag", word), word)
+                self.assertEqual(stored(), 1, word)
+            for word in sorted(BOOL_FALSE_WORDS):
+                wdb.set_custom_column(1, "flag", "true")
+                self.assertTrue(wdb.set_custom_column(1, "flag", word), word)
+                self.assertEqual(stored(), 0, word)
+
+    def test_unknown_word_still_raises(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertRaises(ValueError, wdb.set_custom_column, 1, "flag", "maybe")
+
+
+class TestCustomColumnMetaOldSchema(unittest.TestCase):
+    """_custom_column_meta raises the house ValueError on schemas predating
+    the editable/display columns (L2.6), not a raw OperationalError."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                timestamp TEXT, last_modified TEXT, path TEXT);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT,
+                name TEXT, datatype TEXT, is_multiple INTEGER);
+            INSERT INTO custom_columns VALUES (2, 'flag', 'Flag', 'bool', 0);
+            """
+        )
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'One')")
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_write_raises_house_valueerror(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError) as cm:
+                wdb.set_custom_column(1, "flag", "true")
+            self.assertIn("predates", str(cm.exception))
+
+
+class TestTrashNeverMaterializes(unittest.TestCase):
+    """L2 polish: empty/expire on a library with no trash must not
+    materialize a .caltrash tree."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+        conn.commit()
+        conn.close()
+        self.trash = os.path.join(self.temp_dir, ".caltrash")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_empty_operations_never_materialize_trash(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertEqual(wdb.empty_trash(), 0)
+            self.assertEqual(wdb.expire_trash(), 0)
+        self.assertFalse(os.path.isdir(self.trash))
+
+
+class TestUuid4FreshPerCall(unittest.TestCase):
+    """uuid4 is registered non-deterministic on purpose (L2.4): a
+    deterministic SQL function may return a reused value within one
+    statement, and a UUID must be fresh on every trigger call."""
+
+    def test_two_inserts_get_distinct_values(self):
+        temp_dir = tempfile.mkdtemp()
+        db_path = os.path.join(temp_dir, "metadata.db")
+        _make_simple_db(db_path)
+        try:
+            with WritableCalibreDB(db_path) as wdb:
+                wdb.conn.execute("INSERT INTO books (title) VALUES ('A')")
+                wdb.conn.execute("INSERT INTO books (title) VALUES ('B')")
+                wdb.conn.commit()
+                vals = [
+                    r[0] for r in wdb.conn.execute("SELECT last_modified FROM books")
+                ]
+            self.assertEqual(len(set(vals)), 2)
+        finally:
+            shutil.rmtree(temp_dir)

@@ -208,6 +208,34 @@ class TestAnalytics(unittest.TestCase):
         # fractions of the library and legitimately exceed 1.0 in total.
         self.assertGreater(sum(genre_distribution(self.db).values()), 1.0)
 
+    def test_genre_distribution_survives_deep_paths(self):
+        # L2 polish: a hostile tag with thousands of dot-segments used to
+        # overflow the stack (the emission recursed per node); it is
+        # iterative now, and the rollup stays correct.
+        deep = ".".join(f"Seg{i}" for i in range(5000))
+        c = self.conn
+        tid = c.execute("INSERT INTO tags (name) VALUES (?)", (deep,)).lastrowid
+        c.execute("INSERT INTO books_tags_link (book, tag) VALUES (2, ?)", (tid,))
+        self.conn.commit()
+        dist = genre_distribution(self.db)
+        self.assertEqual(dist["Seg0"], 0.25)
+        self.assertEqual(dist["Seg0.Seg1"], 0.25)
+        self.assertEqual(dist[deep], 0.25)
+        # The order is still tree-ordered: the parent node precedes every
+        # descendant in the output.
+        keys = list(dist)
+        self.assertLess(keys.index("Seg0"), keys.index("Seg0.Seg1"))
+        self.assertLess(keys.index("Seg0.Seg1"), keys.index(deep))
+
+    def test_genre_distribution_deep_order_matches_reference(self):
+        # The iterative emission must order exactly like the recursive form:
+        # depth-first, parents first, siblings share-descending then name.
+        dist = genre_distribution(self.db)
+        self.assertEqual(
+            list(dist)[:5],
+            ["Fic", "Fic.Fantasy", "Fic.SciFi", "NonFic", "NonFic.History"],
+        )
+
     def test_rating_distribution_ascending_unrated_last(self):
         dist = rating_distribution(self.db)
         self.assertEqual(dist, {3.0: 1, 4.0: 1, "unrated": 2})

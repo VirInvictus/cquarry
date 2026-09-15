@@ -1173,3 +1173,20 @@ class TestUserCategorySearch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDateOverflowGuard(unittest.TestCase):
+    """A gigantic daysago count underflows date's supported range; the
+    parser's error contract is ParseException, never a raw OverflowError
+    (THE FINAL AUDIT L2.1)."""
+
+    def setUp(self):
+        self.s = lambda q: _engine().search(q)
+
+    def test_gigantic_daysago_raises_parse_exception(self):
+        self.assertRaises(ParseException, self.s, "pubdate:100000000000daysago")
+        self.assertRaises(ParseException, self.s, "last_modified:99999999999_daysago")
+
+    def test_large_but_valid_daysago_still_matches(self):
+        # 30000 days is ~82 years back (1944): every fixture book follows.
+        self.assertEqual(self.s("pubdate:>30000daysago"), {1, 2, 3, 4})

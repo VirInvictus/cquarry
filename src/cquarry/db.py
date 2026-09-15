@@ -985,7 +985,6 @@ class CalibreDB:
 
         rows.sort(key=functools.cmp_to_key(_cmp))
 
-        end = offset + limit if limit is not None else None
         return rows[offset:end]
 
     def get_all_series(self) -> list[dict[str, Any]]:
@@ -1170,8 +1169,15 @@ class CalibreDB:
                 f"Custom column '{col_name}' not found. Available (name → #label): "
                 + ", ".join(f"{c['name']} (#{c['label']})" for c in cols.values())
             )
+        if col["datatype"] == "composite":
+            # The documented answer instead of a stderr warning from a
+            # failed value-table probe: composite columns are computed by
+            # Calibre's template engine and have no storage to read.
+            return {}
 
-        cid = col["id"]
+        # int() before any f-string SQL: a corrupt store's TEXT id must hit
+        # the table names as a number, never as raw SQL text.
+        cid = int(col["id"])
         cur = self.conn.cursor()
 
         # Calibre normalizes text/enumeration/series columns into a value table
@@ -2126,7 +2132,7 @@ class CalibreDB:
             if location not in self._custom_val_cache:
                 self._custom_val_cache[location] = {}
             if book_id not in self._custom_val_cache[location]:
-                cid = col["id"]
+                cid = int(col["id"])  # f-string SQL below; never interpolate raw ids
                 try:
                     cur = self.conn.cursor()
                     cur.execute(

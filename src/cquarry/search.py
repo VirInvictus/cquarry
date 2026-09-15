@@ -712,7 +712,13 @@ class _DateQuery:
             return today.replace(day=1), 2
         m = re.match(r"^(\d+)\s*(?:days?ago|_daysago)$", ql)
         if m:
-            return today - timedelta(days=int(m.group(1))), 3
+            try:
+                return today - timedelta(days=int(m.group(1))), 3
+            except OverflowError as e:
+                # A gigantic day count underflows date's supported range;
+                # the module's error contract is ParseException, never a
+                # raw OverflowError escaping the parser.
+                raise ParseException(f"Date out of range in query: {q!r}") from e
         # Calibre also accepts slashes as date separators: 2024/06/15.
         parts = q.replace("/", "-").split("-")
         try:
@@ -792,26 +798,24 @@ def _parse_date(raw: str | None) -> date | None:
         return None
 
 
-_BOOL_TRUE = {
-    "true",
-    "yes",
-    "checked",
-    "_true",
-    "_yes",
-    "_checked",
-}
-_BOOL_FALSE = {
-    "false",
-    "no",
-    "unchecked",
-    "blank",
-    "empty",
-    "_false",
-    "_no",
-    "_unchecked",
-    "_blank",
-    "_empty",
-}
+# The boolean (tristate) query vocabulary, upstream's yes/no/checked family
+# plus the `_`-prefixed variants. Shared with the write module so a word the
+# engine reads as false never raises in a setter (and vice versa).
+BOOL_TRUE_WORDS = frozenset({"true", "yes", "checked", "_true", "_yes", "_checked"})
+BOOL_FALSE_WORDS = frozenset(
+    {
+        "false",
+        "no",
+        "unchecked",
+        "blank",
+        "empty",
+        "_false",
+        "_no",
+        "_unchecked",
+        "_blank",
+        "_empty",
+    }
+)
 
 
 # ============================================================================
@@ -1097,9 +1101,9 @@ class SearchEngine:
 
     def _match_bool(self, location, query, candidates) -> set[int]:
         q = query.lower().strip()
-        if q in _BOOL_TRUE:
+        if q in BOOL_TRUE_WORDS:
             return {b for b in candidates if bool(self.provider.field(b, location))}
-        if q in _BOOL_FALSE:
+        if q in BOOL_FALSE_WORDS:
             return {b for b in candidates if not bool(self.provider.field(b, location))}
         # Upstream raises instead of silently matching nothing.
         raise ParseException(f'Invalid boolean query "{q}"')

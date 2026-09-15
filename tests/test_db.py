@@ -2147,3 +2147,61 @@ class TestPrecedentTags(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCustomColumnIdCastAndComposite(unittest.TestCase):
+    """L2.5/L2.12: a corrupt store's TEXT custom_columns.id must never
+    reach f-string SQL raw (the Wave-13 quoted-identifier defense's
+    siblings), and composite columns read as a documented empty (computed,
+    not stored) instead of a stderr warning from a failed table probe."""
+
+    def _make(self, col_id, datatype="text", storage=True):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " author_sort TEXT, timestamp TEXT, pubdate TEXT, has_cover INTEGER,"
+            " last_modified TEXT, series_index REAL, path TEXT)"
+        )
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'One')")
+        conn.execute(
+            "CREATE TABLE custom_columns (id TEXT PRIMARY KEY, label TEXT,"
+            " name TEXT, datatype TEXT, is_multiple INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO custom_columns VALUES (?, 'aud', 'Audience', ?, 1)",
+            (col_id, datatype),
+        )
+        if storage:
+            conn.execute(
+                "CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, value TEXT)"
+            )
+            conn.execute("INSERT INTO custom_column_2 (value) VALUES ('Youth')")
+            conn.execute(
+                "CREATE TABLE books_custom_column_2_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, value INTEGER, UNIQUE(book, value))"
+            )
+            conn.execute(
+                "INSERT INTO books_custom_column_2_link (book, value) VALUES (1, 1)"
+            )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_numeric_text_id_still_resolves(self):
+        self._make("2")
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.load_custom_column("#aud"), {1: ["Youth"]})
+
+    def test_non_numeric_text_id_raises_clean_valueerror(self):
+        self._make("2; DROP TABLE books")
+        with CalibreDB(self.db_path) as db:
+            self.assertRaises(ValueError, db.load_custom_column, "#aud")
+
+    def test_composite_column_reads_as_documented_empty(self):
+        self._make("3", datatype="composite", storage=False)
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.load_custom_column("#aud"), {})

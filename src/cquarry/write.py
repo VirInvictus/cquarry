@@ -46,6 +46,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Self
 
 from cquarry.helpers import sniff_image_format, title_sort
+from cquarry.search import BOOL_FALSE_WORDS, BOOL_TRUE_WORDS
 
 __all__ = ["WritableCalibreDB", "register_udfs", "title_sort", "uuid4"]
 
@@ -72,7 +73,11 @@ def register_udfs(conn: sqlite3.Connection) -> None:
     schema triggers invoke ``title_sort()`` and ``uuid4()`` on insert/update.
     """
     conn.create_function("title_sort", 1, title_sort)
-    conn.create_function("uuid4", 0, uuid4, deterministic=True)
+    # deliberately NOT deterministic=True: SQLite may reuse a deterministic
+    # function's result within one statement, and a UUID must be fresh on
+    # every call. Today's triggers call uuid4() at most once per statement,
+    # but the honest registration costs nothing and survives new callers.
+    conn.create_function("uuid4", 0, uuid4)
     conn.create_collation("PYNOCASE", _pynocase)
 
 
@@ -1495,12 +1500,22 @@ class WritableCalibreDB:
     # -- Custom-column writers --
 
     def _custom_column_meta(self, label: str) -> dict[str, Any]:
-        """One custom_columns row by label (case-insensitive), or ValueError."""
-        row = self.conn.execute(
-            "SELECT id, label, name, datatype, is_multiple, editable, display "
-            "FROM custom_columns WHERE label = ? COLLATE NOCASE",
-            (label.lstrip("#"),),
-        ).fetchone()
+        """One custom_columns row by label (case-insensitive), or ValueError.
+
+        Schemas predating the editable/display columns raise the house
+        ValueError too (the read side degrades with documented defaults; a
+        writer cannot -- it would guess the column's contract)."""
+        try:
+            row = self.conn.execute(
+                "SELECT id, label, name, datatype, is_multiple, editable, display "
+                "FROM custom_columns WHERE label = ? COLLATE NOCASE",
+                (label.lstrip("#"),),
+            ).fetchone()
+        except sqlite3.OperationalError as e:
+            raise ValueError(
+                f"Custom column #{label} is unreadable: the custom_columns "
+                f"table predates the modern schema ({e})"
+            ) from e
         if row is None:
             raise ValueError(f"Custom column #{label} not found")
         meta = dict(row)
@@ -1547,7 +1562,9 @@ class WritableCalibreDB:
         meta = self._custom_column_meta(label)
         if not meta["editable"]:
             raise ValueError(f"Custom column #{label} is not editable")
-        cid = meta["id"]
+        # int() before any f-string SQL: a corrupt store's TEXT id must hit
+        # the table names as a number, never as raw SQL text.
+        cid = int(meta["id"])
         datatype = str(meta["datatype"]).lower()
         if datatype == "composite":
             raise ValueError(
@@ -1684,18 +1701,13 @@ class WritableCalibreDB:
             stored = None
         elif datatype == "bool":
             if isinstance(value, str):
+                # The engine's own tristate vocabulary (cquarry.search
+                # BOOL_TRUE_WORDS/BOOL_FALSE_WORDS): a word search reads as
+                # true/false must not raise here.
                 low = value.strip().lower()
-                if low in ("true", "yes", "checked", "_true", "_yes"):
+                if low in BOOL_TRUE_WORDS:
                     stored = 1
-                elif low in (
-                    "false",
-                    "no",
-                    "unchecked",
-                    "blank",
-                    "empty",
-                    "_false",
-                    "_no",
-                ):
+                elif low in BOOL_FALSE_WORDS:
                     stored = 0
                 else:
                     raise ValueError(f"{value!r} is not a boolean for #{meta['label']}")
@@ -1795,7 +1807,7 @@ class WritableCalibreDB:
                 self._validate_enum(meta, s)
             if s not in items:
                 items.append(s)
-        cid = meta["id"]
+        cid = int(meta["id"])  # f-string SQL below; never interpolate raw ids
         link_table = f"books_custom_column_{cid}_link"
         value_table = f"custom_column_{cid}"
         if not self.conn.execute(
@@ -1996,6 +2008,7 @@ class WritableCalibreDB:
             raise ValueError("Format and name must not be empty")
         if size < 0:
             raise ValueError(f"Format size must not be negative, got {size}")
+        size = int(size)  # uncompressed_size stores integers, like add_format
         # ATTACH must precede the transaction (see _ensure_fts_attached).
         self._ensure_fts_attached()
         self._begin()
@@ -2194,10 +2207,11 @@ class WritableCalibreDB:
         number of trash entries removed."""
         root = self._trash_root()
         count = len(self._trash_entries("b")) + len(self._trash_entries("f"))
-        if os.path.isdir(root):
+        existed = os.path.isdir(root)
+        if existed:
             shutil.rmtree(root, ignore_errors=False)
-        for category in self._TRASH_CATEGORIES:
-            os.makedirs(os.path.join(root, category), exist_ok=True)
+            for category in self._TRASH_CATEGORIES:
+                os.makedirs(os.path.join(root, category), exist_ok=True)
         return count
 
     def expire_trash(self, older_than: float | timedelta | None = None) -> int:
@@ -2227,8 +2241,12 @@ class WritableCalibreDB:
                     except OSError:
                         continue  # a failed removal is not a removal
                     removed += 1
-        for category in self._TRASH_CATEGORIES:
-            os.makedirs(os.path.join(root, category), exist_ok=True)
+        if removed:
+            # Recreate the emptied categories only when something actually
+            # expired: expiring an empty trash must not materialize a
+            # .caltrash tree in a library that never trashed anything.
+            for category in self._TRASH_CATEGORIES:
+                os.makedirs(os.path.join(root, category), exist_ok=True)
         return removed
 
     # -- Original-format save/restore (1.19; the approved C.8) --
@@ -2526,10 +2544,11 @@ class WritableCalibreDB:
                 # attempt fails).
                 book_dir = os.path.join(os.path.dirname(self.db_path), rel_path)
                 os.makedirs(book_dir, exist_ok=True)
-                if self._batch_depth:
-                    # Batch-scoped compensation: the outermost batch's failed
-                    # exit removes every directory created inside the pass.
-                    self._batch_dirs.append(book_dir)
+                # Batch-scoped compensation: the outermost batch's failed
+                # exit removes every directory created inside the pass
+                # (always registered: add_book only ever runs inside its
+                # own batch()).
+                self._batch_dirs.append(book_dir)
                 for fmt, src, ext, _size in fmt_entries:
                     stem = _construct_file_name(title, first_author, len(ext) + 1)
                     placed = _place_stream(
@@ -3194,8 +3213,9 @@ class WritableCalibreDB:
                     if r[0]
                 ]
             # Custom columns: both patterns, for every defined column.
+            # int() before the f-string table names (corrupt-store defense).
             col_ids = [
-                r[0]
+                int(r[0])
                 for r in self.conn.execute("SELECT id FROM custom_columns").fetchall()
             ]
             for cid in col_ids:
