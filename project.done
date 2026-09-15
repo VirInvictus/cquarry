@@ -1,6 +1,6 @@
 cquarry: DONE in THE FINAL BLITZ 2026-09-15
 
-What shipped (commit range 5856122..4433460 on main, all pushed, CI
+What shipped (commit range 5856122..5f5ed9e on main, all pushed, CI
 green; release v1.23.0 with the verbatim tag, PyPI published green,
 18 GitHub Release pages total):
 
