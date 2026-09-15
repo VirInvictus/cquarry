@@ -1,3 +1,34 @@
+## v1.22.0 (2026-09-15)
+
+### The precedent-tags read comes home, and the publish path hardens
+
+The CalibreQuarry blitz lane's two cquarry touches under cross-repo
+grant #117 (decision 2026-09-15), shipped as one additive release.
+
+- **`CalibreDB.precedent_tags(authors, limit=12)`**: the tag-by-precedent
+  suggestion read (distinct tags across the named authors' books, NOCASE
+  author match, capped and alphabetized for stability). Promoted from
+  CalibreQuarry's run.py phase-3 prompt, whose four-table JOIN was the
+  only unrecorded raw-SQL read in the frontend tier (THE FINAL AUDIT
+  L2.6). Two deliberate deltas from the promoted form: results are
+  ORDER BY name (the original relied on SQLite's arbitrary DISTINCT
+  order) and the limit is a parameter (was a hardcoded 12). Documented
+  in API.md; five fixtures in test_db.py.
+- **The publish path hardened** (the audit's publish-workflow box):
+  pypa/gh-action-pypi-publish is SHA-pinned (release/v1 was a moving
+  branch holding id-token: write), the workflow carries a top-level
+  contents: read permissions block with the publish job keeping only
+  id-token: write and a scoped contents: write release job, the
+  concurrency group refuses cancellation mid-publish, the test job runs
+  the CI ruff gates first, the build gets a strict twine check and a
+  wheel smoke-install, and a create-release job mints the GitHub
+  Release from the tag's verbatim message. actions-only dependabot
+  keeps the pins current. Repo settings: the pypi environment's
+  deployment policies now admit only the v*.*.* pattern. The
+  no-force-push ruleset on main remains recorded for cquarry's own
+  lane.
+- Suite: 434 → 438 tests.
+
 ## v1.21.0 (2026-09-13)
 
 ### The two blitz candidates with live demand

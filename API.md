@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.21.0
+**Version:** 1.22.0
 
 ## Public API
 
@@ -59,6 +59,7 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_identifiers(book_id)` | `dict[str, str]` | All identifiers for a book (e.g. `isbn`, `amazon`, `lcc`), keyed by type. Empty on schemas predating the table. |
 | `get_all_tags()` | `list[str]` | Every distinct tag name, sorted alphabetically. |
 | `get_tag_counts()` | `list[tuple[str, int]]` | `(tag_name, book_count)` pairs, sorted by tag name. |
+| `precedent_tags(authors, limit=12)` | `list[str]` | Tag-by-precedent (1.22.0): distinct tag names across the named authors' books (NOCASE author match), capped at `limit`, sorted alphabetically for stability; `[]` for no authors or no matches. The curation prompt's suggestion source; promoted from CalibreQuarry's phase-3 prompt. |
 | `get_all_series()` | `list[dict[str, Any]]` | Per-series rollups: `name`, `book_count`, `indices` (comma-separated), `max_index`, `titles` (comma-separated, sorted by index). |
 | `get_custom_columns()` | `dict[str, dict[str, Any]]` | Metadata for all user-defined custom columns, keyed by display name (the historical key; since 1.9.0 column *lookup* that accepts `#label` or a bare label goes through `find_custom_column()` / `load_custom_column()`). Each value contains `id`, `label`, `name`, `datatype`, `is_multiple`, `editable`, `normalized`, and `display` (a decoded JSON config dict). |
 | `find_custom_column(key)` | `dict[str, Any] \| None` | One custom-columns record by `#label`, bare label, or display name. A leading `#` matches the label only (never ambiguous); otherwise an exact display-name match wins (the historical key) and a bare label is the graceful fallback; label matching is case-insensitive, mirroring the write module. Returns `None` when nothing matches. |
