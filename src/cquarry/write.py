@@ -124,7 +124,7 @@ def _same_instant(current: str | None, new: str) -> bool:
         return False
     try:
         return datetime.fromisoformat(current) == datetime.fromisoformat(new)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return False
 
 

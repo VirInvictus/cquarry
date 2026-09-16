@@ -15,7 +15,7 @@ The primary interface. Constructed with a path to `metadata.db`.
 db = CalibreDB(db_path: str)
 ```
 
-Raises `FileNotFoundError` if the path does not exist. If the database is locked by Calibre, transparently copies it (including `-wal` and `-shm`) to a temp file and reads from the snapshot instead.
+Raises `FileNotFoundError` if the path does not exist. If the database is locked by Calibre, transparently snapshots it through sqlite3's backup API into a temp file and reads from the snapshot instead (since 1.23.0; immune to a mid-copy checkpoint, unlike a file copy of the database plus its `-wal`/`-shm`).
 
 Supports the context manager protocol:
 

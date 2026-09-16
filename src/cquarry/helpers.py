@@ -405,7 +405,7 @@ def find_db(explicit: str | None = None) -> str:
         print("First run: no Calibre database configured.")
         try:
             raw = input("  Path to metadata.db (or directory containing it): ").strip()
-        except EOFError, KeyboardInterrupt:
+        except (EOFError, KeyboardInterrupt):
             # Deliberate translation: an aborted prompt means "no DB found",
             # and the EOFError/KeyboardInterrupt context is noise there.
             raise FileNotFoundError(
