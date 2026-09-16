@@ -1,3 +1,10 @@
+## v1.23.2 (2026-09-16)
+
+### The version guard runs again; every carrier agrees
+The v1.23.1 hotfix shipped with four stale version carriers (`src/cquarry/__init__.py`, `src/cquarry/config.py`, `spec.md`, `API.md` all still reading 1.23.0), so the published wheel reported `cquarry.__version__ == "1.23.0"` and every consumer reading the constant saw the wrong release. The guard that should have caught it, `tests/test_version_sync.py`, was the one file in the suite written as plain pytest-style functions -- and CI runs `unittest discover`, which silently collected zero tests from it. The file is now a `unittest.TestCase` (469 -> 471 collected tests), every carrier agrees at 1.23.2, and the discover run that gates each push executes the guard.
+
+Found by the post-blitz verification day's deep pass on the foundation repos.
+
 ## v1.23.1 (2026-09-16)
 
 ### Series clears no longer crash on real libraries

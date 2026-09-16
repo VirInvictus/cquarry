@@ -3,7 +3,7 @@
 The contract. Read this before changing semantics.
 
 **Project:** `cquarry`  
-**Version:** 1.23.0
+**Version:** 1.23.2
 **Role:** Headless Engine (Standalone Library)
 **Language:** Python 3.14+
 **Dependencies:** None (pure stdlib)
