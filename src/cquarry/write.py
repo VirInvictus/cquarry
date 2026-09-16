@@ -1005,11 +1005,13 @@ class WritableCalibreDB:
         Resolves ``name`` case-insensitively, deletes the entity's links
         (the fkc_delete_on_* order), then the row itself, and touches +
         queues OPF resync for every affected book. For a series the
-        affected books' ``series_index`` is nulled too, matching
-        :meth:`set_series`'s clear semantics; for authors the books'
-        ``author_sort`` is recomputed from the remaining authors and the
-        on-disk layout re-lays (fs after the commit). Returns the number
-        of affected books; a name matching no row is an honest 0.
+        affected books' ``series_index`` is reset to 1.0 too, matching
+        :meth:`set_series`'s clear semantics (the column is NOT NULL in
+        real libraries; 1.0 is the schema's no-series value); for authors
+        the books' ``author_sort`` is recomputed from the remaining
+        authors and the on-disk layout re-lays (fs after the commit).
+        Returns the number of affected books; a name matching no row is
+        an honest 0.
         """
         table, name_col, fk = self._entity_name_table(kind)
         name = name.strip() if isinstance(name, str) else ""
@@ -1040,7 +1042,7 @@ class WritableCalibreDB:
             )
             if kind == "series" and affected:
                 self.conn.execute(
-                    f"UPDATE books SET series_index = NULL WHERE id IN "
+                    f"UPDATE books SET series_index = 1.0 WHERE id IN "
                     f"({','.join('?' * len(affected))})",
                     affected,
                 )
@@ -1089,8 +1091,11 @@ class WritableCalibreDB:
         """Assign (or clear, with ``name=None``) the book's series.
 
         Returns True when stored state changed. ``index`` defaults to 1.0 on a
-        fresh assignment; clearing nulls both the link and
-        ``books.series_index``; orphaned series rows are pruned.
+        fresh assignment; clearing deletes the link and resets
+        ``books.series_index`` to 1.0 -- the column is NOT NULL in real
+        libraries (``REAL NOT NULL DEFAULT 1.0``) and Calibre's state for a
+        book that never had a series is index 1.0 with no link row;
+        orphaned series rows are pruned.
         """
         self._begin()
         try:
@@ -1118,7 +1123,7 @@ class WritableCalibreDB:
                     "DELETE FROM books_series_link WHERE book = ?", (book_id,)
                 )
                 self.conn.execute(
-                    "UPDATE books SET series_index = NULL, last_modified = ? "
+                    "UPDATE books SET series_index = 1.0, last_modified = ? "
                     "WHERE id = ?",
                     (self._now(), book_id),
                 )

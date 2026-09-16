@@ -902,7 +902,7 @@ class _WriteSideTests:
         idx = conn.execute("SELECT series_index FROM books WHERE id=1").fetchone()[0]
         count = conn.execute("SELECT COUNT(*) FROM series").fetchone()[0]
         conn.close()
-        self.assertIsNone(idx)
+        self.assertEqual(idx, 1.0)  # the no-series value, never NULL
         self.assertEqual(count, 0)  # orphaned series pruned
 
     def test_set_publisher_roundtrip(self):
@@ -2535,7 +2535,7 @@ class TestEntityRename(_WriteSideFixture, unittest.TestCase):
             os.path.isdir(os.path.join(self.temp_dir, "Unknown", "Old Title (1)"))
         )
 
-    def test_remove_entity_everywhere_series_nulls_indices(self):
+    def test_remove_entity_everywhere_series_resets_indices(self):
         self._exec("INSERT INTO series (id, name) VALUES (1, 'Dune Saga')")
         self._exec("UPDATE books SET series_index = 3 WHERE id = 1")
         self._link(1, "series", "series", 1)
@@ -2545,7 +2545,7 @@ class TestEntityRename(_WriteSideFixture, unittest.TestCase):
         self.assertEqual(n, 2)
         self.assertEqual(
             self._sql2("SELECT series_index FROM books WHERE id IN (1, 2)"),
-            [(None,), (None,)],
+            [(1.0,), (1.0,)],
         )
         self.assertEqual(self._dirtied(), [1, 2])
 
@@ -3375,4 +3375,94 @@ class TestSetSeriesIndex(unittest.TestCase):
                     0
                 ],
                 3.0,
+            )
+
+
+class TestSeriesClearAgainstNotNullSchema(unittest.TestCase):
+    """set_series(book, None) / remove_entity_everywhere("series", ...)
+    against the REAL library schema: books.series_index is declared
+    ``REAL NOT NULL DEFAULT 1.0`` there, so writing NULL raised
+    IntegrityError (the 2026-09-16 math/classics phase 3 field find).
+    Calibre's no-series state is index 1.0 with no link row."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT, series_index REAL NOT NULL DEFAULT 1.0, path TEXT, has_cover INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY,
+                book INTEGER, series INTEGER, UNIQUE(book));
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, UNIQUE(book));
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY,
+                book INTEGER, rating INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY,
+                book INTEGER, publisher INTEGER);
+            INSERT INTO books (id, title, series_index) VALUES (1, 'One', 4.0);
+            INSERT INTO books (id, title, series_index) VALUES (2, 'Two', 2.0);
+            INSERT INTO series (id, name) VALUES (1, 'Wing');
+            INSERT INTO books_series_link (book, series) VALUES (1, 1), (2, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_set_series_none_survives_not_null_index(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.set_series(1, None))
+            self.assertEqual(
+                wdb.conn.execute(
+                    "SELECT series_index FROM books WHERE id = 1"
+                ).fetchone()[0],
+                1.0,
+            )
+            self.assertIsNone(
+                wdb.conn.execute(
+                    "SELECT 1 FROM books_series_link WHERE book = 1"
+                ).fetchone()
+            )
+            self.assertEqual(
+                [r[0] for r in wdb.conn.execute("SELECT book FROM metadata_dirtied")],
+                [1],
+            )
+
+    def test_remove_series_everywhere_survives_not_null_index(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertEqual(wdb.remove_entity_everywhere("series", "Wing"), 2)
+            self.assertEqual(
+                [
+                    r[0]
+                    for r in wdb.conn.execute(
+                        "SELECT series_index FROM books ORDER BY id"
+                    )
+                ],
+                [1.0, 1.0],
+            )
+            self.assertEqual(
+                wdb.conn.execute("SELECT COUNT(*) FROM series").fetchone()[0], 0
+            )
+
+    def test_clear_composes_inside_a_batch(self):
+        with WritableCalibreDB(self.db_path) as wdb, wdb.batch():
+            wdb.set_series(1, None)
+            wdb.set_series(2, None)
+        with sqlite3.connect(self.db_path) as check:
+            self.assertEqual(
+                [
+                    r[0]
+                    for r in check.execute("SELECT series_index FROM books ORDER BY id")
+                ],
+                [1.0, 1.0],
+            )
+            self.assertEqual(
+                check.execute("SELECT COUNT(*) FROM books_series_link").fetchone()[0],
+                0,
             )

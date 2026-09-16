@@ -1851,3 +1851,28 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
   CalibreQuarry 559 passed, bindery-cli 445 passed, Hermitage 100
   passed, Carrel-calibre-web 86 OK in its deployment venv. No
   downstream patching owed; the floor ranges already admit 1.23.0.
+
+## Bug found in use (2026-09-16, from the library's math/classics phase 3)
+
+- [x] **`set_series(book_id, None)` crashes with IntegrityError against the
+      real Calibre schema.** `write.py`'s clear path executed
+      `UPDATE books SET series_index = NULL WHERE id = ?`, but the live
+      schema declares `books.series_index REAL NOT NULL DEFAULT 1.0` — the
+      write raised `NOT NULL constraint failed: books.series_index` inside
+      the caller's batch and rolled the whole pass back (observed clearing
+      a wrong-record series on book 9136 during the 2026-09-16
+      math/classics phase 3). Fixed same day: the clear path (and the
+      series branch of `remove_entity_everywhere`, which shared the
+      literal) now writes **1.0**, Calibre's actual no-series value —
+      upstream's DDL default, what upstream's own series-removal path
+      writes, and what 5438 of the 5442 series-less books in the live
+      library hold (zero NULLs anywhere; the library's single 0.0 is book
+      9136 itself, an artifact of the field workaround below, and the
+      entry's original "convention is 0.0" guess was wrong). Pinned by
+      `TestSeriesClearAgainstNotNullSchema`, whose fixture carries the
+      real NOT NULL DDL — the schemas used to develop `set_series` had a
+      nullable column, which is why the crash never surfaced in tests.
+      Workaround used in the field before the fix: raw
+      `DELETE FROM books_series_link` + `series_index = 0.0` + orphan
+      prune via `wdb.conn.execute` inside the batch; book 9136 still
+      carries that 0.0 and can be reset to 1.0 at leisure.
