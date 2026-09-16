@@ -212,7 +212,7 @@ def find_invalid_uuids(db: CalibreDB) -> list[int]:
         value = b.get("uuid") or ""
         try:
             uuid.UUID(value)
-        except (ValueError, AttributeError):
+        except ValueError, AttributeError:
             out.append(b["id"])
     return sorted(out)
 

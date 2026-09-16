@@ -77,7 +77,7 @@ def _snapshot_copy(src_path: str, tmp: str, leash: float = 10.0) -> None:
         try:
             src.backup(dst, progress=_leash)
             consistent = True
-        except (TimeoutError, sqlite3.Error):
+        except TimeoutError, sqlite3.Error:
             pass  # leashed or failed: the fallback below takes over
     finally:
         dst.close()
@@ -1414,7 +1414,7 @@ class CalibreDB:
                 return None
             try:
                 return json.loads(row["val"])
-            except (json.JSONDecodeError, TypeError):
+            except json.JSONDecodeError, TypeError:
                 return None
 
         hidden = _pref("virt_libs_hidden")
@@ -2275,7 +2275,7 @@ class CalibreDB:
         if location not in self._custom_val_cache:
             try:
                 self._custom_val_cache[location] = self.load_custom_column(col["name"])
-            except (ValueError, sqlite3.OperationalError):
+            except ValueError, sqlite3.OperationalError:
                 self._custom_val_cache[location] = {}
         val = self._custom_val_cache[location].get(book_id)
         if val is None:
