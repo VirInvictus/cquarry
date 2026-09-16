@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cquarry"
-version = "1.23.0"
+version = "1.23.1"
 description = "Canonical Calibre database layer and search grammar engine: read-only access by design, with an explicit opt-in write module for sanctioned mutations."
 readme = "README.md"
 requires-python = ">=3.14"

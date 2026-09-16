@@ -1,3 +1,20 @@
+## v1.23.1 (2026-09-16)
+
+### Series clears no longer crash on real libraries
+
+- **Bugfix: `set_series(book_id, None)` and `remove_entity_everywhere("series", ...)` wrote
+  `series_index = NULL`, which the real Calibre schema rejects.** `books.series_index` is
+  declared `REAL NOT NULL DEFAULT 1.0` in every live library, so both verbs raised
+  `IntegrityError` inside the caller's batch and rolled the whole pass back (field find on
+  book 9136 during the 2026-09-16 math/classics phase 3; the test fixtures' nullable column
+  hid it until now).
+- **Clear semantics are reset-to-1.0, matching Calibre's own no-series state.** Both verbs
+  now reset `series_index` to 1.0 when the link goes: the DDL default, what upstream's own
+  series-removal path writes, and what series-less books hold in practice (5438 of the 5442
+  series-less books in the reference library; zero NULLs anywhere).
+- **Pinned against the real DDL.** New `TestSeriesClearAgainstNotNullSchema` fixture carries
+  the NOT NULL column; the two older tests asserting the NULL clear were corrected to 1.0.
+
 ## v1.23.0 (2026-09-15)
 
 ### The final blitz: the integrity family closes, staleness gets cheap, the snapshot turns consistent
