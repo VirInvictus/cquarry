@@ -125,15 +125,15 @@ class FindDbChainTests(unittest.TestCase):
         # and neither the EOFError nor the KeyboardInterrupt traceback
         # belongs in that story.
         for exc in (EOFError, KeyboardInterrupt):
-            with self.subTest(exc=exc):
-                with (
-                    mock.patch.object(helpers, "get_db_path", return_value=None),
-                    mock.patch.object(sys, "stdin") as stdin,
-                    mock.patch("builtins.input", side_effect=exc),
-                ):
-                    stdin.isatty.return_value = True
-                    with self.assertRaisesRegex(FileNotFoundError, "Specify with --db"):
-                        helpers.find_db()
+            with (
+                self.subTest(exc=exc),
+                mock.patch.object(helpers, "get_db_path", return_value=None),
+                mock.patch.object(sys, "stdin") as stdin,
+                mock.patch("builtins.input", side_effect=exc),
+            ):
+                stdin.isatty.return_value = True
+                with self.assertRaisesRegex(FileNotFoundError, "Specify with --db"):
+                    helpers.find_db()
 
 
 class ColorTests(unittest.TestCase):
@@ -152,14 +152,10 @@ class AuthorDisplayTests(unittest.TestCase):
         self.assertEqual(helpers.normalize_author_display(None), "Unknown Author")
 
     def test_string_splits_on_commas(self):
-        self.assertEqual(
-            helpers.normalize_author_display("A, B"), "A & B"
-        )
+        self.assertEqual(helpers.normalize_author_display("A, B"), "A & B")
 
     def test_native_list_is_joined(self):
-        self.assertEqual(
-            helpers.normalize_author_display(["A", "B"]), "A & B"
-        )
+        self.assertEqual(helpers.normalize_author_display(["A", "B"]), "A & B")
 
     def test_primary_only_takes_the_first(self):
         self.assertEqual(
