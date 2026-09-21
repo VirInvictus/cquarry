@@ -1876,3 +1876,32 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
       `DELETE FROM books_series_link` + `series_index = 0.0` + orphan
       prune via `wdb.conn.execute` inside the batch; book 9136 still
       carries that 0.0 and can be reset to 1.0 at leisure.
+
+## Upstream watch: Calibre 9.15 (audited 2026-09-18)
+
+- [ ] **No action forced; one hardening candidate logged.** Audited
+      v9.14.0 → v9.15.0 in the upstream clone (with 9.13 → 9.15 confirmed
+      stable): `schema_upgrades.py`, `annotations.py`, the legacy
+      `src/calibre/library/` backend, and `search_query_parser.py` carry a
+      zero-length diff, so there is no schema migration, no search-grammar
+      change, and no annotations change; the parity contract and every
+      read path are untouched (cquarry@v1.23.2 suite green, 497 passed).
+      Two non-breaking behavioral notes: upstream's page-count worker now
+      stats format files on disk and repairs stale `data.uncompressed_size`
+      rows in the background (the new `Cache.refresh_format_sizes()`),
+      which can bump `data_version` between refreshes; that is exactly the
+      staleness `external_changes_detected()` exists to catch, so
+      long-lived holders are already covered. And `tables.py`'s
+      `SizeTable.read` was rewritten correlated-subquery → LEFT JOIN: pure
+      performance work, MAX semantics kept (our SUM aggregation is the
+      documented pre-existing difference, unaffected). The hardening
+      candidate: upstream's `_backup_database` gained a 10-attempt retry
+      for transient `SQLITE_IOERR`/`SQLITE_IOERR_SHORT_READ` during SQLite
+      backup-API steps; the 1.23 snapshot fallback
+      (`SNAPSHOT_LEASH`/`backup_to`) uses the same backup API in the same
+      concurrent-write scenario with no retry, so a transient step failure
+      there surfaces as an error rather than a retry. Left unpatched while
+      the project is closed; adopt if the snapshot path ever fails in the
+      field. (9.14's "Tags editor: searching ignore accents" was also
+      checked: it lives entirely in the `gui2` tag-editor dialog filter,
+      not the search-bar grammar, so SearchEngine parity is unaffected.)
