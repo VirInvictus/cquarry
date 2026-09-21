@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: pip install .
-      - run: pip install ruff
+      - run: pip install ruff==0.16.8
       - run: ruff check .
       - run: ruff format --check .
       - run: PYTHONPATH=src python -m unittest discover -s tests

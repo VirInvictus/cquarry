@@ -26,7 +26,7 @@ jobs:
 
       - name: Lint (the same gates CI runs on main)
         run: |
-          pip install ruff
+          pip install ruff==0.16.8
           ruff check .
           ruff format --check .
 
