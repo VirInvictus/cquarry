@@ -1278,6 +1278,98 @@ class TestBatchContext(_WriteSideFixture, unittest.TestCase):
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
 
 
+class TestBatchSetComments(_WriteSideFixture, unittest.TestCase):
+    """set_comments' changed flag stays honest inside a batch, in every
+    ordering.
+
+    Pinned by the 2026-09-26 ninth-wave incident: a curation script
+    reported ``set_comments`` returning False inside its batch and the
+    report was filed against the setter. The actual cause was the
+    caller's own loop-variable rebinding (a ``for b in SERIES_CLEAR:``
+    nested inside ``for b in IDS:`` re-called ``set_comments`` on one
+    already-written book 24 times); an exhaustive ordering fuzz (2,914
+    scenarios) found no setter defect. These tests enforce the
+    exoneration so a real regression cannot hide behind the anecdote.
+    """
+
+    def _store_comment(self, text, book_id=1):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO comments (book, text) VALUES (?, ?)", (book_id, text)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_in_batch_set_comments_lands_and_returns_true(self):
+        with self._wdb() as wdb, wdb.batch():
+            wdb.add_tag(1, "Curated")
+            wdb.set_pubdate(1, "1902-01-01")
+            self.assertTrue(wdb.set_comments(1, "<p>House voice.</p>"))
+        self.assertEqual(
+            self._sql2("SELECT text FROM comments WHERE book=1"),
+            [("<p>House voice.</p>",)],
+        )
+
+    def test_series_clear_then_set_comments_in_one_batch(self):
+        # The exact ordering the incident blamed: the clear runs first,
+        # the comment still writes and reports changed.
+        self.assertTrue(self._sql2("SELECT COUNT(*) FROM series") == [(0,)])
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_series(1, "Invented Series"))
+        with self._wdb() as wdb, wdb.batch():
+            self.assertTrue(wdb.set_series(1, None))
+            self.assertTrue(wdb.set_comments(1, "<p>After the clear.</p>"))
+        self.assertEqual(
+            self._sql2("SELECT text FROM comments WHERE book=1"),
+            [("<p>After the clear.</p>",)],
+        )
+
+    def test_unchanged_comment_returns_false_in_batch(self):
+        self._store_comment("<p>Already stored.</p>")
+        with self._wdb() as wdb, wdb.batch():
+            self.assertFalse(wdb.set_comments(1, "<p>Already stored.</p>"))
+        self.assertEqual(
+            self._sql2("SELECT text FROM comments WHERE book=1"),
+            [("<p>Already stored.</p>",)],
+        )
+
+    def test_repeat_call_in_batch_is_true_then_honest_false(self):
+        # The incident's misread shape: a loop that calls the setter twice
+        # on the same book sees True once, then False for the repeats --
+        # that False is already-so, not a dropped write.
+        with self._wdb() as wdb, wdb.batch():
+            self.assertTrue(wdb.set_comments(1, "<p>Once.</p>"))
+            self.assertFalse(wdb.set_comments(1, "<p>Once.</p>"))
+        self.assertEqual(
+            self._sql2("SELECT COUNT(*) FROM comments WHERE book=1"), [(1,)]
+        )
+
+    def test_rolled_back_batch_then_fresh_handle_rerun_lands(self):
+        # A rolled-back earlier batch must not poison a later pass: the
+        # rerun (fresh handle, the fresh-process shape) writes and reports
+        # changed.
+        self._store_comment("<p>Survives the rollback.</p>")
+        with (
+            self._wdb() as wdb,
+            self.assertRaises(RuntimeError),
+            wdb.batch(),
+        ):
+            self.assertTrue(wdb.set_comments(1, "<p>Lost.</p>"))
+            raise RuntimeError("boom")
+        self.assertEqual(
+            self._sql2("SELECT text FROM comments WHERE book=1"),
+            [("<p>Survives the rollback.</p>",)],
+        )
+        with WritableCalibreDB(self.db_path) as wdb, wdb.batch():
+            self.assertTrue(wdb.set_comments(1, "<p>Lands now.</p>"))
+        self.assertEqual(
+            self._sql2("SELECT text FROM comments WHERE book=1"),
+            [("<p>Lands now.</p>",)],
+        )
+
+
 class TestSetPubdate(_WriteSideFixture, unittest.TestCase):
     """set_pubdate writes Calibre's TEXT convention, never a raw integer.
 

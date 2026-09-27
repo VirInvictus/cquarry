@@ -1905,3 +1905,28 @@ Propagation checkboxes per item, so the wave cannot be lost in the mix:
       field. (9.14's "Tags editor: searching ignore accents" was also
       checked: it lives entirely in the `gui2` tag-editor dialog filter,
       not the search-bar grammar, so SearchEngine parity is unaffected.)
+
+- [2026-09-26] CLOSED as a caller defect, same night: the ninth-wave
+  phase-3 report that `set_comments` "returns changed=False (no write)
+  inside a `batch()`" did not survive investigation; no library change
+  ships. Root cause was the curation script's own nested loop:
+  `for b in SERIES_CLEAR:` inside `for b in IDS:` rebinds the loop
+  variable, so `set_series(9523, None)` and `set_comments(9523,
+  DESCS[9523])` ran on EVERY iteration instead of once -- the first call
+  wrote 9523's comment (True, silent) and the other 23 honestly returned
+  False (already-so), while books 9511-9522 and 9524-9534 were never
+  passed to `set_comments` at all. The "returned False for all 24 books"
+  reading came from `(already-so) comments 9523` being logged 23 times.
+  Confirmed twice: rerunning the actual script against a mock ninth-wave
+  library reproduces the live log exactly (assert variant fires
+  `('comments 9523', False)`; tolerate variant logs `already-so=23`),
+  and an exhaustive in-batch ordering fuzz (2,914 scenarios: every
+  permutation of the curation setters with and without pre-existing
+  comments/series, the series clear inserted at every position, a
+  rolled-back batch followed by a fresh-handle rerun) found zero setter
+  defects. `set_comments` inside a batch writes whenever the value
+  differs and returns an honest changed flag in every ordering. Five
+  regression tests pin the behavior (suite 497 -> 502;
+  `TestBatchSetComments` in tests/test_write.py); the phase-3-import
+  skill gained the loop-variable/already-so gotcha. No version bump:
+  nothing in the library changed.
