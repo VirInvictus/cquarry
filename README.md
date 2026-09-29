@@ -131,7 +131,7 @@ See [spec.md](spec.md) for the full contract and [roadmap.md](roadmap.md) for pl
 
 [Carrel-calibre-web](https://github.com/VirInvictus/Carrel-calibre-web) is a fork of
 [calibre-web](https://github.com/janeczku/calibre-web) that uses cquarry as its search and
-virtual-library engine. Features proven there flow back into cquarry's roadmap (see Phase 7);
+virtual-library engine. Features proven there flow back into cquarry (the data-layer extraction closed with the fork on 2026-09-04);
 calibre-web's original authors deserve the credit for the web experience that fork builds on.
 
 ## Support
