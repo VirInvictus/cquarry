@@ -141,9 +141,11 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
 
 ### Phase 15: Maintenance ring (the lifecycle layer around the write module)
 
-- [ ] **`vacuum` / `analyze` / `integrity_check` verb** (upstream `backend.py:1638`
+- [x] **`vacuum` / `analyze` / `integrity_check` verb** (upstream `backend.py:1638`
   vacuums the main DB and the attached FTS sidecar; the notes DB stays out of scope).
-  Size XS-S.
+  Size XS-S. **Shipped 1.24** as `WritableCalibreDB.maintain(*, vacuum, analyze,
+  integrity_check, include_fts)`: refuses to run inside `batch()` or mid-transaction,
+  reports the check rows, and names the sidecar's attach state.
 - [ ] **check_library extra-side disk checks** for the integrity family: extra format
   files, extra covers, malformed paths, extra files in book dirs, failed folders
   (upstream `src/calibre/library/check_library.py:50`); cquarry ships the missing-side

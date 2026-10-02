@@ -560,6 +560,74 @@ class WritableCalibreDB:
         """
         return self.batch()
 
+    # -- Maintenance (1.24; the Phase 15 ring) --
+
+    def maintain(
+        self,
+        *,
+        vacuum: bool = True,
+        analyze: bool = True,
+        integrity_check: bool = False,
+        include_fts: bool = True,
+    ) -> dict[str, Any]:
+        """Vacuum / analyze / integrity-check the library DB and its FTS
+        sidecar (upstream ``backend.py`` ``vacuum``, extended with the two
+        stdlib-free maintenance statements calibredb users run by hand).
+
+        ``vacuum`` rebuilds both files (main first, then the sidecar, as
+        upstream does; the notes DB stays out of scope -- it is a separate
+        ``.calnotes`` database this library never opens), ``analyze``
+        refreshes the query planner's statistics on both, and
+        ``integrity_check`` reports the ``PRAGMA integrity_check`` rows
+        (``["ok"]`` on a healthy file) instead of only compacting. With
+        ``include_fts=False`` or no sidecar present, the sidecar is left
+        alone.
+
+        Returns ``{"vacuumed", "analyzed", "fts_attached",
+        "integrity_check", "fts_integrity_check"}``: the flags record what
+        actually ran, and the check keys are None when not requested.
+        Raises RuntimeError inside a :meth:`batch` (VACUUM cannot run in a
+        transaction, and maintenance is a standalone pass by definition) or
+        when the connection is otherwise mid-transaction (commit first).
+        """
+        if self._batch_depth:
+            raise RuntimeError(
+                "maintain() runs its own transaction boundary; "
+                "it cannot run inside batch()"
+            )
+        if self.conn.in_transaction:
+            raise RuntimeError(
+                "maintain() needs a clean transaction state; commit the "
+                "pending writes first"
+            )
+        fts_attached = self._ensure_fts_attached() if include_fts else False
+        out: dict[str, Any] = {
+            "vacuumed": False,
+            "analyzed": False,
+            "fts_attached": fts_attached,
+            "integrity_check": None,
+            "fts_integrity_check": None,
+        }
+        if vacuum:
+            self.conn.execute("VACUUM")
+            if fts_attached:
+                self.conn.execute("VACUUM fts_db")
+            out["vacuumed"] = True
+        if analyze:
+            self.conn.execute("ANALYZE")
+            if fts_attached:
+                self.conn.execute("ANALYZE fts_db")
+            out["analyzed"] = True
+        if integrity_check:
+            out["integrity_check"] = [
+                row[0] for row in self.conn.execute("PRAGMA integrity_check")
+            ]
+            if fts_attached:
+                out["fts_integrity_check"] = [
+                    row[0] for row in self.conn.execute("PRAGMA fts_db.integrity_check")
+                ]
+        return out
+
     def _commit(self) -> None:
         """Commit unless inside a batch() — the batch owns that commit."""
         if self._batch_depth:

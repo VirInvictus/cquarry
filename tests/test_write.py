@@ -454,6 +454,78 @@ class TestCustomColumnMetadata(unittest.TestCase):
             self.assertEqual(meta["display"], {"enum_values": ["A"]})
 
 
+class TestMaintain(unittest.TestCase):
+    """maintain() (1.24, Phase 15): vacuum/analyze/integrity_check over the
+    library DB and its attached FTS sidecar."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+        conn.executemany(
+            "INSERT INTO books (id, title) VALUES (?, ?)", [(1, "A"), (2, "B")]
+        )
+        conn.execute("DELETE FROM books WHERE id = 2")  # free pages to vacuum
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sidecar(self, with_table=True):
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        if with_table:
+            fts.execute(
+                "CREATE TABLE dirtied_formats (id INTEGER PRIMARY KEY,"
+                " book INTEGER NOT NULL, format TEXT NOT NULL,"
+                " UNIQUE(book, format))"
+            )
+        fts.commit()
+        fts.close()
+
+    def test_maintain_defaults_vacuum_and_analyze_both_dbs(self):
+        self._sidecar()
+        with WritableCalibreDB(self.db_path) as wdb:
+            out = wdb.maintain()
+        self.assertTrue(out["vacuumed"])
+        self.assertTrue(out["analyzed"])
+        self.assertTrue(out["fts_attached"])
+        self.assertIsNone(out["integrity_check"])
+        self.assertIsNone(out["fts_integrity_check"])
+
+    def test_maintain_integrity_check_reports_ok(self):
+        self._sidecar()
+        with WritableCalibreDB(self.db_path) as wdb:
+            out = wdb.maintain(vacuum=False, analyze=False, integrity_check=True)
+        self.assertFalse(out["vacuumed"])
+        self.assertEqual(out["integrity_check"], ["ok"])
+        self.assertEqual(out["fts_integrity_check"], ["ok"])
+
+    def test_maintain_without_sidecar_degrades(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            out = wdb.maintain(integrity_check=True)
+        self.assertFalse(out["fts_attached"])
+        self.assertEqual(out["integrity_check"], ["ok"])
+        self.assertIsNone(out["fts_integrity_check"])
+
+    def test_maintain_include_fts_false_leaves_the_sidecar_alone(self):
+        self._sidecar()
+        with WritableCalibreDB(self.db_path) as wdb:
+            out = wdb.maintain(integrity_check=True, include_fts=False)
+        self.assertFalse(out["fts_attached"])
+        self.assertIsNone(out["fts_integrity_check"])
+
+    def test_maintain_refuses_inside_batch_and_mid_transaction(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(RuntimeError), wdb.batch():
+                wdb.maintain()
+            # A caller's raw uncommitted write holds the transaction too.
+            wdb.conn.execute("INSERT INTO books (id, title) VALUES (3, 'C')")
+            with self.assertRaises(RuntimeError):
+                wdb.maintain()
+
+
 if __name__ == "__main__":
     unittest.main()
 
