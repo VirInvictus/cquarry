@@ -14,7 +14,7 @@ wave), and both consumer roadmaps carry the adoption rows.
   web-frontend pair: raw bytes for serving, an aware-UTC mtime for
   conditional GET, riding `get_cover_path`'s resolution);
   `virtual_libraries_for_books` and `user_categories_for_books` (the
-  inverse maps: every book -> the wings / @Name members it holds, resolved
+  inverse maps: every book -> the wings / `@Name` members it holds, resolved
   through the same engine paths as the search locations so the answers
   agree with `vl:`/`@Name:` queries; wings that fail to evaluate are
   skipped with a warning where upstream splices an error string into the
