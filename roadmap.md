@@ -120,9 +120,11 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   `get_annotations_dirtied_books()`. Retires CalibreQuarry's raw sidecar read
   (`modes/fts.py:91`) and unblocks its `fts-index` verb. Size XS.
   **Shipped 1.24**: `list[tuple[int, str]]`, sorted, formats uppercased as stored.
-- [ ] **`set_custom_column_metadata`** (`backend.py:1407`, `cache.py:3233`): modify an
+- [x] **`set_custom_column_metadata`** (`backend.py:1407`, `cache.py:3233`): modify an
   existing column's name/editable/display JSON, notably `enum_values`, without Calibre
-  open; today nothing can populate that list. Size S.
+  open; today nothing can populate that list. Size S. **Shipped 1.24**: honest no-op on
+  equal values; a change sets `update_all_last_mod_dates_on_start` like upstream's
+  wrapper; datatype and label changes are refused by omission (schema compatibility).
 - [ ] **The Carrel residue trio, ungated**: `get_book_by_uuid` (the Calibre-Companion
   endpoint dependency), the entity-to-ids resolver, and a bulk formats map. The standing
   gate ("waits for Carrel's lane") is answered: the fork's roadmap (created 2026-09-29)

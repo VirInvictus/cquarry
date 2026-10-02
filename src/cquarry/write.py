@@ -3432,6 +3432,81 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    def set_custom_column_metadata(
+        self,
+        label: str,
+        *,
+        name: str | None = None,
+        editable: bool | None = None,
+        display: dict[str, Any] | None = None,
+    ) -> bool:
+        """Modify an existing custom column's name, editable flag, or
+        display JSON (upstream ``set_custom_column_metadata``,
+        backend.py:1407). Returns True when stored state changed.
+
+        This is the verb that populates an enumeration's value list without
+        Calibre open: ``display={"enum_values": ["A", "B"]}`` and
+        :meth:`set_custom_column` accepts those values from here on. The
+        display dict REPLACES the stored payload wholesale, exactly like
+        upstream; ``None`` leaves a field untouched, and an honest no-op
+        (all-None or equal values) returns False without touching the
+        database.
+
+        There is deliberately no datatype parameter: a column's type is
+        baked into its storage layout, and changing it would strand every
+        stored value, so type changes are refused by omission (schema
+        compatibility is a hard rule; Calibre's own UI refuses them too).
+        Label changes are not offered either: the label IS the ``#label``
+        search token, and upstream pairs a rename with its notes system,
+        which this library does not read.
+
+        A change also sets Calibre's
+        ``update_all_last_mod_dates_on_start`` preference, exactly like
+        upstream's wrapper, so the next Calibre start refreshes every book's
+        ``last_modified`` for the new metadata shape. Column metadata is not
+        book state, so nothing is queued in ``metadata_dirtied``.
+        """
+        meta = self._custom_column_meta(label)
+        if name is None and editable is None and display is None:
+            return False
+        updates: dict[str, Any] = {}
+        if name is not None:
+            clean = name.strip()
+            if not clean:
+                raise ValueError("Custom column name must not be empty")
+            if clean != meta["name"]:
+                updates["name"] = clean
+        if editable is not None:
+            flag = 1 if editable else 0
+            if flag != int(bool(meta["editable"])):
+                updates["editable"] = flag
+        if display is not None:
+            if not isinstance(display, dict):
+                raise TypeError(
+                    "display must be a dict (the decoded display payload), "
+                    f"got {type(display).__name__}"
+                )
+            if display != meta["display"]:
+                updates["display"] = json.dumps(display)
+        if not updates:
+            return False
+        self._begin()
+        try:
+            sets = ", ".join(f"{column} = ?" for column in updates)
+            self.conn.execute(
+                f"UPDATE custom_columns SET {sets} WHERE id = ?",
+                (*updates.values(), meta["id"]),
+            )
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("update_all_last_mod_dates_on_start", "true"),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
     # -- Book lifecycle --
 
     # Upstream's library-local trash directory (constants.py TRASH_DIR_NAME);

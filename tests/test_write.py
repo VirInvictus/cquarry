@@ -5,6 +5,7 @@ a real Calibre library: books_insert_trg calls the title_sort() and uuid4()
 SQL functions, which only exist after register_udfs().
 """
 
+import json
 import os
 import shutil
 import sqlite3
@@ -337,6 +338,122 @@ class TestMetadataDirtied(unittest.TestCase):
             wdb.update_title(1, "Renamed")
 
 
+class TestCustomColumnMetadata(unittest.TestCase):
+    """set_custom_column_metadata (1.24, Phase 14): name/editable/display
+    edits on an existing column, upstream backend.py:1407's shape. The
+    headline use case: populating an enumeration's enum_values without
+    Calibre open."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)
+        conn.executescript(_ADD_BOOK_SCHEMA)
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'One')")
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql_rows(self, sql):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(sql).fetchall()]
+        finally:
+            conn.close()
+
+    def test_enum_values_populate_unlock_the_write_path(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            num = wdb.create_custom_column("shelf", "Shelf", "enumeration")
+            # An empty enumeration rejects every value...
+            with self.assertRaises(ValueError):
+                wdb.set_custom_column(1, "#shelf", "Read")
+            # ...until the metadata verb populates it.
+            self.assertTrue(
+                wdb.set_custom_column_metadata(
+                    "#shelf", display={"enum_values": ["Read", "TBR"]}
+                )
+            )
+            self.assertTrue(wdb.set_custom_column(1, "#shelf", "Read"))
+        conn = sqlite3.connect(self.db_path)
+        try:
+            display = conn.execute(
+                "SELECT display FROM custom_columns WHERE label = 'shelf'"
+            ).fetchone()[0]
+            self.assertEqual(json.loads(display), {"enum_values": ["Read", "TBR"]})
+            # Pattern A: the value lives in the value table, the book in
+            # the link table (the shared fixture seeds columns 1-3, so the
+            # created column's number comes from the call).
+            value = conn.execute(
+                f"SELECT c.value FROM custom_column_{num} c "
+                f"JOIN books_custom_column_{num}_link l ON l.value = c.id "
+                "WHERE l.book = 1"
+            ).fetchone()[0]
+            self.assertEqual(value, "Read")
+        finally:
+            conn.close()
+
+    def test_name_and_editable_changes(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.create_custom_column("shelf", "Shelf", "text", editable=True)
+            self.assertTrue(wdb.set_custom_column_metadata("#shelf", name="Shelving"))
+            self.assertTrue(wdb.set_custom_column_metadata("#shelf", editable=False))
+        self.assertEqual(
+            self._sql_rows(
+                "SELECT name, editable FROM custom_columns WHERE label = 'shelf'"
+            ),
+            [("Shelving", 0)],
+        )
+
+    def test_honest_no_ops(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.create_custom_column("shelf", "Shelf", "text")
+            self.assertFalse(wdb.set_custom_column_metadata("#shelf"))
+            self.assertFalse(wdb.set_custom_column_metadata("#shelf", name="Shelf"))
+            self.assertFalse(wdb.set_custom_column_metadata("#shelf", display={}))
+        # Exactly the one row create_custom_column wrote: a metadata no-op
+        # does not touch the refresh pref.
+        self.assertEqual(
+            self._sql_rows(
+                "SELECT val FROM preferences WHERE key = "
+                "'update_all_last_mod_dates_on_start'"
+            ),
+            [("true",)],
+        )
+
+    def test_change_sets_the_calibre_refresh_pref(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.create_custom_column("shelf", "Shelf", "text")
+            wdb.set_custom_column_metadata("#shelf", name="Shelving")
+        self.assertEqual(
+            self._sql_rows(
+                "SELECT val FROM preferences WHERE key = "
+                "'update_all_last_mod_dates_on_start'"
+            ),
+            [("true",)],
+        )
+
+    def test_rejections(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.create_custom_column("shelf", "Shelf", "text")
+            with self.assertRaises(ValueError):
+                wdb.set_custom_column_metadata("#nope", name="X")
+            with self.assertRaises(ValueError):
+                wdb.set_custom_column_metadata("#shelf", name="   ")
+            with self.assertRaises(TypeError):
+                wdb.set_custom_column_metadata("#shelf", display=["a"])
+
+    def test_a_fresh_reader_sees_the_new_metadata(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.create_custom_column("shelf", "Shelf", "enumeration")
+            wdb.set_custom_column_metadata("#shelf", display={"enum_values": ["A"]})
+        with CalibreDB(self.db_path) as db:
+            meta = db.find_custom_column("#shelf")
+            self.assertEqual(meta["display"], {"enum_values": ["A"]})
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -362,7 +479,7 @@ CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_co
 CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, text TEXT, UNIQUE(book));
 CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
 CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT, UNIQUE(book, type));
-CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
+CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT NOT NULL, val TEXT NOT NULL, UNIQUE(key));
 CREATE TABLE custom_columns (
     id INTEGER PRIMARY KEY, label TEXT UNIQUE, name TEXT, datatype TEXT,
     editable BOOL DEFAULT 1, display TEXT DEFAULT '{}',
