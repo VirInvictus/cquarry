@@ -1269,9 +1269,10 @@ class TestRemoveBook(unittest.TestCase):
         # the Unknown placeholder title, the documented behavior).
         self.assertEqual(self._sql("SELECT COUNT(*) FROM books"), [(2,)])
         self.assertEqual(self._sql("SELECT id FROM books ORDER BY id"), [(1,), (2,)])
-        # The directory relays to the restored metadata's Author/Title (id)
-        # place: the empty OPF restores title Unknown, no authors.
-        self.assertTrue(os.path.isdir(os.path.join(self.temp_dir, "Unknown (1)")))
+        # The directory relays to the restored metadata's place: the empty
+        # OPF restores title Unknown and no authors, which lays out bare
+        # Unknown/ (no author nesting).
+        self.assertTrue(os.path.isdir(os.path.join(self.temp_dir, "Unknown")))
         self.assertFalse(os.path.isdir(book_dir))
 
     def test_remove_book_is_irreversible_second_call_raises(self):
