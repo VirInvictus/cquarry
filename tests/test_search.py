@@ -834,9 +834,14 @@ class TestSearchParityFixes(unittest.TestCase):
         engine = SearchEngine(_BareProvider())
         self.assertEqual(engine.search("true"), {1, 2})
         self.assertEqual(engine.search("false"), {3})
-        # Identifier keys do not text-sweep: a bare term matching an
-        # identifier key or value matches nothing here.
-        self.assertEqual(engine.search("isbn"), set())
+        # Identifier KEYS join the text sweep (the 1.26 audit: upstream's
+        # matcher iterates the identifiers dict, i.e. its keys -- the 1.18
+        # comment claiming otherwise was wrong about upstream). Book 1
+        # carries the isbn KEY; a bare `isbn` matches it. Values never
+        # sweep: book 1's value "x" matches nothing.
+        self.assertEqual(engine.search("isbn"), {1})
+        self.assertEqual(engine.search("x"), set())
+        self.assertEqual(engine.search("=isbn"), {1})
 
     def test_search_with_exact_prefix_resolves_saved_search(self):
         # Upstream removeprefix's the '=' before the saved-search lookup;

@@ -1169,12 +1169,15 @@ class SearchEngine:
             for loc, dt in self._custom.items()
             if dt in (DT_TEXT, DT_TEXT_MULTI, DT_HIER)
         ]
-        # The bare true/false presence branch (upstream DS:849-855): with
+        # The bare true/false presence branch (upstream DS:849-866): with
         # contains semantics, exactly these words test field PRESENCE across
         # the sweep instead of matching text. The sweep's identifiers store
-        # and cover flag live only here -- a bare term never text-matches
-        # identifier keys or values (DS:808-818), and a non-empty identifier
-        # dict or a set cover flag counts as present.
+        # and cover flag live only here -- a non-empty identifier dict or a
+        # set cover flag counts as present. (The old comment here claimed
+        # upstream never text-matches identifier keys in the sweep: wrong --
+        # the 1.26 audit traced upstream's chain and its matcher iterates
+        # the identifiers dict, i.e. the keys. The text loop below now does
+        # the same; only the VALUES stay unswept.)
         ql = q.lower()
         if kind == CONTAINS and ql in ("true", "false"):
             probe = fields + ["identifiers", "cover"]
@@ -1207,6 +1210,14 @@ class SearchEngine:
                     out.add(b)
                     break
             else:
+                # The loop completed unmatched: identifier KEYS join the
+                # text sweep (upstream: the identifiers dict iterates as
+                # its keys -- DS:73-75 over fields.py:637-642); values
+                # stay unswept. Then the numeric exact-equality probes.
+                ids = self.provider.field(b, "identifiers") or {}
+                if any(_match_text(q, [k], kind) for k in ids):
+                    out.add(b)
+                    continue
                 if n is not None:
                     for loc in self._ALL_NUMERIC_FIELDS:
                         val = self.provider.field(b, loc)
