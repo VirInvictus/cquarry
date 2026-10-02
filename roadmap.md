@@ -272,9 +272,15 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   components raise); upstream's `merge conflict[N]` auto-rename layout reproduced;
   the recycle-bin remove mode stays GUI-only. `merge_extra_files` stays out -- item
   17's copy primitive deliberately excludes data/ extras.
-- [ ] A blessed cross-library copy primitive (modeled on `copy_to_library.py:77`):
+- [x] A blessed cross-library copy primitive (modeled on `copy_to_library.py:77`):
   composable from existing reads + writes except the declined annotations postprocess
-  and data/ extras; duplicate/automerge policy stays frontend. Size M.
+  and data/ extras; duplicate/automerge policy stays frontend. Size M. **Shipped
+  1.25** as `WritableCalibreDB.copy_book_from_library(src_db, book_id,
+  *, preserve_timestamp=True)`: one `batch()` on the destination, format files
+  through `add_book`'s seed path, per-author sorts then the book-level
+  `author_sort` verbatim. Plugin data and conversion options gain carriage with
+  this release's blob writers; custom columns and the uuid stay uncopied (the
+  source-OPF rule; always-fresh like upstream's default).
 - [ ] book_storage / plugin-data / conversion-options writers (`cache.py:4053-4082`,
   `:2913`, `backend.py:2955`): reads exist for all three tables, writes none;
   opaque-blob passthrough. Size XS-S.

@@ -4655,3 +4655,176 @@ class TestDataFiles(_WriteSideFixture, unittest.TestCase):
             wdb.remove_data_files(1, ["x.txt"])
         self.assertEqual(self._sql2("SELECT id, title FROM books"), before)
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
+
+
+class TestCopyBookFromLibrary(unittest.TestCase):
+    """copy_book_from_library: the blessed cross-library copy (1.25,
+    Phase 17 item 17), modeled on upstream copy_one_book."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.src_path = os.path.join(self.temp_dir, "src", "metadata.db")
+        self.dest_path = os.path.join(self.temp_dir, "dest", "metadata.db")
+        os.makedirs(os.path.dirname(self.src_path))
+        os.makedirs(os.path.dirname(self.dest_path))
+        # The destination starts as an empty library (same DDL, no rows,
+        # plus the insert trigger add_book's creation path relies on).
+        dest_conn = sqlite3.connect(self.dest_path)
+        dest_conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT DEFAULT '');
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, text TEXT, UNIQUE(book));
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT, UNIQUE(book, type));
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
+            CREATE TRIGGER books_insert_trg AFTER INSERT ON books
+            BEGIN
+                UPDATE books SET sort = title_sort(NEW.title),
+                    last_modified = uuid4() WHERE id = NEW.id;
+            END;
+            """
+        )
+        dest_conn.commit()
+        dest_conn.close()
+        # Source: a fully-dressed book with real format and cover files.
+        conn = sqlite3.connect(self.src_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT DEFAULT '');
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, text TEXT, UNIQUE(book));
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT, UNIQUE(book, type));
+            INSERT INTO books (id, title, sort, author_sort, timestamp, pubdate,
+                series_index, path, has_cover) VALUES
+                (1, 'Ancillary Justice', 'Ancillary Justice', 'Leckie, Ann & Writer, Zed',
+                 '2020-05-01 00:00:00+00:00', '2013-10-01 00:00:00+00:00', 2.0,
+                 'Leckie, Ann/Ancillary Justice (1)', 1);
+            INSERT INTO authors VALUES (1, 'Ann Leckie', 'Leckie, Ann', ''), (2, 'Zed A. Writer', 'Writer, Zed', '');
+            INSERT INTO books_authors_link (book, author) VALUES (1, 1), (1, 2);
+            INSERT INTO tags VALUES (1, 'SciFi'), (2, 'Award');
+            INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (1, 2);
+            INSERT INTO series (id, name, sort) VALUES (1, 'Imperial Radch', 'Imperial Radch');
+            INSERT INTO books_series_link (book, series) VALUES (1, 1);
+            INSERT INTO publishers (id, name, sort) VALUES (1, 'Orbit', 'Orbit');
+            INSERT INTO books_publishers_link (book, publisher) VALUES (1, 1);
+            INSERT INTO ratings VALUES (1, 8);
+            INSERT INTO books_ratings_link (book, rating) VALUES (1, 1);
+            INSERT INTO languages VALUES (1, 'eng');
+            INSERT INTO books_languages_link (book, lang_code, item_order) VALUES (1, 1, 0);
+            INSERT INTO comments (book, text) VALUES (1, '<p>A mind-ship novel</p>');
+            INSERT INTO data (book, format, uncompressed_size, name) VALUES (1, 'EPUB', 11, 'Ancillary Justice - Leckie, Ann');
+            INSERT INTO identifiers (book, type, val) VALUES (1, 'isbn', '9781590178884');
+            """
+        )
+        conn.commit()
+        conn.close()
+        book_dir = os.path.join(
+            self.temp_dir, "src", "Leckie, Ann", "Ancillary Justice (1)"
+        )
+        os.makedirs(book_dir)
+        with open(
+            os.path.join(book_dir, "Ancillary Justice - Leckie, Ann.epub"), "wb"
+        ) as f:
+            f.write(b"EPUB-BYTES!")
+        with open(os.path.join(book_dir, "cover.jpg"), "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0jpegdata")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _dest_counts(self):
+        conn = sqlite3.connect(self.dest_path)
+        try:
+            return (
+                conn.execute("SELECT COUNT(*) FROM books").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM authors").fetchone()[0],
+            )
+        finally:
+            conn.close()
+
+    def test_copy_carries_every_core_field(self):
+        with CalibreDB(self.src_path) as src, WritableCalibreDB(self.dest_path) as dest:
+            new_id = dest.copy_book_from_library(src, 1)
+        with CalibreDB(self.dest_path) as check:
+            row = check.get_book(new_id, include_comments=True)
+            self.assertEqual(row["title"], "Ancillary Justice")
+            self.assertEqual(row["title_sort"], "Ancillary Justice")
+            self.assertEqual(row["authors"], ["Ann Leckie", "Zed A. Writer"])
+            self.assertEqual(row["author_sorts"], ["Leckie, Ann", "Writer, Zed"])
+            self.assertEqual(row["author_sort"], "Leckie, Ann & Writer, Zed")
+            # Tag ORDER is link-id order per library, not part of the copy
+            # contract; the set is what carries over.
+            self.assertEqual(sorted(row["tags"]), ["Award", "SciFi"])
+            self.assertEqual(row["series"], "Imperial Radch")
+            self.assertEqual(row["series_index"], 2.0)
+            self.assertEqual(row["publisher"], "Orbit")
+            self.assertEqual(row["rating"], 8)
+            self.assertEqual(row["languages"], ["eng"])
+            self.assertEqual(row["identifiers"], {"isbn": "9781590178884"})
+            self.assertEqual(row["comments"], "<p>A mind-ship novel</p>")
+            self.assertTrue(row["pubdate"].startswith("2013-10-01"))
+            self.assertTrue(row["timestamp"].startswith("2020-05-01"))
+            self.assertTrue(row["has_cover"])
+            fmts = check.get_formats(new_id)
+            self.assertIn("EPUB", fmts)
+            self.assertEqual(fmts["EPUB"]["size_bytes"], 11)
+        dest_dir = os.path.dirname(self.dest_path)
+        copied = os.path.join(dest_dir, row["path"], "cover.jpg")
+        with open(copied, "rb") as f:
+            self.assertEqual(f.read(), b"\xff\xd8\xff\xe0jpegdata")
+
+    def test_missing_format_file_rolls_everything_back(self):
+        conn = sqlite3.connect(self.src_path)
+        conn.execute("UPDATE data SET name = 'vanished'")
+        conn.commit()
+        conn.close()
+        with (
+            CalibreDB(self.src_path) as src,
+            WritableCalibreDB(self.dest_path) as dest,
+            self.assertRaises(FileNotFoundError),
+        ):
+            dest.copy_book_from_library(src, 1)
+        self.assertEqual(self._dest_counts(), (0, 0))
+
+    def test_unknown_source_book_raises(self):
+        with (
+            CalibreDB(self.src_path) as src,
+            WritableCalibreDB(self.dest_path) as dest,
+            self.assertRaises(ValueError),
+        ):
+            dest.copy_book_from_library(src, 999)
+
+    def test_preserve_timestamp_false_leaves_now(self):
+        with CalibreDB(self.src_path) as src, WritableCalibreDB(self.dest_path) as dest:
+            new_id = dest.copy_book_from_library(src, 1, preserve_timestamp=False)
+        with CalibreDB(self.dest_path) as check:
+            row = check.get_book(new_id)
+            self.assertFalse(row["timestamp"].startswith("2020-05-01"))

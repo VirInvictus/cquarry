@@ -43,11 +43,14 @@ import sqlite3
 import uuid as _uuid
 from collections.abc import Callable, Generator
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 from xml.etree import ElementTree
 
 from cquarry.helpers import sniff_image_format, title_sort
 from cquarry.search import BOOL_FALSE_WORDS, BOOL_TRUE_WORDS
+
+if TYPE_CHECKING:
+    from cquarry.db import CalibreDB
 
 __all__ = ["WritableCalibreDB", "register_udfs", "title_sort", "uuid4"]
 
@@ -3680,6 +3683,87 @@ class WritableCalibreDB:
                         f"catalogued as book {row['book']}'s {fmt} "
                         "(byte-identical re-import)"
                     )
+
+    def copy_book_from_library(
+        self,
+        src_db: CalibreDB,
+        book_id: int,
+        *,
+        preserve_timestamp: bool = True,
+    ) -> int:
+        """Copy one book from another library into this one (upstream
+        ``copy_one_book``, copy_to_library.py:77, the blessed composition of
+        sanctioned reads and writes).
+
+        Carried over: title (and its stored sort), authors (with each
+        author's stored per-author sort key, then the book-level
+        ``author_sort`` verbatim), the format FILES (verified source paths
+        copied through :meth:`add_book`'s seed path, so ``data`` rows and
+        the FTS/pages queues fill in), the cover bytes, tags, series +
+        index, publisher, rating, languages, identifiers, comments,
+        ``pubdate``, and -- ``preserve_timestamp`` (upstream
+        ``preserve_date``) -- the addition timestamp. NOT carried, each for
+        a recorded reason: annotations (the postprocess decline), ``data/``
+        extras (outside the copy's scope), plugin data and conversion
+        options (they gain carriage with the opaque-blob writers of this
+        same release), custom columns (the source OPF carries none of them;
+        ``move_book_from_trash``'s rule), and the uuid (always fresh, like
+        upstream's ``preserve_uuid=False`` default).
+
+        The whole copy is ONE ``batch()`` on this library: any failure --
+        including a missing source format file -- rolls everything back and
+        leaves zero rows and no directory. Duplicate policy stays with the
+        frontend (upstream's ``duplicate_action``): this is the plain add
+        path, and a byte-identical re-import raises through
+        :meth:`add_book`'s invariant. Returns the new book id; unknown
+        source books raise ValueError.
+        """
+        row = src_db.get_book(book_id, include_comments=True)
+        if row is None:
+            raise ValueError(f"Book {book_id} not found in the source library")
+        formats = [
+            src_db.get_format_path(book_id, fmt) for fmt in src_db.get_formats(book_id)
+        ]
+        cover = src_db.get_cover_bytes(book_id)
+        authors: list[str] = row["authors"] or []
+        author_sorts: list[str] = row.get("author_sorts") or []
+        with self.batch():
+            new_id = self.add_book(
+                row["title"],
+                authors,
+                formats=formats,
+                cover=cover,
+                identifiers=dict(row["identifiers"] or {}),
+                publisher=row["publisher"] or None,
+                pubdate=row["pubdate"] or None,
+            )
+            for tag in row["tags"] or []:
+                self.add_tag(new_id, tag)
+            if row["series"]:
+                self.set_series(new_id, row["series"], row["series_index"] or 1.0)
+            if row["rating"]:
+                self.set_rating(new_id, row["rating"] / 2.0)
+            if row["languages"]:
+                self.set_languages(new_id, list(row["languages"]))
+            if row.get("comments"):
+                self.set_comments(new_id, row["comments"])
+            # Per-author sort keys first (they feed the recomputation), then
+            # the book-level sort verbatim, so a hand-tuned override
+            # survives the copy exactly as it reads in the source.
+            for name, stored in zip(authors, author_sorts):
+                if stored and stored != name:
+                    self.set_author_sort_name(name, stored)
+            if row["author_sort"]:
+                self.set_author_sort(new_id, row["author_sort"])
+            if row["title_sort"] and row["title_sort"] != row["title"]:
+                self.set_title_sort(new_id, row["title_sort"])
+            # Upstream stamps now() when not preserving; an empty source
+            # timestamp gets the same treatment either way.
+            if preserve_timestamp and row["timestamp"]:
+                self.set_timestamp(new_id, row["timestamp"])
+            else:
+                self.set_timestamp(new_id, datetime.now(UTC))
+        return new_id
 
     def _author_sort_keys(self, names: list[str]) -> list[tuple[str, str, bool]]:
         """Resolve author names to (name, sort, is_new) without writing.
