@@ -221,9 +221,9 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   the pip-floor policy decision (`requires-python >=3.14` vs the 3.13-capable compat
   branch) and the forward-only tag the manifest's `hermitage` module pins. cquarry's
   half is verified end to end. This is the program's first Hermitage item.
-- [ ] **Dependabot's two open major-bump PRs** (actions/checkout 4 -> 7,
-  actions/setup-python 5 -> 7): Brandon's merge call; the current pins are correct and
-  green either way.
+- [x] **Dependabot's two open major-bump PRs** (actions/checkout 4 -> 7,
+  actions/setup-python 5 -> 7): resolved 2026-09-30, both merged and CI green
+  (#3 setup-python 5.6.0 -> 7.0.0, #4 checkout 4.4.0 -> 7.0.1).
 
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
