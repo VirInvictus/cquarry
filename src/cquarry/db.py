@@ -2278,6 +2278,52 @@ class CalibreDB:
         ids = self._get_all_book_ids() if book_ids is None else book_ids
         return {book_id: cache.get(book_id, ()) for book_id in ids}
 
+    def user_categories_for_books(
+        self, book_ids: Sequence[int] | None = None
+    ) -> dict[int, dict[str, list[list[str]]]]:
+        """The inverse user-category map (upstream
+        ``Cache.user_categories_for_books``): every requested book id ->
+        ``{category: [[value, location], ...]}`` naming only the members the
+        book actually holds.
+
+        Members are probed exactly like the ``@Name`` search location
+        (upstream's rule): an exact match of the stored member value on the
+        member's own location, via the same :meth:`field` path the engine
+        uses, so the answers agree with ``@Name:Category`` by construction.
+        Members whose location cannot be evaluated match nothing rather than
+        erroring: composite columns (the §7 GPM boundary -- upstream
+        evaluates them through its template engine) and unknown locations
+        both fall out of ``field()`` as no match, the same way unknown
+        ``@Names`` match nothing in search. Scalar members compare with
+        ``==`` and list members with membership, mirroring upstream; a
+        rating member written as the string ``"4"`` therefore does not match
+        the 4.0-star float ``field()`` yields, which is upstream's own
+        string-vs-number behavior. ``book_ids=None`` means every book.
+        """
+        user_cats = self.get_user_categories()
+        ids = self._get_all_book_ids() if book_ids is None else book_ids
+        out: dict[int, dict[str, list[list[str]]]] = {}
+        for book_id in ids:
+            per_book: dict[str, list[list[str]]] = {}
+            for ucat, members in user_cats.items():
+                held: list[list[str]] = []
+                for member in members:
+                    if not isinstance(member, (list, tuple)) or len(member) < 2:
+                        continue  # corrupt member entry: degrade like the prefs do
+                    name, location = member[0], member[1]
+                    try:
+                        value = self.field(book_id, location)
+                    except sqlite3.OperationalError, ValueError:
+                        value = None
+                    if isinstance(value, (list, tuple)):
+                        if name in value:
+                            held.append([name, location])
+                    elif name == value:
+                        held.append([name, location])
+                per_book[ucat] = held
+            out[book_id] = per_book
+        return out
+
     # --- search.MetadataProvider interface ---
 
     def all_ids(self) -> set[int]:

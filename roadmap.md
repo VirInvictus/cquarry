@@ -186,7 +186,10 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   Size S. **Shipped 1.25**: `{book: sorted wing-name tuple}`, every requested id
   answered (upstream's shape); a wing that fails to evaluate is skipped with a
   warning where upstream splices an error string into the name tuple.
-- [ ] Inverse user-category map: `user_categories_for_books` (`cache.py:3645`). Size S.
+- [x] Inverse user-category map: `user_categories_for_books` (`cache.py:3645`). Size S.
+  **Shipped 1.25**: members probed exactly like the `@Name` location (so the answers
+  agree with `@Name:Category` by construction); composite and unknown-location members
+  match nothing rather than erroring.
 - [ ] `format_hash` / `format_metadata` (`cache.py:1255`, `:1268`): the file-changed
   detector the FTS sidecar's own hash columns compare against. Size XS.
 - [ ] `books_by_year` / `books_by_month` over any date field (`cache.py:1057`, `:1080`);

@@ -2636,6 +2636,7 @@ class TestInverseLibraryMaps(unittest.TestCase):
             CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
             CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
             CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT, is_multiple INTEGER, editable INTEGER DEFAULT 1, display TEXT DEFAULT '{}', normalized INTEGER DEFAULT 0);
             CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
             INSERT INTO books (id, title, sort, path, has_cover) VALUES
                 (1, 'Alpha Book', 'Alpha Book', 'A/Alpha (1)', 0),
@@ -2656,6 +2657,21 @@ class TestInverseLibraryMaps(unittest.TestCase):
             (vl_json,),
         )
         con.execute("DELETE FROM preferences WHERE key = 'virtual_libraries2'")
+        # A composite custom column (no storage) so the inverse user-category
+        # map can prove composite members fall out as no match, not an error.
+        con.execute(
+            "INSERT INTO custom_columns (id,label,name,datatype,is_multiple) "
+            "VALUES (1,'comp','Composite','composite',0)"
+        )
+        uc_json = (
+            '{"Favorites": [["Alpha", "tags"], ["Ann Alpha", "authors"]], '
+            '"Comp Cat": [["x", "#comp"]], '
+            '"Nowhere": [["Ghost", "publisher"]]}'
+        )
+        con.execute(
+            "INSERT INTO preferences (key, val) VALUES ('user_categories', ?)",
+            (uc_json,),
+        )
         con.commit()
         con.close()
         self.db = CalibreDB(self.db_path)
@@ -2696,3 +2712,51 @@ class TestInverseLibraryMaps(unittest.TestCase):
         result = self.db.virtual_libraries_for_books()
         self.assertEqual(result[3], ("Gamma Wing",))
         self.assertEqual(result[1], ())
+
+
+class TestInverseUserCategories(TestInverseLibraryMaps):
+    """user_categories_for_books: the inverse @Name map (1.25, Phase 16).
+
+    Rides TestInverseLibraryMaps' fixture (books 1/2 tagged+authored, book 3
+    bare; a composite column and three user categories defined)."""
+
+    def test_members_list_what_each_book_holds(self):
+        result = self.db.user_categories_for_books()
+        self.assertEqual(
+            result[1]["Favorites"], [["Alpha", "tags"], ["Ann Alpha", "authors"]]
+        )
+        self.assertEqual(
+            result[2]["Favorites"], [["Alpha", "tags"], ["Ann Alpha", "authors"]]
+        )
+        # Book 3 holds nothing anywhere, but every category key is present.
+        self.assertEqual(result[3], {"Favorites": [], "Comp Cat": [], "Nowhere": []})
+
+    def test_restriction_answers_only_the_asked_ids(self):
+        result = self.db.user_categories_for_books([3])
+        self.assertEqual(list(result), [3])
+        self.assertEqual(result[3]["Favorites"], [])
+
+    def test_composite_member_matches_nothing_without_erroring(self):
+        result = self.db.user_categories_for_books([1, 2])
+        self.assertEqual(result[1]["Comp Cat"], [])
+        self.assertEqual(result[2]["Comp Cat"], [])
+
+    def test_unknown_member_location_matches_nothing(self):
+        result = self.db.user_categories_for_books([1])
+        self.assertEqual(result[1]["Nowhere"], [])
+
+    def test_agrees_with_the_name_search_location(self):
+        # The documented construction guarantee: the members this inverse map
+        # lists are exactly the books @Name:<category> matches.
+        for book_id in (1, 2, 3):
+            for ucat in ("Favorites", "Nowhere"):
+                listed = {
+                    name
+                    for name, _loc in self.db.user_categories_for_books([book_id])[
+                        book_id
+                    ][ucat]
+                }
+                if listed:
+                    self.assertIn(book_id, self.db.search(f"@{ucat}:true"))
+                else:
+                    self.assertNotIn(book_id, self.db.search(f"@{ucat}:true"))
