@@ -1950,6 +1950,32 @@ class TestFTSSidecar(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.search_book_text("")
 
+    def test_get_dirtied_formats_lists_the_queue(self):
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.executemany(
+            "INSERT INTO dirtied_formats (book, format) VALUES (?, ?)",
+            [(2, "epub"), (1, "MOBI"), (1, "epub")],
+        )
+        fts.commit()
+        fts.close()
+        # Sorted by book then format, formats uppercased as stored.
+        self.assertEqual(
+            self.db.get_dirtied_formats(), [(1, "EPUB"), (1, "MOBI"), (2, "EPUB")]
+        )
+
+    def test_get_dirtied_formats_empty_without_queue_or_sidecar(self):
+        # A sidecar with no queue rows yet...
+        self.assertEqual(self.db.get_dirtied_formats(), [])
+        # ...and no sidecar at all.
+        other = os.path.join(self.temp_dir, "lib2")
+        os.makedirs(other)
+        os.link(self.db_path, os.path.join(other, "metadata.db"))
+        db = CalibreDB(os.path.join(other, "metadata.db"))
+        try:
+            self.assertEqual(db.get_dirtied_formats(), [])
+        finally:
+            db.close()
+
     def test_refresh_rediscovers_a_late_sidecar(self):
         other = os.path.join(self.temp_dir, "lib3")
         os.makedirs(other)

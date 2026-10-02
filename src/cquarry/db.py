@@ -1589,6 +1589,29 @@ class CalibreDB:
             return []
         return [row["book"] for row in cur.fetchall()]
 
+    def get_dirtied_formats(self) -> list[tuple[int, str]]:
+        """The FTS sidecar's extraction queue: ``(book_id, format)`` pairs.
+
+        The formats sibling of :meth:`get_dirtied_books` (1.24): every pair
+        the sidecar's ``dirtied_formats`` table holds for (re-)extraction and
+        a pages rescan -- Calibre's extraction pool consumes it at startup
+        and while running. Formats come back uppercase as stored; the list
+        is sorted by book then format. Read-only observation: Calibre clears
+        an entry when its extraction commits, and cquarry's own format verbs
+        manage the pairs they are responsible for. Empty list when the
+        sidecar is absent, unreadable, or predates the table.
+        """
+        conn = self._fts_connect()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT book, format FROM dirtied_formats ORDER BY book, format"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []  # sidecar lost its table mid-session: degrade
+        return [(row["book"], (row["format"] or "").upper()) for row in rows]
+
     def get_feeds(self) -> list[dict[str, Any]]:
         """Registered news feeds: ``[{id, title, script}]``.
 

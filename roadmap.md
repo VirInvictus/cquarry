@@ -116,9 +116,10 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   OPF, it does not generate one). **Shipped 1.24**: the book half parses the entry's
   sidecar `metadata.opf` (stdlib ElementTree) to rebuild the core row; custom-column
   values, annotations, and plugin data are not restored (the OPF carries none of them).
-- [ ] **`get_dirtied_formats()` read** beside `get_dirtied_books()` and
+- [x] **`get_dirtied_formats()` read** beside `get_dirtied_books()` and
   `get_annotations_dirtied_books()`. Retires CalibreQuarry's raw sidecar read
   (`modes/fts.py:91`) and unblocks its `fts-index` verb. Size XS.
+  **Shipped 1.24**: `list[tuple[int, str]]`, sorted, formats uppercased as stored.
 - [ ] **`set_custom_column_metadata`** (`backend.py:1407`, `cache.py:3233`): modify an
   existing column's name/editable/display JSON, notably `enum_values`, without Calibre
   open; today nothing can populate that list. Size S.
