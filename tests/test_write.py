@@ -5106,3 +5106,72 @@ class TestBlobWriters(unittest.TestCase):
         )
         # The source book's plugin data does NOT follow (upstream's copy doesn't).
         self.assertEqual(self._sql("SELECT book FROM books_plugin_data"), [(1,)])
+
+
+class TestCustomSeriesIndex(unittest.TestCase):
+    """The custom-series index writer + the fresh-assignment seed
+    (1.26, Phase 17's D2)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            INSERT INTO books (id, title) VALUES (1, 'One'), (2, 'Two');
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT UNIQUE,
+                name TEXT, datatype TEXT, editable BOOL DEFAULT 1,
+                display TEXT DEFAULT '{}', is_multiple BOOL DEFAULT 0,
+                normalized BOOL DEFAULT 0);
+            INSERT INTO custom_columns VALUES (1,'sag','Saga','series',1,'{}',0,1);
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT UNIQUE, link TEXT DEFAULT '');
+            CREATE TABLE books_custom_column_1_link (book INTEGER, value INTEGER, extra REAL, UNIQUE(book, value));
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql(self, query):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query).fetchall()]
+        finally:
+            conn.close()
+
+    def test_fresh_assignment_seeds_extra_10(self):
+        # Upstream seeds a fresh series assignment's extra at 1.0; the 1.25
+        # writer left it NULL, making #sag_index permanently unreadable.
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_custom_column(1, "#sag", "Saga")
+        extra = self._sql("SELECT extra FROM books_custom_column_1_link")[0][0]
+        self.assertEqual(extra, 1.0)
+
+    def test_set_custom_series_index_updates_and_noops(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_custom_column(1, "#sag", "Saga")
+            self.assertTrue(wdb.set_custom_series_index(1, "#sag", 3.5))
+            self.assertFalse(wdb.set_custom_series_index(1, "#sag", 3.5))
+            self.assertEqual(
+                self._sql("SELECT extra FROM books_custom_column_1_link"),
+                [(3.5,)],
+            )
+            # None writes the schema's no-index value 1.0.
+            self.assertTrue(wdb.set_custom_series_index(1, "#sag", None))
+            self.assertEqual(
+                self._sql("SELECT extra FROM books_custom_column_1_link"),
+                [(1.0,)],
+            )
+
+    def test_unassigned_book_and_non_series_raise(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_custom_series_index(2, "#sag", 2.0)
+            with self.assertRaises(ValueError):
+                wdb.set_custom_series_index(1, "title", 2.0)

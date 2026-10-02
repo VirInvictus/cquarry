@@ -2125,6 +2125,9 @@ class WritableCalibreDB:
         if new_vals == old_rows:
             return False
         self._clear_pattern_a(link_table, value_table, book_id)
+        link_cols = {
+            r[1] for r in self.conn.execute(f"PRAGMA table_info({link_table})")
+        }
         for val in new_vals:
             vrow = self.conn.execute(
                 f"SELECT id FROM {value_table} WHERE value = ?", (val,)
@@ -2136,10 +2139,19 @@ class WritableCalibreDB:
                     f"INSERT INTO {value_table} (value) VALUES (?)", (val,)
                 ).lastrowid
             )
-            self.conn.execute(
-                f"INSERT INTO {link_table} (book, value) VALUES (?, ?)",
-                (book_id, vid),
-            )
+            if datatype == "series" and "extra" in link_cols:
+                # Upstream seeds a fresh series assignment's index at 1.0
+                # (db/write.py:365-368); leaving extra NULL made the
+                # #label_index location permanently unreadable.
+                self.conn.execute(
+                    f"INSERT INTO {link_table} (book, value, extra) VALUES (?, ?, 1.0)",
+                    (book_id, vid),
+                )
+            else:
+                self.conn.execute(
+                    f"INSERT INTO {link_table} (book, value) VALUES (?, ?)",
+                    (book_id, vid),
+                )
         return True
 
     def _write_pattern_b(self, meta, value_table, book_id, value) -> bool:
@@ -2877,6 +2889,53 @@ class WritableCalibreDB:
         ).fetchone()
         if row is None:
             raise ValueError(f"Schema predates the {name} table")
+
+    def set_custom_series_index(
+        self, book_id: int, label: str, index: float | None
+    ) -> bool:
+        """Set one custom series column's index for a book (upstream
+        ``custom_series_index``): updates the link row's ``extra`` float
+        in place, the value row untouched.
+
+        The book must already belong to the series column's named series
+        (``set_custom_column`` assigns one); ``None`` writes the schema's
+        no-index value 1.0, exactly like the builtin ``set_series_index``'s
+        clear semantics. ``label`` addresses the column as in
+        ``set_custom_column``. Returns True when the extra changed, False
+        on an equal value; unknown books/columns, a non-series column, or
+        a book with no series in the column raise ValueError.
+        """
+        self._begin()
+        try:
+            self._require_book(book_id)
+            meta = self._custom_column_meta(label)
+            if str(meta["datatype"]).lower() != "series":
+                raise ValueError(f"{label!r} is not a series column")
+            cid = int(meta["id"])
+            link_table = f"books_custom_column_{cid}_link"
+            row = self.conn.execute(
+                f"SELECT value, extra FROM {link_table} WHERE book = ?",
+                (book_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"Book {book_id} has no series in {label!r} "
+                    "(set_custom_column assigns one first)"
+                )
+            new = round(float(index), 2) if index is not None else 1.0
+            if row["extra"] is not None and float(row["extra"]) == new:
+                self._rollback()
+                return False
+            self.conn.execute(
+                f"UPDATE {link_table} SET extra = ? WHERE book = ? AND value = ?",
+                (new, book_id, row["value"]),
+            )
+            self._touch_book(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
 
     def set_has_cover(self, book_id: int, has_cover: bool) -> bool:
         """Toggle the catalogued ``has_cover`` flag (the cover FILE itself is
