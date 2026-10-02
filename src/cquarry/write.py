@@ -2752,13 +2752,13 @@ class WritableCalibreDB:
         ``add_custom_book_data``, per book); ``None`` deletes the row.
 
         The row is the (book, name, val) UNIQUE pair the read side's
-        :meth:`CalibreDB.get_plugin_data` surfaces. Serialization: a ``str``
-        stores verbatim; any other JSON-serializable payload goes through
-        ``json.dumps`` (upstream's own serialization, so Calibre-side
-        readers see the shape they expect). Returns True when a row was
-        written or deleted, False when a delete found nothing. Raises
-        ValueError for an empty name, an unknown book, or a schema
-        predating the table.
+        :meth:`CalibreDB.get_plugin_data` surfaces. Serialization: every
+        payload goes through ``json.dumps(val, default=str)`` (since 1.26.0;
+        upstream's reader json.loads with a revive hook, so a verbatim plain
+        string is unreadable to it -- the 1.25 str-verbatim shortcut is
+        gone). Returns True when a row was written or deleted, False when a
+        delete found nothing. Raises ValueError for an empty name, an
+        unknown book, or a schema predating the table.
         """
         name = (name or "").strip()
         if not name:
