@@ -2782,7 +2782,10 @@ class WritableCalibreDB:
     def _validate_book_storage(data: dict[str, Any]) -> None:
         for key, value in data.items():
             if not isinstance(key, str) or not isinstance(value, str):
-                raise TypeError(
+                # Upstream raises InvalidBookStorage -- a ValueError -- for
+                # both shapes; noqa:TRY004 is the deliberate exception-type
+                # mapping, not an isinstance slip.
+                raise ValueError(  # noqa: TRY004
                     "Book-storage keys and values must be strings "
                     "(upstream validate_book_storage rejects anything else)"
                 )
