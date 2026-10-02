@@ -83,4 +83,14 @@ jobs:
       - name: Mint the Release from the tag's verbatim message
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --notes-from-tag --verify-tag
+        # Idempotent: a tag pushed twice (followTags riding a branch push
+        # plus an explicit tag push) fires two runs, and the second's create
+        # would 422 "tag_name already exists" against the first's Release.
+        # The tag message is immutable, so an existing Release already has
+        # the verbatim body this step exists to publish.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json id --jq .id; then
+            echo "Release for $GITHUB_REF_NAME already exists; nothing to mint."
+          else
+            gh release create "$GITHUB_REF_NAME" --notes-from-tag --verify-tag
+          fi
