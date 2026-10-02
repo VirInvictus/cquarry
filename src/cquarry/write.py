@@ -2783,6 +2783,155 @@ class WritableCalibreDB:
     _TRASH_CATEGORIES = ("b", "f")
     _TRASH_DEFAULT_EXPIRY_SECONDS = 14 * 86400  # upstream defs.py default
 
+    # -- Extra files: the book's data/ directory (1.25, Phase 17 item 16) --
+
+    def add_data_file(
+        self,
+        book_id: int,
+        relpath: str,
+        data: bytes | str | os.PathLike,
+        *,
+        replace: bool = False,
+        auto_rename: bool = False,
+    ) -> str | None:
+        """Write one extra file into the book's ``data/`` directory (upstream
+        ``add_extra_files``), returning the relpath actually written.
+
+        ``relpath`` is the forward-slash path under ``data/``; parent
+        directories are created as needed. ``data`` is bytes or a source
+        path (copied). Pure filesystem like the trash verbs -- no database
+        rows exist for extra files and none are written, so no queues, no
+        touching, and no batch interaction. When the target exists:
+        ``replace`` overwrites, ``auto_rename`` writes beside it under
+        ``merge conflict[N]/`` (upstream's layout), and neither set answers
+        None. Unsafe relpaths (absolute, ``..``, empty components) raise
+        ValueError -- the same guard the read side applies -- and a book
+        with no on-disk directory raises too.
+        """
+        parts = self._safe_data_relpath(relpath)
+        if parts is None:
+            raise ValueError(f"Unsafe data-file path: {relpath!r}")
+        data_dir = self._book_data_dir(book_id)
+        if data_dir is None:
+            # The book exists (or _book_data_dir raised); its data/ dir is
+            # created on first write.
+            brow = self.conn.execute(
+                "SELECT path FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            if brow is None:
+                raise ValueError(f"Book {book_id} not found")
+            if not brow["path"]:
+                raise ValueError(f"Book {book_id} has no on-disk directory")
+            data_dir = os.path.join(os.path.dirname(self.db_path), brow["path"], "data")
+        dest = os.path.join(data_dir, *parts)
+        if os.path.lexists(dest) and not replace:
+            if not auto_rename:
+                return None
+            dirname, basename = os.path.split(dest)
+            num = 0
+            while True:
+                conflict = "merge conflict" if num == 0 else f"merge conflict {num}"
+                candidate = os.path.join(dirname, conflict, basename)
+                if not os.path.lexists(candidate):
+                    dest = candidate
+                    break
+                num += 1
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if isinstance(data, (str, os.PathLike)):
+            shutil.copy2(os.fspath(data), dest)
+        else:
+            with open(dest, "wb") as f:
+                f.write(data)
+        return os.path.relpath(dest, data_dir).replace(os.sep, "/")
+
+    def _book_data_dir(self, book_id: int) -> str | None:
+        """The book's ``data/`` directory, or None when there is no directory yet."""
+        brow = self.conn.execute(
+            "SELECT path FROM books WHERE id = ?", (book_id,)
+        ).fetchone()
+        if brow is None:
+            raise ValueError(f"Book {book_id} not found")
+        if not brow["path"]:
+            return None
+        data_dir = os.path.join(os.path.dirname(self.db_path), brow["path"], "data")
+        return data_dir if os.path.isdir(data_dir) else None
+
+    @staticmethod
+    def _safe_data_relpath(relpath: str) -> list[str] | None:
+        """Split a ``data/`` relpath into components, None when unsafe.
+
+        The write-side twin of the read-side guard (CalibreDB's
+        ``_safe_data_relpath``): absolute spellings, empty components,
+        ``.``, and ``..`` all refuse. Duplicated rather than imported so
+        this module keeps its zero-imports-from-the-read-module property.
+        """
+        if not isinstance(relpath, str) or not relpath.strip():
+            return None
+        normalized = relpath.replace("\\", "/")
+        if normalized.startswith("/"):
+            return None
+        parts = list(normalized.split("/"))
+        if any(p in ("", ".", "..") for p in parts):
+            return None
+        return parts
+
+    def rename_data_file(
+        self, book_id: int, relpath: str, new_relpath: str, *, replace: bool = False
+    ) -> bool:
+        """Move one extra file within the book's ``data/`` directory
+        (upstream ``rename_extra_file``). False when the source is absent or
+        the target exists without ``replace``; unsafe paths raise ValueError
+        (the shared guard).
+        """
+        src_parts = self._safe_data_relpath(relpath)
+        dst_parts = self._safe_data_relpath(new_relpath)
+        if src_parts is None:
+            raise ValueError(f"Unsafe data-file path: {relpath!r}")
+        if dst_parts is None:
+            raise ValueError(f"Unsafe data-file path: {new_relpath!r}")
+        data_dir = self._book_data_dir(book_id)
+        if data_dir is None:
+            return False
+        src = os.path.join(data_dir, *src_parts)
+        dest = os.path.join(data_dir, *dst_parts)
+        if not os.path.isfile(src):
+            return False
+        if os.path.lexists(dest) and not replace:
+            return False
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.move(src, dest)
+        return True
+
+    def remove_data_files(
+        self, book_id: int, relpaths: list[str]
+    ) -> dict[str, Exception | None]:
+        """Delete extra files from the book's ``data/`` directory (upstream
+        ``remove_extra_files``; permanently -- the recycle-bin mode is a GUI
+        concept with no library-side form). Returns
+        ``{relpath: None | the OSError}`` per requested path; unsafe paths
+        raise ValueError before anything is removed.
+        """
+        results: dict[str, Exception | None] = {}
+        parts_map: dict[str, list[str]] = {}
+        data_dir = self._book_data_dir(book_id)
+        for relpath in relpaths:
+            parts = self._safe_data_relpath(relpath)
+            if parts is None:
+                raise ValueError(f"Unsafe data-file path: {relpath!r}")
+            parts_map[relpath] = parts
+            if data_dir is None:
+                results[relpath] = FileNotFoundError(relpath)
+        if data_dir is None:
+            return results
+        for relpath, parts in parts_map.items():
+            path = os.path.join(data_dir, *parts)
+            try:
+                os.remove(path)
+                results[relpath] = None
+            except OSError as e:
+                results[relpath] = e
+        return results
+
     def _trash_root(self) -> str:
         return os.path.join(os.path.dirname(self.db_path), self._TRASH_DIR_NAME)
 

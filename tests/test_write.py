@@ -4557,3 +4557,101 @@ class TestSetPages(unittest.TestCase):
         conn.close()
         with WritableCalibreDB(path2) as wdb, self.assertRaises(ValueError):
             wdb.set_pages(1, 10)
+
+
+class TestDataFiles(_WriteSideFixture, unittest.TestCase):
+    """The data/ directory verbs: reads and the pure-filesystem writes
+    (1.25, Phase 17 item 16)."""
+
+    def _book_dir(self, book_id=1):
+        path = os.path.join(self.temp_dir, f"Book ({book_id})")
+        os.makedirs(path, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE books SET path = ? WHERE id = ?", (f"Book ({book_id})", book_id)
+        )
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_list_and_get_roundtrip(self):
+        book_dir = self._book_dir()
+        data = os.path.join(book_dir, "data", "sub")
+        os.makedirs(data)
+        with open(os.path.join(data, "notes.txt"), "wb") as f:
+            f.write(b"hello data")
+        with CalibreDB(self.db_path) as db:
+            files = db.list_data_files(1)
+            self.assertEqual([e["relpath"] for e in files], ["sub/notes.txt"])
+            self.assertEqual(files[0]["size"], 10)
+            self.assertEqual(db.get_data_file(1, "sub/notes.txt"), b"hello data")
+            self.assertIsNone(db.get_data_file(1, "missing.txt"))
+            self.assertEqual(db.list_data_files(2), [])  # no dir yet
+
+    def test_unknown_book_and_empty_path(self):
+        with CalibreDB(self.db_path) as db:
+            with self.assertRaises(ValueError):
+                db.list_data_files(999)
+            self.assertEqual(db.list_data_files(1), [])
+
+    def test_traversal_is_refused_on_both_sides(self):
+        book_dir = self._book_dir()
+        with open(os.path.join(book_dir, "secret.txt"), "w") as f:
+            f.write("top secret")
+        with CalibreDB(self.db_path) as db:
+            with self.assertRaises(ValueError):
+                db.get_data_file(1, "../secret.txt")
+            with self.assertRaises(ValueError):
+                db.get_data_file(1, "/etc/passwd")
+        with (
+            WritableCalibreDB(self.db_path) as wdb,
+            self.assertRaises(ValueError),
+        ):
+            wdb.add_data_file(1, "../escape.txt", b"x")
+
+    def test_add_bytes_and_source_path(self):
+        self._book_dir()
+        src = os.path.join(self.temp_dir, "src.bin")
+        with open(src, "wb") as f:
+            f.write(b"from disk")
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertEqual(
+                wdb.add_data_file(1, "docs/readme.txt", b"inline"), "docs/readme.txt"
+            )
+            self.assertEqual(wdb.add_data_file(1, "copy.bin", src), "copy.bin")
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.get_data_file(1, "docs/readme.txt"), b"inline")
+            self.assertEqual(db.get_data_file(1, "copy.bin"), b"from disk")
+
+    def test_add_conflict_semantics(self):
+        self._book_dir()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.add_data_file(1, "file.txt", b"v1")
+            self.assertIsNone(wdb.add_data_file(1, "file.txt", b"v2"))
+            self.assertEqual(
+                wdb.add_data_file(1, "file.txt", b"v2", replace=True), "file.txt"
+            )
+            conflict = wdb.add_data_file(1, "file.txt", b"v3", auto_rename=True)
+            self.assertEqual(conflict, "merge conflict/file.txt")
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.get_data_file(1, "file.txt"), b"v2")
+            self.assertEqual(db.get_data_file(1, "merge conflict/file.txt"), b"v3")
+
+    def test_rename_and_remove(self):
+        self._book_dir()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.add_data_file(1, "old.txt", b"data")
+            self.assertTrue(wdb.rename_data_file(1, "old.txt", "new/deep.txt"))
+            self.assertFalse(wdb.rename_data_file(1, "old.txt", "again.txt"))
+            out = wdb.remove_data_files(1, ["new/deep.txt", "ghost.txt"])
+            self.assertIsNone(out["new/deep.txt"])
+            self.assertIsInstance(out["ghost.txt"], FileNotFoundError)
+
+    def test_writes_touch_no_rows(self):
+        self._book_dir()
+        before = self._sql2("SELECT id, title FROM books")
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.add_data_file(1, "x.txt", b"x")
+            wdb.remove_data_files(1, ["x.txt"])
+        self.assertEqual(self._sql2("SELECT id, title FROM books"), before)
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])

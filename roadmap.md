@@ -264,8 +264,14 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   **Shipped 1.25**: one row per book (the book column is the table's PRIMARY KEY),
   `needs_scan` lands 0, honest no-op on an identical clean row, pending scans always
   rewrite.
-- [ ] Extra-files (`data/` dir) verbs (`cache.py:4099-4181`): cquarry ignores the data
-  directory entirely, reads included. Size S-M.
+- [x] Extra-files (`data/` dir) verbs (`cache.py:4099-4181`): cquarry ignores the data
+  directory entirely, reads included. Size S-M. **Shipped 1.25** as `list_data_files`/
+  `get_data_file` (reads) and `add_data_file`/`rename_data_file`/`remove_data_files`
+  (writes, pure filesystem like the trash verbs: no rows exist for extra files, so no
+  queues and no touching). Shared traversal guard on both sides (absolute, `..`, empty
+  components raise); upstream's `merge conflict[N]` auto-rename layout reproduced;
+  the recycle-bin remove mode stays GUI-only. `merge_extra_files` stays out -- item
+  17's copy primitive deliberately excludes data/ extras.
 - [ ] A blessed cross-library copy primitive (modeled on `copy_to_library.py:77`):
   composable from existing reads + writes except the declined annotations postprocess
   and data/ extras; duplicate/automerge policy stays frontend. Size M.

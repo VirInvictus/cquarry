@@ -1170,6 +1170,108 @@ class CalibreDB:
             out["#" + col["label"]] = {str(v): url for v in names if v is not None}
         return out
 
+    def list_data_files(self, book_id: int) -> list[dict[str, Any]]:
+        """Every file under the book's ``data/`` directory (upstream's
+        extra-files family, the ``DATA_FILE_PATTERN`` half the content
+        server serves): ``[{relpath, path, size, mtime}]``.
+
+        ``relpath`` is the forward-slash path under ``data/`` (the portable
+        spelling every other verb takes); ``path`` the absolute location;
+        ``size``/``mtime`` from ``os.stat``. Calibre's own book-directory
+        residents (formats, covers, ``metadata.opf``) live outside ``data/``
+        and never appear here. Sorted by ``relpath``; empty list when the
+        book has no ``data/`` directory; ``ValueError`` for unknown books.
+        """
+        data_dir = self._book_data_dir(book_id)
+        if data_dir is None:
+            return []
+        out: list[dict[str, Any]] = []
+        for dirpath, _dirnames, filenames in os.walk(data_dir):
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                relpath = os.path.relpath(path, data_dir).replace(os.sep, "/")
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                out.append(
+                    {
+                        "relpath": relpath,
+                        "path": path,
+                        "size": st.st_size,
+                        "mtime": st.st_mtime,
+                    }
+                )
+        out.sort(key=lambda entry: entry["relpath"])
+        return out
+
+    def get_data_file(self, book_id: int, relpath: str) -> bytes | None:
+        """One extra file's bytes from the book's ``data/`` directory, or
+        None when absent.
+
+        ``relpath`` is the forward-slash path under ``data/``; traversal
+        guards reject absolute spellings and any ``..`` component (a
+        ``ValueError``, not a read outside the book). The bytes sibling of
+        :meth:`read_backup`, for the files upstream's content server
+        serves under ``data/``.
+        """
+        path = self._resolve_data_file(book_id, relpath)
+        if path is None:
+            return None
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def _book_data_dir(self, book_id: int) -> str | None:
+        """The book's ``data/`` directory, or None when the book/dir is absent."""
+        cur = self.conn.cursor()
+        brow = cur.execute("SELECT path FROM books WHERE id = ?", (book_id,)).fetchone()
+        if brow is None:
+            raise ValueError(f"Book {book_id} not found")
+        if not brow["path"]:
+            return None
+        book_dir = os.path.join(
+            os.path.dirname(os.path.abspath(self.db_path)), brow["path"]
+        )
+        data_dir = os.path.join(book_dir, "data")
+        return data_dir if os.path.isdir(data_dir) else None
+
+    @staticmethod
+    def _safe_data_relpath(relpath: str) -> list[str] | None:
+        """Split a ``data/`` relpath into components, None when unsafe.
+
+        Absolute spellings, empty components, ``.``, and ``..`` all refuse:
+        the guard both the read and the write side share.
+        """
+        if not isinstance(relpath, str) or not relpath.strip():
+            return None
+        normalized = relpath.replace("\\", "/")
+        if normalized.startswith("/"):
+            return None
+        parts = list(normalized.split("/"))
+        if any(p in ("", ".", "..") for p in parts):
+            return None
+        return parts
+
+    def _resolve_data_file(self, book_id: int, relpath: str) -> str | None:
+        """Resolve one data-file relpath to an absolute path, safely.
+
+        None when the book has no data dir or the file does not exist;
+        ``ValueError`` for an unsafe relpath (the guard both sides share).
+        """
+        parts = self._safe_data_relpath(relpath)
+        if parts is None:
+            raise ValueError(f"Unsafe data-file path: {relpath!r}")
+        data_dir = self._book_data_dir(book_id)
+        if data_dir is None:
+            return None
+        path = os.path.join(data_dir, *parts)
+        if not os.path.isfile(path):
+            return None
+        return path
+
     def format_path_index(self) -> dict[str, int]:
         """Map every catalogued format file path to its book id.
 
