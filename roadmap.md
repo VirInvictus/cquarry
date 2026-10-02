@@ -198,8 +198,13 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   `analytics.addition_timeline` buckets only the fixed `timestamp` field into counts.
   Size S. **Shipped 1.25**: builtin date locations plus date-typed custom columns,
   restriction-shaped like facet_counts_for_ids; sentinels/blank land nowhere.
-- [ ] `get_next_series_num_for` (+ custom-column variant, `cache.py:2567`,
-  `legacy.py:873`): the preference-aware next series number. Size XS-S.
+- [x] `get_next_series_num_for` (+ custom-column variant, `cache.py:2567`,
+  `legacy.py:873`): the preference-aware next series number. Size XS-S. **Shipped
+  1.25** with one boundary named: upstream reads `series_index_auto_increment` from
+  its tweaks files, which metadata.db never carries, so cquarry reads the library's
+  `preferences` table (fallback: upstream's shipped default `"next"`); a local
+  tweaks.py override is invisible to any database-side reader. Custom columns by
+  `#label`; `current_indices=True` returns the `{book: index}` map.
 - [ ] Annotation conveniences: filter/limit/user/type variants over `get_annotations`,
   removed-skeleton handling, style discovery (`cache.py:3896-3924`). Size S.
 - [ ] `read_backup` (`cache.py:2212`): read the stored sidecar `metadata.opf` to diff

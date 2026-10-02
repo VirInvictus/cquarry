@@ -2889,3 +2889,110 @@ class TestBooksByDateBuckets(unittest.TestCase):
             self.db.books_by_year("nope")
         with self.assertRaises(ValueError):
             self.db.books_by_year("title")
+
+
+class TestNextSeriesNum(unittest.TestCase):
+    """get_next_series_num_for: the preference-aware next number (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT, is_multiple INTEGER, editable INTEGER DEFAULT 1, display TEXT DEFAULT '{}', normalized INTEGER DEFAULT 0);
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT);
+            CREATE TABLE books_custom_column_1_link (id INTEGER PRIMARY KEY, book INTEGER, value INTEGER, extra REAL);
+            CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
+            INSERT INTO books (id, title, sort, path, has_cover, series_index) VALUES
+                (1, 'A1', 'A1', 'a/1', 0, 1.0), (2, 'A2', 'A2', 'a/2', 0, 3.0),
+                (3, 'A5', 'A5', 'a/3', 0, 5.0), (4, 'B1', 'B1', 'a/4', 0, 1.0),
+                (5, 'Other', 'Other', 'a/5', 0, 9.0);
+            INSERT INTO series (id, name) VALUES (1, 'Radch'), (2, 'Vorkosigan');
+            INSERT INTO books_series_link (book, series) VALUES (1, 1), (2, 1), (3, 1), (4, 2);
+            INSERT INTO custom_columns (id,label,name,datatype,is_multiple) VALUES (1,'myseries','My Series','series',0);
+            INSERT INTO custom_column_1 (id, value) VALUES (1, 'Saga'), (2, 'Cosmere');
+            INSERT INTO books_custom_column_1_link (book, value, extra) VALUES
+                (1, 1, 2.0), (3, 1, 4.0), (4, 2, 1.0);
+            """
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def _set_pref(self, value):
+        con = sqlite3.connect(self.db_path)
+        con.execute("DELETE FROM preferences WHERE key = 'series_index_auto_increment'")
+        con.execute(
+            "INSERT INTO preferences (key, val) VALUES ('series_index_auto_increment', ?)",
+            (value,),
+        )
+        con.commit()
+        con.close()
+        self.db.refresh()
+
+    def test_default_next_is_max_plus_one(self):
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 6.0)
+        self.assertEqual(self.db.get_next_series_num_for("Vorkosigan"), 2.0)
+
+    def test_unknown_series_and_numeric_pref(self):
+        self.assertEqual(self.db.get_next_series_num_for("Ghost Series"), 1.0)
+        self._set_pref("7")
+        self.assertEqual(self.db.get_next_series_num_for("Ghost Series"), 7.0)
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 7.0)
+
+    def test_next_first_free_next_free_last_free(self):
+        self._set_pref('"next"')
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 6.0)
+        self._set_pref('"first_free"')
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 2.0)
+        self._set_pref('"next_free"')
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 2.0)
+        self._set_pref('"last_free"')
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 4.0)
+
+    def test_case_insensitive_series_match(self):
+        self.assertEqual(self.db.get_next_series_num_for("radch"), 6.0)
+
+    def test_current_indices_map(self):
+        self.assertEqual(
+            self.db.get_next_series_num_for("Radch", current_indices=True),
+            {1: 1.0, 2: 3.0, 3: 5.0},
+        )
+
+    def test_custom_series_column(self):
+        self.assertEqual(
+            self.db.get_next_series_num_for("Saga", field="#myseries"), 5.0
+        )
+        self.assertEqual(
+            self.db.get_next_series_num_for(
+                "Saga", field="#myseries", current_indices=True
+            ),
+            {1: 2.0, 3: 4.0},
+        )
+
+    def test_non_series_field_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.get_next_series_num_for("x", field="#myseries_index")
+        with self.assertRaises(ValueError):
+            self.db.get_next_series_num_for("x", field="title")

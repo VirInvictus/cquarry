@@ -18,6 +18,7 @@ import contextlib
 import functools
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -811,6 +812,91 @@ class CalibreDB:
             if bucket is not None:
                 out.setdefault(bucket, set()).add(book_id)
         return out
+
+    def get_next_series_num_for(
+        self, series: str, field: str = "series", current_indices: bool = False
+    ) -> float | dict[int, float]:
+        """The preference-aware next series number (upstream
+        ``Cache.get_next_series_num_for``): what Calibre's own "next in
+        series" would assign to a new book in ``series``.
+
+        ``field`` is the builtin ``series`` location (default) or a
+        series-typed custom column by ``#label``, bare label, or display
+        name. The behavior follows the ``series_index_auto_increment``
+        setting: a number is returned verbatim (and also for a series with
+        no books), ``"next"`` is the highest index plus one,
+        ``"first_free"``/``"next_free"``/``"last_free"`` fill the
+        smallest/lowest-anchored/largest-anchored gap, and an unknown value
+        degrades to 1.0 (upstream's fallback). One boundary named: upstream
+        reads this from its tweaks files (``default_tweaks.py`` plus the
+        user's ``tweaks.py``), which are process-side state metadata.db
+        never carries -- this reads the library's ``preferences`` table
+        instead (a consumer can write the row there) and falls back to
+        upstream's shipped default ``"next"``; a local tweaks.py override is
+        invisible to any database-side reader. Indices are compared as
+        floats; ``current_indices=True`` returns the members'
+        ``{book_id: index}`` map instead of the next number.
+        """
+        pref = self.get_preference("series_index_auto_increment", "next")
+
+        def _next_from(indices: list[float]) -> float:
+            if isinstance(pref, (int, float)) and not isinstance(pref, bool):
+                return float(pref)
+            ordered = sorted(indices, key=lambda s: s or 0)
+            if not ordered:
+                return 1.0
+            if pref == "next":
+                return float(math.floor(ordered[-1])) + 1
+            if pref == "first_free":
+                return float(next(i for i in range(1, 10000) if i not in ordered))
+            if pref == "next_free":
+                return float(
+                    next(
+                        i
+                        for i in range(math.ceil(ordered[0]), 10000)
+                        if i not in ordered
+                    )
+                )
+            if pref == "last_free":
+                for i in range(math.ceil(ordered[-1]), 0, -1):
+                    if i not in ordered:
+                        return float(i)
+                return float(ordered[-1]) + 1
+            return 1.0
+
+        if field == "series":
+            index_map = {
+                b["id"]: b["series_index"]
+                for b in self.get_all_books()
+                if b["series"]
+                and b["series"].lower() == (series or "").lower()
+                and isinstance(b["series_index"], (int, float))
+            }
+        else:
+            col = self.find_custom_column(field)
+            if col is None:
+                raise ValueError(f"Unknown series field: {field!r}")
+            if col["datatype"] != "series":
+                raise ValueError(
+                    f"{field!r} is a {col['datatype']} column, not a series field"
+                )
+            name = col["name"]
+            values = self.load_custom_column(name)
+            token = "#" + col["label"]
+            if token not in self._custom_val_cache:
+                self._custom_val_cache[token] = values
+            index_map = {
+                book_id: extra
+                for book_id, extra in self._custom_val_cache.get(
+                    token + "_index", {}
+                ).items()
+                if values.get(book_id)
+                and values[book_id].lower() == (series or "").lower()
+                and isinstance(extra, (int, float))
+            }
+        if current_indices:
+            return index_map
+        return _next_from(list(index_map.values()))
 
     def get_format_path(self, book_id: int, fmt: str, verify: bool = True) -> str:
         """Resolve the absolute filesystem path of a book's format file.
