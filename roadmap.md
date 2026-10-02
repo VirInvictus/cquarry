@@ -205,8 +205,14 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   `preferences` table (fallback: upstream's shipped default `"next"`); a local
   tweaks.py override is invisible to any database-side reader. Custom columns by
   `#label`; `current_indices=True` returns the `{book: index}` map.
-- [ ] Annotation conveniences: filter/limit/user/type variants over `get_annotations`,
+- [x] Annotation conveniences: filter/limit/user/type variants over `get_annotations`,
   removed-skeleton handling, style discovery (`cache.py:3896-3924`). Size S.
+  **Shipped 1.25** as `get_annotations_filtered` (the decoded view plus
+  user_type/user/removed, upstream's exact-dict style match, tombstones hidden by
+  default -- upstream's ignore_removed inverted to the renderer-facing default) and
+  the discoveries `get_annotation_users`/`get_annotation_types`/`get_annotation_styles`
+  (styles are what the library holds; upstream's builtin viewer catalog is GUI
+  constants, not data).
 - [ ] `read_backup` (`cache.py:2212`): read the stored sidecar `metadata.opf` to diff
   Calibre's last write against the rows; reads what Calibre wrote, does not generate.
   Size XS.

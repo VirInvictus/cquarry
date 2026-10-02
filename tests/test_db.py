@@ -2996,3 +2996,86 @@ class TestNextSeriesNum(unittest.TestCase):
             self.db.get_next_series_num_for("x", field="#myseries_index")
         with self.assertRaises(ValueError):
             self.db.get_next_series_num_for("x", field="title")
+
+
+class TestAnnotationConveniences(unittest.TestCase):
+    """get_annotations_filtered and the users/types/styles discoveries
+    (1.25, Phase 16)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            INSERT INTO books (id, title, sort, path, has_cover) VALUES
+                (1, 'One', 'One', 'a/1', 0), (2, 'Two', 'Two', 'a/2', 0);
+            CREATE TABLE annotations (id INTEGER PRIMARY KEY, book INTEGER,
+                format TEXT, user_type TEXT, user TEXT, timestamp TEXT,
+                annot_id TEXT, annot_type TEXT, annot_data TEXT, searchable_text TEXT);
+            INSERT INTO annotations (id, book, format, user_type, user, timestamp, annot_id, annot_type, annot_data) VALUES
+                (1, 1, 'EPUB', 'local', 'viewer', '2024-01-01T00:00:00+00:00', 'a1', 'highlight',
+                 '{"type": "highlight", "text": "quoted passage", "notes": "a note", "style": {"kind": "color", "which": "yellow"}}'),
+                (2, 1, 'EPUB', 'local', 'viewer', '2024-01-02T00:00:00+00:00', 'a2', 'highlight',
+                 '{"type": "highlight", "text": "second passage", "style": {"kind": "color", "which": "green"}}'),
+                (3, 1, 'EPUB', 'web', 'reader', '2024-01-03T00:00:00+00:00', 'a3', 'bookmark',
+                 '{"type": "bookmark", "title": "Chapter 2"}'),
+                (4, 2, 'EPUB', 'local', 'viewer', '2024-01-05T00:00:00+00:00', 'a4', 'highlight',
+                 '{"removed": true, "timestamp": "2024-01-05T00:00:00+00:00", "type": "highlight", "uuid": "a4"}');
+            """
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_filter_by_user_and_kind(self):
+        rows = self.db.get_annotations_filtered(user="reader")
+        self.assertEqual([r["annot_id"] for r in rows], ["a3"])
+        rows = self.db.get_annotations_filtered(kind="highlight", book_id=1)
+        self.assertEqual([r["annot_id"] for r in rows], ["a1", "a2"])
+
+    def test_removed_skeletons_hidden_by_default(self):
+        rows = self.db.get_annotations_filtered(book_id=2)
+        self.assertEqual(rows, [])
+        rows = self.db.get_annotations_filtered(book_id=2, include_removed=True)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["removed"])
+        self.assertIsNone(rows[0]["text"])
+
+    def test_style_filter_matches_the_whole_dict(self):
+        rows = self.db.get_annotations_filtered(
+            style={"kind": "color", "which": "yellow"}
+        )
+        self.assertEqual([r["annot_id"] for r in rows], ["a1"])
+        # A partial dict still requires every key it names.
+        rows = self.db.get_annotations_filtered(style={"kind": "color"})
+        self.assertEqual([r["annot_id"] for r in rows], ["a1", "a2"])
+
+    def test_limit_applies_after_filtering(self):
+        rows = self.db.get_annotations_filtered(kind="highlight", limit=1)
+        self.assertEqual([r["annot_id"] for r in rows], ["a1"])
+
+    def test_rows_carry_user_and_removed(self):
+        row = self.db.get_annotations_filtered(user="reader")[0]
+        self.assertEqual(row["user_type"], "web")
+        self.assertFalse(row["removed"])
+
+    def test_discovery_reads(self):
+        self.assertEqual(
+            self.db.get_annotation_users(), [("local", "viewer"), ("web", "reader")]
+        )
+        self.assertEqual(self.db.get_annotation_types(), ["bookmark", "highlight"])
+        self.assertEqual(
+            self.db.get_annotation_styles(),
+            [
+                {"kind": "color", "which": "green"},
+                {"kind": "color", "which": "yellow"},
+            ],
+        )

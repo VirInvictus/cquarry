@@ -2408,6 +2408,133 @@ class CalibreDB:
             )
         return out
 
+    def get_annotations_filtered(
+        self,
+        *,
+        book_id: int | None = None,
+        user_type: str | None = None,
+        user: str | None = None,
+        kind: str | None = None,
+        style: dict[str, str] | None = None,
+        include_removed: bool = False,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """The annotation conveniences in one read (upstream
+        ``Cache.all_annotations``): :meth:`get_annotations_decoded`'s rows
+        plus ``user_type``/``user``/``removed``, filtered.
+
+        ``user_type``/``user`` scope to one device account (both must match
+        when given), ``kind`` filters the annotation type (``highlight``,
+        ``bookmark``, ...), and ``style`` keeps only highlights whose stored
+        style carries every given key/value (upstream's exact-dict-match
+        rule, e.g. ``{"kind": "color", "which": "yellow"}``). Removed
+        annotations are tombstones -- Calibre's own deletes rewrite the
+        payload to a ``removed: True`` skeleton and blank the searchable
+        text -- and are hidden unless ``include_removed`` is set (upstream's
+        ``ignore_removed`` default keeps them; the renderer-facing read
+        hides them and opts in). Rows order by book, then timestamp, then
+        id -- :meth:`get_annotations`' order -- and ``limit`` takes the
+        first N of that ordering. Empty list on schemas predating the
+        table, like every annotations read.
+        """
+        rows = self.get_annotations(book_id)
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if user_type is not None and row.get("user_type") != user_type:
+                continue
+            if user is not None and row.get("user") != user:
+                continue
+            if kind is not None and row.get("annot_type") != kind:
+                continue
+            data = row.get("annot_data")
+            if not isinstance(data, dict):
+                data = {}
+
+            def _str(value: Any) -> str | None:
+                return value if isinstance(value, str) else None
+
+            removed = bool(data.get("removed"))
+            if removed and not include_removed:
+                continue
+            if style is not None:
+                stored = data.get("style")
+                if not isinstance(stored, dict) or not all(
+                    stored.get(k) == v for k, v in style.items()
+                ):
+                    continue
+            out.append(
+                {
+                    "book": row.get("book"),
+                    "format": row.get("format"),
+                    "kind": row.get("annot_type"),
+                    "annot_id": row.get("annot_id"),
+                    "timestamp": row.get("timestamp"),
+                    "text": _str(data.get("text")),
+                    "notes": _str(data.get("notes")),
+                    "title": _str(data.get("title")),
+                    "user_type": row.get("user_type"),
+                    "user": row.get("user"),
+                    "removed": removed,
+                }
+            )
+            if limit is not None and len(out) >= limit:
+                break
+        return out
+
+    def get_annotation_users(self) -> list[tuple[str, str]]:
+        """Every ``(user_type, user)`` account holding annotations, sorted.
+
+        The discovery half of the filtered read (upstream
+        ``all_annotation_users``): what a frontend offers as the
+        "whose highlights" picker. Empty list on schemas predating the
+        table.
+        """
+        try:
+            rows = self.conn.execute(
+                "SELECT DISTINCT user_type, user FROM annotations "
+                "ORDER BY user_type, user"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [(r["user_type"], r["user"]) for r in rows]
+
+    def get_annotation_types(self) -> list[str]:
+        """Every annotation type present (upstream
+        ``all_annotation_types``): ``highlight``, ``bookmark``, ... sorted.
+        Empty list on schemas predating the table.
+        """
+        try:
+            rows = self.conn.execute(
+                "SELECT DISTINCT annot_type FROM annotations "
+                "WHERE annot_type IS NOT NULL ORDER BY annot_type"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [r["annot_type"] for r in rows]
+
+    def get_annotation_styles(self) -> list[dict[str, str]]:
+        """The highlight styles this library actually holds (the DB half of
+        upstream ``all_annotation_styles``).
+
+        Each highlight payload can carry a ``style`` dict (``kind`` =
+        color/decoration, ``which`` = the viewer's name); the distinct
+        values come back sorted, so a frontend can build a legend from
+        what is really in the library. Upstream also folds in its viewer's
+        builtin style catalog, which is GUI constants, not data -- the
+        styles nobody used appear in Calibre's picker and not here.
+        """
+        styles: set[tuple[str, str]] = set()
+        for row in self.get_annotations():
+            data = row.get("annot_data")
+            if isinstance(data, dict):
+                style = data.get("style")
+                if isinstance(style, dict):
+                    which = style.get("which")
+                    kind = style.get("kind")
+                    if isinstance(kind, str) and isinstance(which, str):
+                        styles.add((kind, which))
+        return [{"kind": k, "which": w} for k, w in sorted(styles)]
+
     # --- Search & virtual library resolution ---
 
     def _engine(self) -> SearchEngine:
