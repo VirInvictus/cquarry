@@ -4335,3 +4335,117 @@ class TestRestoreFromTrash(unittest.TestCase):
             with self.assertRaises(ValueError):
                 wdb.copy_book_from_trash(1, os.path.join(self.temp_dir, "x"))
         self.assertFalse(os.path.exists(os.path.join(self.temp_dir, ".caltrash")))
+
+
+class TestAuthorSortNameAndLinkMap(_WriteSideFixture, unittest.TestCase):
+    """set_author_sort_name and set_link_map: the link/sort column writers
+    (1.25, Phase 17 item 14)."""
+
+    def test_author_sort_name_recomputes_affected_books(self):
+        with self._wdb() as wdb:
+            affected = wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed")
+        self.assertEqual(affected, 2)  # books 1 and 2 share the author
+        self.assertEqual(
+            self._sql2("SELECT sort FROM authors WHERE id=1"), [("Writer, Zed",)]
+        )
+        for book_id in (1, 2):
+            self.assertEqual(
+                self._sql2("SELECT author_sort FROM books WHERE id=?", (book_id,)),
+                [("Writer, Zed",)],
+            )
+
+    def test_author_sort_name_resolves_nocase(self):
+        with self._wdb() as wdb:
+            self.assertEqual(wdb.set_author_sort_name("zed a. writer", "W, Z.A."), 2)
+
+    def test_author_sort_name_honest_noop(self):
+        with self._wdb() as wdb:
+            self.assertEqual(
+                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed A."), 2
+            )
+            # Equal stored sort: books recompute to the same string.
+            self.assertEqual(
+                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed A."), 2
+            )
+
+    def test_author_sort_name_rejects_empty_and_unknown(self):
+        with self._wdb() as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_author_sort_name("Zed A. Writer", "")
+            with self.assertRaises(ValueError):
+                wdb.set_author_sort_name("Ghost Author", "G, A")
+
+    def test_author_sort_name_queues_opf_resync(self):
+        with self._wdb() as wdb:
+            wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed")
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_set_link_map_author(self):
+        with self._wdb() as wdb:
+            affected = wdb.set_link_map(
+                "authors", {"Zed A. Writer": "https://example.com/zed"}
+            )
+        self.assertEqual(affected, 2)
+        self.assertEqual(
+            self._sql2("SELECT link FROM authors WHERE id=1"),
+            [("https://example.com/zed",)],
+        )
+
+    def test_set_link_map_clears_with_none_and_skips_existing(self):
+        with self._wdb() as wdb:
+            wdb.set_link_map("authors", {"Zed A. Writer": "https://a"})
+            wdb.set_link_map("authors", {"Zed A. Writer": None})
+            self.assertEqual(
+                self._sql2("SELECT link FROM authors WHERE id=1"), [(None,)]
+            )
+            wdb.set_link_map(
+                "authors",
+                {"Zed A. Writer": "https://b"},
+                only_set_if_no_existing_link=True,
+            )
+            self.assertEqual(
+                self._sql2("SELECT link FROM authors WHERE id=1"), [("https://b",)]
+            )
+            wdb.set_link_map(
+                "authors",
+                {"Zed A. Writer": "https://c"},
+                only_set_if_no_existing_link=True,
+            )
+            self.assertEqual(
+                self._sql2("SELECT link FROM authors WHERE id=1"), [("https://b",)]
+            )
+
+    def test_set_link_map_all_entity_kinds_and_honest_noop(self):
+        with self._wdb() as wdb:
+            wdb.add_tag(1, "Space")
+            self.assertEqual(wdb.set_link_map("tags", {"Space": "https://t"}), 1)
+            # Same link again: 0 books affected.
+            self.assertEqual(wdb.set_link_map("tags", {"Space": "https://t"}), 0)
+
+    def test_set_link_map_unknown_value_and_kind_raise(self):
+        with self._wdb() as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_link_map("authors", {"Ghost Author": "https://x"})
+            with self.assertRaises(ValueError):
+                wdb.set_link_map("languages", {"eng": "https://x"})
+
+    def test_set_link_map_custom_column_values(self):
+        # custom_column_3 (#audience) exists in the fixture schema with its
+        # link column; seed one value linked to book 1.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO custom_column_3 (id, value) VALUES (1, 'YA')")
+        conn.execute(
+            "INSERT INTO books_custom_column_3_link (book, value) VALUES (1, 1)"
+        )
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            affected = wdb.set_link_map("#audience", {"YA": "https://gr/ya"})
+        self.assertEqual(affected, 1)
+        self.assertEqual(
+            self._sql2("SELECT link FROM custom_column_3 WHERE id=1"),
+            [("https://gr/ya",)],
+        )

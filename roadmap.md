@@ -251,9 +251,14 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
 
 ### Phase 17: Write-side extras
 
-- [ ] Author `sort`/`link` writers (`cache.py:3050`, `:3073`, and the generic
+- [x] Author `sort`/`link` writers (`cache.py:3050`, `:3073`, and the generic
   `set_link_map`, `cache.py:3176`): cquarry reads `author_links` and recomputes author
-  sort inside its own setters but cannot edit a link column. Size S.
+  sort inside its own setters but cannot edit a link column. Size S. **Shipped 1.25**
+  as `set_author_sort_name` (row-level `authors.sort`, book-level `author_sort`
+  recomputed " & "-joined) and the generic `set_link_map` over the four entity kinds
+  plus custom columns by `#label`; one named deviation from upstream: unknown values
+  raise instead of vanishing silently (a link targeted at a misspelled name should
+  fail loudly).
 - [ ] Pages value writer (`set_pages`, `cache.py:2100`): a frontend that computes page
   counts itself cannot record the value or clear the `needs_scan` flag today. Size XS.
 - [ ] Extra-files (`data/` dir) verbs (`cache.py:4099-4181`): cquarry ignores the data

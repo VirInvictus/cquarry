@@ -1265,6 +1265,212 @@ class WritableCalibreDB:
                     )
         return len(affected)
 
+    def set_author_sort_name(self, name: str, sort: str) -> int:
+        """Set one author's per-author sort key (upstream
+        ``set_sort_for_authors``, the row-level column behind the book-level
+        ``author_sort``).
+
+        The author resolves exact-spelling-first with a lowest-id NOCASE
+        fallback, ``authors.sort`` stores ``sort`` verbatim, and every book
+        of the author recomputes ``books.author_sort`` as its authors' sort
+        keys joined " & " in link order -- the same computation
+        :meth:`set_authors` performs -- and is touched and queued for OPF
+        resync. Returns the number of books affected (0 when the sort was
+        already equal). Raises ValueError for an empty sort, an unknown
+        author, or a schema whose authors table predates the ``sort``
+        column.
+        """
+        if not isinstance(sort, str) or not sort.strip():
+            raise ValueError("Author sort must not be empty")
+        name = name.strip() if isinstance(name, str) else ""
+        if not name:
+            raise ValueError("Author name must not be empty")
+        affected: list[int] = []
+        with self.batch():
+            row = self.conn.execute(
+                "SELECT id FROM authors WHERE name = ?", (name,)
+            ).fetchone()
+            if row is None:
+                row = self.conn.execute(
+                    "SELECT id FROM authors WHERE name = ? COLLATE NOCASE "
+                    "ORDER BY id LIMIT 1",
+                    (name,),
+                ).fetchone()
+            if row is None:
+                raise ValueError(f"No author row matching {name!r}")
+            cols = {r[1] for r in self.conn.execute("PRAGMA table_info(authors)")}
+            if "sort" not in cols:
+                raise ValueError("Authors table predates the sort column")
+            self.conn.execute(
+                "UPDATE authors SET sort = ? WHERE id = ?", (sort, row["id"])
+            )
+            affected = [
+                r["book"]
+                for r in self.conn.execute(
+                    "SELECT book FROM books_authors_link WHERE author = ? "
+                    "ORDER BY book",
+                    (row["id"],),
+                )
+            ]
+            for book_id in affected:
+                sorts = [
+                    r["s"] or r["name"]
+                    for r in self.conn.execute(
+                        "SELECT a.sort AS s, a.name AS name "
+                        "FROM books_authors_link bal JOIN authors a "
+                        "ON a.id = bal.author WHERE bal.book = ? "
+                        "ORDER BY bal.id",
+                        (book_id,),
+                    )
+                ]
+                self.conn.execute(
+                    "UPDATE books SET author_sort = ? WHERE id = ?",
+                    (" & ".join(sorts), book_id),
+                )
+                self._touch_book(book_id)
+        return len(affected)
+
+    def set_link_map(
+        self,
+        kind: str,
+        value_to_link: dict[str, str | None],
+        *,
+        only_set_if_no_existing_link: bool = False,
+    ) -> int:
+        """Write link URLs per value (upstream ``set_link_map``):
+        ``{value: link}`` over authors/series/publishers/tags, or a custom
+        column by ``#label``.
+
+        This is the column cquarry could read but never edit before: the
+        ``link`` URL beside author (and publisher/series/tag) rows, and the
+        per-value ``link`` column of normalized custom-column value tables.
+        Names resolve exact-spelling-first with a NOCASE fallback; unknown
+        values raise (upstream skips them silently -- a link targeted at a
+        misspelled name should fail loudly, not vanish). ``None`` clears a
+        link; ``only_set_if_no_existing_link`` leaves values that already
+        carry one alone (the fill-in-the-blanks mode). Every book linked to
+        a changed value is touched and queued for OPF resync. Returns the
+        number of books affected. Raises ValueError for an unknown kind,
+        unknown values, or a schema whose table predates the ``link``
+        column.
+        """
+        if not isinstance(value_to_link, dict):
+            raise TypeError("value_to_link must be a dict of {value: link}")
+        kind = (kind or "").strip()
+        affected: set[int] = set()
+        with self.batch():
+            if kind.startswith("#") or kind.lower() in {
+                k for k in self._custom_by_meta_label()
+            }:
+                changed = self._set_custom_column_links(
+                    kind, value_to_link, only_set_if_no_existing_link
+                )
+                for book_id in changed:
+                    self._touch_book(book_id)
+                return len(changed)
+            table, name_col, fk = self._entity_name_table(kind)
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if "link" not in cols:
+                raise ValueError(f"{table} predates the link column")
+            for value, link in value_to_link.items():
+                value = value.strip() if isinstance(value, str) else ""
+                if not value:
+                    raise ValueError("Entity values must not be empty")
+                row = self.conn.execute(
+                    f"SELECT id, link FROM {table} WHERE {name_col} = ?",
+                    (value,),
+                ).fetchone()
+                if row is None:
+                    row = self.conn.execute(
+                        f"SELECT id, link FROM {table} WHERE {name_col} = ? "
+                        "COLLATE NOCASE ORDER BY id LIMIT 1",
+                        (value,),
+                    ).fetchone()
+                if row is None:
+                    raise ValueError(f"No {kind} row matching {value!r}")
+                if only_set_if_no_existing_link and row["link"]:
+                    continue
+                if (row["link"] or None) == (link or None):
+                    continue  # equal link: honest no-op
+                self.conn.execute(
+                    f"UPDATE {table} SET link = ? WHERE id = ?",
+                    (link, row["id"]),
+                )
+                affected.update(
+                    r["book"]
+                    for r in self.conn.execute(
+                        f"SELECT book FROM books_{table}_link WHERE {fk} = ?",
+                        (row["id"],),
+                    )
+                )
+        return len(affected)
+
+    def _custom_by_meta_label(self) -> dict[str, dict]:
+        # The write module addresses custom columns by #label (the reader's
+        # _custom_by_label is read-side); labels are case-insensitive.
+        return {
+            row["label"].lower(): row
+            for row in self.conn.execute(
+                "SELECT id, label, name, datatype FROM custom_columns"
+            ).fetchall()
+        }
+
+    def _set_custom_column_links(
+        self,
+        kind: str,
+        value_to_link: dict[str, str | None],
+        only_existing: bool,
+    ) -> set[int]:
+        """The custom-column arm of :meth:`set_link_map`.
+
+        ``kind`` resolves to a normalized (Pattern A) column; its value
+        table's ``link`` column is updated per stored value. Direct-storage
+        columns have no per-value link and raise. Returns the affected book
+        ids; the caller touches them (inside the caller's batch).
+        """
+        label = kind.removeprefix("#")
+        meta = self._custom_by_meta_label().get(label.lower())
+        if meta is None:
+            raise ValueError(f"No custom column matching {kind!r}")
+        cid = int(meta["id"])
+        value_table = f"custom_column_{cid}"
+        link_table = f"books_custom_column_{cid}_link"
+        has_link_table = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (link_table,),
+        ).fetchone()
+        cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({value_table})")}
+        if not has_link_table or "link" not in cols:
+            raise ValueError(
+                f"{kind!r} is not a normalized column with a value link column"
+            )
+        affected: set[int] = set()
+        for value, link in value_to_link.items():
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("Custom-column values must not be empty")
+            row = self.conn.execute(
+                f"SELECT id, link FROM {value_table} WHERE value = ?", (value,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"No {kind} value matching {value!r} (values must already exist)"
+                )
+            if only_existing and row["link"]:
+                continue
+            if (row["link"] or None) == (link or None):
+                continue
+            self.conn.execute(
+                f"UPDATE {value_table} SET link = ? WHERE id = ?",
+                (link, row["id"]),
+            )
+            affected.update(
+                r["book"]
+                for r in self.conn.execute(
+                    f"SELECT book FROM {link_table} WHERE value = ?", (row["id"],)
+                )
+            )
+        return affected
+
     def _entity_name_table(self, kind: str) -> tuple[str, str, str]:
         kind = (kind or "").strip().lower()
         if kind not in self._ENTITY_NAME_TABLES:
