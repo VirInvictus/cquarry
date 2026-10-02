@@ -146,10 +146,16 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   Size XS-S. **Shipped 1.24** as `WritableCalibreDB.maintain(*, vacuum, analyze,
   integrity_check, include_fts)`: refuses to run inside `batch()` or mid-transaction,
   reports the check rows, and names the sidecar's attach state.
-- [ ] **check_library extra-side disk checks** for the integrity family: extra format
+- [x] **check_library extra-side disk checks** for the integrity family: extra format
   files, extra covers, malformed paths, extra files in book dirs, failed folders
   (upstream `src/calibre/library/check_library.py:50`); cquarry ships the missing-side
-  checks only. Size M. Consumer: CalibreQuarry's `--health` lane.
+  checks only. Size M. Consumer: CalibreQuarry's `--health` lane. **Shipped 1.24** as
+  `integrity.check_library_disk(db, *, name_ignores, extension_ignores)`: one walk,
+  categorized findings (extra_titles/extra_authors/malformed_paths/malformed_formats/
+  extra_formats/extra_files/extra_covers/failed_folders); the missing side is not
+  re-answered (find_missing_format_files/find_missing_cover_files own it); the format
+  classifier is structural (token extension minus the image/OPF/junk set), not
+  upstream's curated BOOK_EXTENSIONS, and POSIX case sensitivity is assumed.
 - [ ] **FTS queue management verbs** (`fts_unindex`, per-book reindex, full reset): pure
   sidecar SQL against `books_text`/`dirtied_formats` (`cache.py:603-698`,
   `fts/connect.py:75-92`); extraction itself stays Calibre's. Size S.
