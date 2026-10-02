@@ -9,7 +9,7 @@ import json
 import os
 import sys
 
-VERSION = "1.23.2"
+VERSION = "1.24.0"
 
 DEFAULT_DB_PATHS = [
     "metadata.db",

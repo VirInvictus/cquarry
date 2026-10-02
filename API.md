@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.23.2
+**Version:** 1.24.0
 
 ## Public API
 
@@ -314,7 +314,6 @@ print(cquarry.__version__)  # "1.23.0"
 | `fts_reindex_book(book_id, fmts=None)` | `int` | Queue a book's formats for FTS re-extraction and a pages rescan (since 1.24.0, upstream `reindex_fts_book`): `fmts=None` queues every catalogued format, explicit formats queue verbatim, already-queued pairs do not duplicate. Returns the inserted count; 0 when the sidecar is absent (nothing to write to). |
 | `fts_reindex_all()` | `int` | Queue every catalogued format for re-extraction (since 1.24.0, upstream's `dirty_existing` sweep): the close cousin of upstream's delete-the-sidecar `reindex_fts` that keeps the index tables untouched and lets Calibre's extraction pool re-write every row through its own triggers. |
 | `fts_queue_clear(book_id=None, fmt=None)` | `int` | Remove FTS extraction-queue entries (since 1.24.0): everything, one book's, or one pair (`fmt` without `book_id` raises). The queue half of upstream's `fts_unindex`/`remove_dirty`/`clear_all_dirty`; the index rows themselves are process-bound (the `books_text` delete triggers tokenize through Calibre's custom FTS5 tokenizer), so removing indexed text stays Calibre's job. |
-| `create_custom_column(label, name, datatype, *, is_multiple=False, editable=True, display=None)` | `int` |
 | `maintain(*, vacuum=True, analyze=True, integrity_check=False, include_fts=True)` | `dict[str, Any]` | Vacuum / analyze / integrity-check the library DB and its attached FTS sidecar (since 1.24.0, upstream `backend.py` `vacuum` plus the two statements calibredb users run by hand; the notes DB stays out of scope). Returns `{vacuumed, analyzed, fts_attached, integrity_check, fts_integrity_check}`; the check rows are `["ok"]` on a healthy file and `None` when not requested. Raises `RuntimeError` inside `batch()` or mid-transaction (VACUUM cannot run in a transaction). |
 | `set_preference(key, value)` | `bool` | Typed upsert of one search-grammar preference row (since 1.24.0): `saved_searches`, `virtual_libraries`, `user_categories`, `grouped_search_terms` (each validated by key before anything lands), or `fts_enabled` (bool). Stored as one JSON row in Calibre's shape; an equal payload is an honest False. |
 | `saved_search_add(name, expression)` / `saved_search_delete(name)` / `saved_search_rename(old, new)` | `bool` | Single-entry saved-search mutations (since 1.24.0, the calibredb `saved_searches` parity item): add is a stripped upsert, delete pops the exact stored spelling (an unknown name is an honest False), rename resolves case-insensitively to the stored spelling and REFUSES to overwrite an existing name where upstream silently overwrites. |
