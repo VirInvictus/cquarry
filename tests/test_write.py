@@ -1375,8 +1375,14 @@ class _WriteSideTests:
         ).fetchone()[0]
         conn.close()
         self.assertEqual(names, ["Ann Leckie", "Zed A. Writer"])
-        self.assertEqual(asort, "Ann Leckie & Writer, Zed A.")  # new author sort=name
-        self.assertEqual(newsort, "Ann Leckie")  # new rows default sort=name
+        # 1.26: new authors follow upstream's creation path -- flipped sort,
+        # comma stored as the legacy pipe in the name column.
+        self.assertEqual(asort, "Leckie, Ann & Writer, Zed A.")
+        self.assertEqual(newsort, "Leckie, Ann")
+        self.assertEqual(
+            self._sql2("SELECT name FROM authors WHERE name LIKE 'Ann%'"),
+            [("Ann Leckie",)],
+        )
         self.assertEqual(others, 1)  # shared author survives for book 2
 
     def test_set_authors_noop_returns_false(self):
@@ -2117,7 +2123,9 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
         self.assertEqual(title, "The Fifth Head of Data")
         self.assertEqual(sort, "Fifth Head of Data, The")  # books_insert_trg
         self.assertEqual(len(uuid), 36)  # books_insert_trg uuid4()
-        self.assertEqual(author_sort, "Ann Leckie")  # new author, sort = name
+        # 1.26: new author, flipped sort (upstream's creation path); the
+        # path takes the first stored author name verbatim.
+        self.assertEqual(author_sort, "Leckie, Ann")
         self.assertEqual(path, "Ann Leckie/The Fifth Head of Data (3)")
         self.assertEqual(has_cover, 0)
         # Author link + the Count Pages create-trigger row.
@@ -5175,3 +5183,70 @@ class TestCustomSeriesIndex(unittest.TestCase):
                 wdb.set_custom_series_index(2, "#sag", 2.0)
             with self.assertRaises(ValueError):
                 wdb.set_custom_series_index(1, "title", 2.0)
+
+
+class TestAuthorCreationParity(unittest.TestCase):
+    """New author rows follow upstream's creation path (1.26, D5): the
+    name stores comma-as-pipe and the sort is author_to_author_sort's
+    flip -- the pre-1.26 verbatim defaults rested on the wrong claim
+    that upstream's flip runs only on GUI edits."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        _make_simple_db(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)  # the insert trigger calls title_sort/uuid4
+        conn.executescript(
+            """
+            ALTER TABLE books ADD COLUMN author_sort TEXT;
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            INSERT INTO books (id, title, sort) VALUES (1, 'Target', 'Target');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql(self, query):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query).fetchall()]
+        finally:
+            conn.close()
+
+    def test_new_comma_author_stores_piped_name_and_flipped_sort(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Leckie| Ann", "Leckie, Ann")],
+        )
+        # The book-level author_sort joins the stored sort keys.
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_existing_rows_keep_their_sorts(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'Hand Tuned', 'Custom, Sort')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Hand Tuned"])
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Hand Tuned", "Custom, Sort")],
+        )
+
+    def test_plain_names_are_unchanged(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Ann Leckie"])
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Ann Leckie", "Leckie, Ann")],
+        )

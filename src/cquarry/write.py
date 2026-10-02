@@ -47,7 +47,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Self
 from xml.etree import ElementTree
 
-from cquarry.helpers import sniff_image_format, title_sort
+from cquarry.helpers import author_to_author_sort, sniff_image_format, title_sort
 from cquarry.search import BOOL_FALSE_WORDS, BOOL_TRUE_WORDS
 
 if TYPE_CHECKING:
@@ -967,7 +967,17 @@ class WritableCalibreDB:
         ).fetchone()
         if row is not None:
             return row["id"]
-        if self._HAS_SORT.get(table, False):
+        if table == "authors":
+            # Upstream's creation path (db/write.py get_db_id): the name
+            # stores with commas as the legacy | separator and the sort is
+            # author_to_author_sort's flip. (1.26; the 1.25-and-earlier
+            # verbatim defaults rested on the wrong claim that upstream's
+            # flip runs only on GUI edits.)
+            cur = self.conn.execute(
+                f"INSERT INTO {table} ({name_col}, sort) VALUES (?, ?)",
+                (name.replace(",", "|"), author_to_author_sort(name)),
+            )
+        elif self._HAS_SORT.get(table, False):
             cur = self.conn.execute(
                 f"INSERT INTO {table} ({name_col}, sort) VALUES (?, ?)",
                 (name, name),
