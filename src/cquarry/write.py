@@ -40,6 +40,7 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 import uuid as _uuid
 from collections.abc import Callable, Generator
 from datetime import UTC, date, datetime, timedelta
@@ -2676,6 +2677,172 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    # -- Opaque-blob passthrough writers (1.25, Phase 17 item 18) --
+    # None of these queue OPF resync or touch the book: the payloads are
+    # sidecar-shaped state (plugin metrics, conversion recipes, viewer
+    # storage) that metadata sync never carries, exactly as upstream's
+    # writers leave them.
+
+    def set_plugin_data(self, book_id: int, name: str, val: Any | None) -> bool:
+        """Upsert one ``books_plugin_data`` row (upstream
+        ``add_custom_book_data``, per book); ``None`` deletes the row.
+
+        The row is the (book, name, val) UNIQUE pair the read side's
+        :meth:`CalibreDB.get_plugin_data` surfaces. Serialization: a ``str``
+        stores verbatim; any other JSON-serializable payload goes through
+        ``json.dumps`` (upstream's own serialization, so Calibre-side
+        readers see the shape they expect). Returns True when a row was
+        written or deleted, False when a delete found nothing. Raises
+        ValueError for an empty name, an unknown book, or a schema
+        predating the table.
+        """
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Plugin-data name must not be empty")
+        self._begin()
+        try:
+            self._require_book(book_id)
+            self._require_table("books_plugin_data")
+            if val is None:
+                before = self.conn.total_changes
+                self.conn.execute(
+                    "DELETE FROM books_plugin_data WHERE book = ? AND name = ?",
+                    (book_id, name),
+                )
+                changed = self.conn.total_changes > before
+                self._commit()
+                return changed
+            payload = val if isinstance(val, str) else json.dumps(val, default=str)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO books_plugin_data (book, name, val) "
+                "VALUES (?, ?, ?)",
+                (book_id, name, payload),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def set_conversion_options(
+        self,
+        book_id: int,
+        data: str | bytes | None,
+        *,
+        fmt: str = "PIPE",
+    ) -> bool:
+        """Upsert one ``conversion_options`` blob (upstream
+        ``set_conversion_options``); ``None`` deletes the row.
+
+        The ``(format, book)`` UNIQUE pair behind the read side's
+        :meth:`CalibreDB.get_conversion_profiles`; ``fmt`` defaults to
+        Calibre's ``PIPE`` profile. Passthrough by recorded scope: bytes
+        store verbatim, ``str`` encodes UTF-8 -- upstream pickles its
+        recipe payloads in-process, and reproducing that serialization for
+        callers is this blob's boundary (hand it the bytes you want
+        stored). Returns True when a row was written or deleted, False
+        when a delete found nothing; unknown books and schemas predating
+        the table raise ValueError.
+        """
+        self._begin()
+        try:
+            self._require_book(book_id)
+            self._require_table("conversion_options")
+            fmt = (fmt or "").strip().upper()
+            if not fmt:
+                raise ValueError("Conversion-option format must not be empty")
+            if data is None:
+                before = self.conn.total_changes
+                self.conn.execute(
+                    "DELETE FROM conversion_options WHERE book = ? AND format = ?",
+                    (book_id, fmt),
+                )
+                changed = self.conn.total_changes > before
+                self._commit()
+                return changed
+            payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO conversion_options (book, format, data) "
+                "VALUES (?, ?, ?)",
+                (book_id, fmt, payload),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def set_book_storage(
+        self,
+        book_id: int,
+        fmt: str,
+        data: dict[str, Any] | None,
+        *,
+        user_type: str = "local",
+        user: str = "viewer",
+    ) -> bool:
+        """Upsert one ``book_storage`` entry (upstream
+        ``update_book_storage_for_book``, the viewers' per-book
+        localStorage); ``None`` deletes the row.
+
+        The payload dict stores as the JSON object upstream's shape carries
+        (``{'timestamp': <now epoch>, 'data': <payload>}``; the timestamp is
+        stamped here like upstream's update). ``fmt`` uppercases (the
+        column is NOCASE but the stored spelling follows the formats row);
+        the (book, format, user_type, user) key is UNIQUE. Returns True
+        when a row was written or deleted, False when a delete found
+        nothing; unknown books and schemas predating the (newer-Calibre)
+        table raise ValueError.
+        """
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Book-storage format must not be empty")
+        self._begin()
+        try:
+            self._require_book(book_id)
+            self._require_table("book_storage")
+            if data is not None and not isinstance(data, dict):
+                raise ValueError("Book-storage payload must be a dict or None")
+            if data is None:
+                before = self.conn.total_changes
+                self.conn.execute(
+                    "DELETE FROM book_storage WHERE book = ? AND format = ? "
+                    "AND user_type = ? AND user = ?",
+                    (book_id, fmt, user_type, user),
+                )
+                changed = self.conn.total_changes > before
+                self._commit()
+                return changed
+            entry = {"timestamp": time.time(), "data": data}
+            self.conn.execute(
+                "INSERT OR REPLACE INTO book_storage "
+                "(book, format, user_type, user, timestamp, data) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    book_id,
+                    fmt,
+                    user_type,
+                    user,
+                    entry["timestamp"],
+                    json.dumps(entry),
+                ),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def _require_table(self, name: str) -> None:
+        """Raise the house ValueError when a table the verb targets predates
+        this schema."""
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Schema predates the {name} table")
+
     def set_has_cover(self, book_id: int, has_cover: bool) -> bool:
         """Toggle the catalogued ``has_cover`` flag (the cover FILE itself is
         the caller's responsibility). Returns True when the flag flipped."""
@@ -3705,8 +3872,9 @@ class WritableCalibreDB:
         ``preserve_date``) -- the addition timestamp. NOT carried, each for
         a recorded reason: annotations (the postprocess decline), ``data/``
         extras (outside the copy's scope), plugin data and conversion
-        options (they gain carriage with the opaque-blob writers of this
-        same release), custom columns (the source OPF carries none of them;
+        options (the conversion overrides DO ride along through
+        :meth:`set_conversion_options`; plugin data stays put, exactly like
+        upstream's copy), custom columns (the source OPF carries none of them;
         ``move_book_from_trash``'s rule), and the uuid (always fresh, like
         upstream's ``preserve_uuid=False`` default).
 
@@ -3763,6 +3931,15 @@ class WritableCalibreDB:
                 self.set_timestamp(new_id, row["timestamp"])
             else:
                 self.set_timestamp(new_id, datetime.now(UTC))
+            # The postprocess half of copy_one_book: conversion overrides
+            # ride the blob writer verbatim (upstream copies them the same
+            # way; plugin data it does not copy, and neither do we).
+            for profile in src_db.get_conversion_profiles(book_id):
+                blob = profile.get("data")
+                if isinstance(blob, (bytes, bytearray)) and blob:
+                    self.set_conversion_options(
+                        new_id, bytes(blob), fmt=profile.get("format") or "PIPE"
+                    )
         return new_id
 
     def _author_sort_keys(self, names: list[str]) -> list[tuple[str, str, bool]]:

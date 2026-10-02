@@ -281,9 +281,16 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   `author_sort` verbatim. Plugin data and conversion options gain carriage with
   this release's blob writers; custom columns and the uuid stay uncopied (the
   source-OPF rule; always-fresh like upstream's default).
-- [ ] book_storage / plugin-data / conversion-options writers (`cache.py:4053-4082`,
+- [x] book_storage / plugin-data / conversion-options writers (`cache.py:4053-4082`,
   `:2913`, `backend.py:2955`): reads exist for all three tables, writes none;
-  opaque-blob passthrough. Size XS-S.
+  opaque-blob passthrough. Size XS-S. **Shipped 1.25** as `set_plugin_data`
+  (str verbatim, other payloads json.dumps'd like upstream; None deletes),
+  `set_conversion_options` (bytes verbatim, str UTF-8; upstream's in-process
+  pickling named as the caller's boundary), and `set_book_storage` (upstream's
+  JSON shape with the timestamp stamped here). None of the three queue OPF
+  resync, matching upstream. The copy primitive gained conversion-option
+  carriage in the same commit (upstream's copy_one_book postprocess copies
+  them; plugin data it does not).
 
 ### Phase 18: Restricted tag browser (the large candidate)
 

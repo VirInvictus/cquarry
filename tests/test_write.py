@@ -4828,3 +4828,189 @@ class TestCopyBookFromLibrary(unittest.TestCase):
         with CalibreDB(self.dest_path) as check:
             row = check.get_book(new_id)
             self.assertFalse(row["timestamp"].startswith("2020-05-01"))
+
+
+class TestBlobWriters(unittest.TestCase):
+    """set_plugin_data / set_conversion_options / set_book_storage: the
+    opaque-blob passthrough writers (1.25, Phase 17 item 18), plus the copy
+    primitive's new conversion-option carriage."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            INSERT INTO books (id, title) VALUES (1, 'One'), (2, 'Two');
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT DEFAULT '');
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT, UNIQUE(book, type));
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
+            CREATE TABLE books_plugin_data (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, name TEXT NOT NULL, val TEXT NOT NULL,
+                UNIQUE(book, name));
+            CREATE TABLE conversion_options (id INTEGER PRIMARY KEY,
+                format TEXT NOT NULL COLLATE NOCASE, book INTEGER,
+                data BLOB NOT NULL, UNIQUE(format, book));
+            CREATE TABLE book_storage (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, format TEXT NOT NULL COLLATE NOCASE,
+                user_type TEXT NOT NULL, user TEXT NOT NULL,
+                timestamp REAL NOT NULL, data TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(book, format, user_type, user));
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql(self, query, params=()):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query, params).fetchall()]
+        finally:
+            conn.close()
+
+    def test_plugin_data_str_verbatim_json_serialized_and_delete(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.set_plugin_data(1, "wordcount", "5123"))
+            self.assertTrue(wdb.set_plugin_data(1, "metrics", {"a": 1}))
+            self.assertEqual(
+                self._sql("SELECT val FROM books_plugin_data WHERE name='wordcount'"),
+                [("5123",)],
+            )
+            self.assertEqual(
+                json.loads(
+                    self._sql("SELECT val FROM books_plugin_data WHERE name='metrics'")[
+                        0
+                    ][0]
+                ),
+                {"a": 1},
+            )
+            self.assertTrue(wdb.set_plugin_data(1, "wordcount", None))
+            self.assertFalse(wdb.set_plugin_data(1, "wordcount", None))
+            self.assertEqual(
+                self._sql("SELECT COUNT(*) FROM books_plugin_data"), [(1,)]
+            )
+
+    def test_plugin_data_name_and_schema_guards(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_plugin_data(1, "  ", "x")
+            with self.assertRaises(ValueError):
+                wdb.set_plugin_data(999, "name", "x")
+
+    def test_conversion_options_passthrough_and_delete(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            blob = b"\x80\x04 pickled-recipe-bytes"
+            self.assertTrue(wdb.set_conversion_options(1, blob))
+            self.assertTrue(wdb.set_conversion_options(1, "text payload", fmt="mobi"))
+            rows = self._sql(
+                "SELECT format, data FROM conversion_options ORDER BY format"
+            )
+            self.assertEqual(rows[0][0], "MOBI")  # NOCASE lookup, stored spelling ours
+            self.assertEqual(rows[1], ("PIPE", blob))
+            self.assertTrue(wdb.set_conversion_options(1, None, fmt="mobi"))
+            self.assertFalse(wdb.set_conversion_options(1, None, fmt="mobi"))
+            self.assertEqual(
+                self._sql("SELECT COUNT(*) FROM conversion_options"), [(1,)]
+            )
+
+    def test_book_storage_wraps_and_clears(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.set_book_storage(1, "epub", {"position": 0.42}))
+            row = self._sql("SELECT format, user_type, user, data FROM book_storage")[0]
+            self.assertEqual(row[0], "EPUB")
+            self.assertEqual((row[1], row[2]), ("local", "viewer"))
+            entry = json.loads(row[3])
+            self.assertEqual(entry["data"], {"position": 0.42})
+            self.assertIsInstance(entry["timestamp"], float)
+            self.assertTrue(wdb.set_book_storage(1, "EPUB", None))
+            self.assertFalse(wdb.set_book_storage(1, "EPUB", None))
+
+    def test_book_storage_non_dict_raises(self):
+        with (
+            WritableCalibreDB(self.db_path) as wdb,
+            self.assertRaises(ValueError),
+        ):
+            wdb.set_book_storage(1, "EPUB", ["not", "a", "dict"])
+
+    def test_missing_tables_raise(self):
+        path2 = os.path.join(self.temp_dir, "old.db")
+        conn = sqlite3.connect(path2)
+        conn.executescript(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " timestamp TEXT, last_modified TEXT, path TEXT);"
+            "INSERT INTO books (id, title) VALUES (1, 'Old');"
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(path2) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_plugin_data(1, "n", "v")
+            with self.assertRaises(ValueError):
+                wdb.set_conversion_options(1, b"x")
+            with self.assertRaises(ValueError):
+                wdb.set_book_storage(1, "EPUB", {})
+
+    def test_copy_carries_conversion_options(self):
+        src_path = os.path.join(self.temp_dir, "src.db")
+        conn = sqlite3.connect(src_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT DEFAULT '');
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT, UNIQUE(book, type));
+            CREATE TABLE conversion_options (id INTEGER PRIMARY KEY,
+                format TEXT NOT NULL COLLATE NOCASE, book INTEGER,
+                data BLOB NOT NULL, UNIQUE(format, book));
+            INSERT INTO books (id, title, sort, path, has_cover) VALUES (1, 'One', 'One', '', 0);
+            """
+        )
+        conn.execute(
+            "INSERT INTO conversion_options (book, format, data) VALUES (?, ?, ?)",
+            (1, "PIPE", b"recipe"),
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_plugin_data(1, "wordcount", "10")
+        with CalibreDB(src_path) as src, WritableCalibreDB(self.db_path) as dest:
+            new_id = dest.copy_book_from_library(src, 1)
+        self.assertEqual(
+            self._sql(
+                "SELECT format, data FROM conversion_options WHERE book=?", (new_id,)
+            ),
+            [("PIPE", b"recipe")],
+        )
+        # The source book's plugin data does NOT follow (upstream's copy doesn't).
+        self.assertEqual(self._sql("SELECT book FROM books_plugin_data"), [(1,)])
