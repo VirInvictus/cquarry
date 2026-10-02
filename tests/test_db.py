@@ -3254,3 +3254,49 @@ class TestOrderedVlNames(unittest.TestCase):
                 names,
                 ["Beta Wing", "Alpha Wing", "Gamma Wing", "New Wing"],
             )
+
+
+class TestTagRollupIds(unittest.TestCase):
+    """tag_rollup_ids: the id-set sibling of helpers.tag_rollup (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            DELETE FROM books_tags_link;
+            DELETE FROM tags;
+            INSERT INTO tags (id, name) VALUES (1, 'Fic.Fantasy.Epic'), (2, 'Fic.SciFi'), (3, 'NonFic');
+            INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (2, 2), (3, 3);
+            """
+        )
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_implied_prefixes_accumulate_descendants(self):
+        with CalibreDB(self.db_path) as db:
+            rolled = db.tag_rollup_ids()
+            self.assertEqual(rolled["Fic"], frozenset({1, 2}))
+            self.assertEqual(rolled["Fic.Fantasy"], frozenset({1}))
+            self.assertEqual(rolled["Fic.Fantasy.Epic"], frozenset({1}))
+            self.assertEqual(rolled["NonFic"], frozenset({3}))
+            self.assertEqual(len(rolled["Fic"]), len(db.tag_rollup_ids()["Fic"]))
+
+    def test_counts_agree_with_the_counts_only_rollup(self):
+        from cquarry.helpers import tag_rollup
+
+        with CalibreDB(self.db_path) as db:
+            by_ids = {k: len(v) for k, v in db.tag_rollup_ids().items()}
+            counts = tag_rollup(dict(db.get_tag_counts()))
+            self.assertEqual(by_ids, counts)
+
+    def test_restriction_narrows_the_sets(self):
+        with CalibreDB(self.db_path) as db:
+            rolled = db.tag_rollup_ids(ids=[2])
+            self.assertEqual(
+                rolled, {"Fic": frozenset({2}), "Fic.SciFi": frozenset({2})}
+            )

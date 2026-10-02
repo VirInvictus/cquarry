@@ -1382,6 +1382,35 @@ class CalibreDB:
         """)
         return [(row["name"], row["count"]) for row in cur.fetchall()]
 
+    def tag_rollup_ids(
+        self, ids: Sequence[int] | None = None
+    ) -> dict[str, frozenset[int]]:
+        """The id-set sibling of :func:`cquarry.helpers.tag_rollup` (1.25):
+        ``{tag_path: frozenset(book_ids)}`` for every node including implied
+        ones.
+
+        Only leaf tags may be assigned in a library; intermediate dot-path
+        levels are implied by the name, so every prefix of every tag becomes
+        a browsable node and accumulates its descendants' books -- the same
+        rule the engine applies for ``tags:Fic.Fantasy``, so a browser built
+        on these sets agrees with search by construction. Counts come from
+        ``len()`` of each set, which is where the counts-only
+        :func:`helpers.tag_rollup` lands when fed ``get_tag_counts()``.
+        ``ids`` restricts the books counted (the browse-over-a-subset shape;
+        None means the whole library). Promoted from Carrel's private
+        ``_rollup`` with that waiver: the private copy stays until a
+        consumer wave.
+        """
+        out: dict[str, set[int]] = {}
+        for b in self.get_all_books():
+            if ids is not None and b["id"] not in ids:
+                continue
+            for tag in b["tags"] or []:
+                parts = [p for p in str(tag).split(".") if p]
+                for i in range(1, len(parts) + 1):
+                    out.setdefault(".".join(parts[:i]), set()).add(b["id"])
+        return {k: frozenset(v) for k, v in out.items()}
+
     def precedent_tags(self, authors: list[str], limit: int = 12) -> list[str]:
         """Tag-by-precedent: distinct tags across the named authors' books.
 
