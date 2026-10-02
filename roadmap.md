@@ -242,10 +242,12 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   Size S. **Shipped 1.25** as `CalibreDB.tag_rollup_ids(ids=None)`; the counts-only
   helper stays for count consumers, and Carrel's private copy retires in a consumer
   wave per the waiver.
-- [ ] **Identifier-link helper, Open Library canonical** (Brandon's 2026-09-29 call):
+- [x] **Identifier-link helper, Open Library canonical** (Brandon's 2026-09-29 call):
   ISBN links resolve to `openlibrary.org/isbn/`; Carrel's WorldCat mapping
   (`quarry_grid.py:581`) switches; Hermitage's mapping is already the canonical shape
-  (`codex.py:124-138`). Size XS.
+  (`codex.py:124-138`). Size XS. **Shipped 1.25** as `helpers.IDENTIFIER_LINKS` +
+  `identifier_link()` (Hermitage's table verbatim, unknown types None); Carrel's
+  WorldCat switch is its consumer wave's business.
 
 ### Phase 17: Write-side extras
 

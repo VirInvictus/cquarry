@@ -361,6 +361,45 @@ def unpipe_author(name: str | None) -> str:
     return str(name).replace("|", ",")
 
 
+# The identifier-to-link table (1.25, Brandon's 2026-09-29 canonical call):
+# display label first, URL template second. ISBN resolves to Open Library --
+# the canonical choice -- not Carrel's old WorldCat mapping. The formatter
+# receives the raw value with no escaping (every site linked uses opaque ids
+# or already-encoded paths). Types Calibre's own set_identifier cleaning
+# produces are lowercase; lookups normalize defensively anyway.
+IDENTIFIER_LINKS: dict[str, tuple[str, str]] = {
+    "isbn": ("Open Library", "https://openlibrary.org/isbn/{}"),
+    "goodreads": ("Goodreads", "https://www.goodreads.com/book/show/{}"),
+    "google": ("Google Books", "https://books.google.com/books?id={}"),
+    "amazon": ("Amazon", "https://www.amazon.com/dp/{}"),
+    "asin": ("Amazon", "https://www.amazon.com/dp/{}"),
+    "mobi-asin": ("Amazon", "https://www.amazon.com/dp/{}"),
+    "barnesnoble": ("Barnes & Noble", "https://www.barnesandnoble.com/s/{}"),
+    "storygraph": ("StoryGraph", "https://app.thestorygraph.com/books/{}"),
+    "hardcover": ("Hardcover", "https://hardcover.app/books/{}"),
+    "fictiondb": ("FictionDB", "https://www.fictiondb.com/title/{}"),
+    "doi": ("DOI", "https://doi.org/{}"),
+    "url": ("Link", "{}"),
+    "uri": ("Link", "{}"),
+}
+
+
+def identifier_link(id_type: str, value: str | None) -> tuple[str, str] | None:
+    """``(label, url)`` for a known identifier type, None when unknown.
+
+    The consumer-facing half of :data:`IDENTIFIER_LINKS`: the type is
+    normalized (stripped, lowercased) before lookup and the raw value is
+    substituted into the URL template unescaped. An unknown type answers
+    None -- the caller hides the link button, which is exactly what the
+    canonical Hermitage table's consumer does.
+    """
+    entry = IDENTIFIER_LINKS.get(str(id_type or "").strip().lower())
+    if entry is None:
+        return None
+    label, template = entry
+    return (label, template.format(value or ""))
+
+
 def detect_series_gaps(indices_str: str, max_index: float | None) -> list[int]:
     """Detect missing entries in a series based on index numbers."""
     if not indices_str or max_index is None:

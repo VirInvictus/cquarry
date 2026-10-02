@@ -254,6 +254,7 @@ Utility functions used across the ecosystem. All are importable from `cquarry.he
 | `normalize_author_display(authors, primary_only=False)` | `str` | Format an author string (comma-separated or `list[str]`) for display. With `primary_only`, returns only the first author. Returns `"Unknown Author"` for empty input. |
 | `author_sort_key(author_sort, primary_only=False)` | `str` | Generate a lowercase sort key from `author_sort`. With `primary_only`, splits on `&` and uses the first segment. |
 | `unpipe_author(name)` | `str` | Resolve Calibre's legacy pipe separator in one author display name (since 1.25.0): the `"|"` -> `","` flattening, render-identical with the consumer copies it promotes (Carrel/Hermitage). None-safe: `""` in, `""` out. |
+| `identifier_link(id_type, value)` | `tuple[str, str] \| None` | `(label, url)` for a known identifier type (since 1.25.0), None when unknown; the type is normalized before lookup and the raw value substituted unescaped. ISBN resolves to Open Library, the 2026-09-29 canonical call (Carrel's WorldCat mapping switches in its consumer wave). The table is `IDENTIFIER_LINKS` (isbn/goodreads/google/amazon/asin/mobi-asin/barnesnoble/storygraph/hardcover/fictiondb/doi/url/uri), Hermitage's canonical mapping promoted. |
 
 #### Series analysis
 

@@ -14,6 +14,7 @@ from cquarry.helpers import (
     get_image_size,
     get_jpeg_size,
     get_png_size,
+    identifier_link,
     isbn_check_digit_is_valid,
     isbn_normalize,
     normalize_rating,
@@ -303,3 +304,28 @@ class TestUnpipeAuthor(unittest.TestCase):
     def test_none_safe(self):
         self.assertEqual(unpipe_author(None), "")
         self.assertEqual(unpipe_author(""), "")
+
+
+class TestIdentifierLink(unittest.TestCase):
+    """identifier_link / IDENTIFIER_LINKS: the Open Library canonical map (1.25)."""
+
+    def test_isbn_resolves_to_open_library(self):
+        label, url = identifier_link("isbn", "9781841499789")
+        self.assertEqual(label, "Open Library")
+        self.assertEqual(url, "https://openlibrary.org/isbn/9781841499789")
+
+    def test_type_lookup_is_normalized(self):
+        self.assertEqual(identifier_link(" ISBN ", "x"), identifier_link("isbn", "x"))
+        self.assertEqual(
+            identifier_link("ASIN", "B00X"),
+            ("Amazon", "https://www.amazon.com/dp/B00X"),
+        )
+
+    def test_unknown_type_is_none(self):
+        self.assertIsNone(identifier_link("kobo", "x"))
+        self.assertIsNone(identifier_link("", "x"))
+
+    def test_url_and_uri_pass_the_value_through(self):
+        self.assertEqual(
+            identifier_link("url", "https://a.example"), ("Link", "https://a.example")
+        )
