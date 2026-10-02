@@ -1,3 +1,60 @@
+## v1.26.0 (2026-10-02)
+
+### The parity audit's fix wave: every confirmed bug and divergence lands
+
+The 2026-10-02 eight-agent parity audit (four reviewers, two bug hunters,
+one compat-merge review, one claim verification -- 8/8 top claims confirmed)
+found three shipped-code bugs, eleven confirmed divergences, and a gaps
+list. This release fixes the bugs and the divergences users plausibly hit,
+and records the rest in the roadmap's audit block.
+
+- **`set_book_storage` stores upstream's bare data map** (was the wrapped
+  `{'timestamp', 'data'}` entry, which Calibre's validating reader dropped
+  on every cquarry-written row), with upstream's guards reproduced
+  (str-only keys/values, the 1 MiB UTF-16 cap, newest-timestamp-wins) and
+  the missing read half shipping as `get_book_storage`.
+- **`remove_book` cleans `books_pages_link` and `book_storage`** -- the two
+  FK-cascade tables neither `books_delete_trg` nor cquarry's
+  foreign-keys-off connection covered; the stranded pages row (its book
+  column is the PRIMARY KEY) broke `move_book_from_trash` with
+  IntegrityError on any library with page counts.
+- **`get_categories` follows upstream's `is_category = normalized` rule**
+  (direct-storage customs out -- their raw values made engine-unparseable
+  expressions), gains the identifiers category (one node per identifier
+  key), and escapes expression values for quotes/backslashes.
+- **Search parity, claim-verified:** bare-term sweeps match identifier
+  KEYS like upstream (the 1.18-1.25 spec sentence said otherwise and was
+  wrong about upstream); `all:false` is upstream's sequential loop
+  (missing AT LEAST ONE swept field, not missing every); `cover:` is
+  numeric with exactly true/false special-cased (`cover:1` works,
+  `cover:yes` raises).
+- **New author rows follow upstream's creation path**: the name stores
+  with commas as the legacy pipe and the sort is
+  `helpers.author_to_author_sort`'s flip under the default tweaks -- the
+  old verbatim defaults rested on a spec sentence that was factually
+  wrong about upstream.
+- **Writer fidelity:** `remove_format` queues the pages rescan;
+  `set_plugin_data` json.dumps's every payload (the str-verbatim
+  shortcut stored strings upstream's reader cannot decode);
+  `set_conversion_options` wraps payloads in upstream's deterministic
+  protocol-2 frame (fresh rows were unreadable by Calibre's unpickling
+  reader); `set_custom_series_index` writes the link row's extra float
+  and fresh series assignments seed it at 1.0;
+  `set_author_sort_name` gains `update_books=False` and its long-promised
+  honest no-op; `copy_book_from_library` carries a 0.0 series index
+  verbatim and its author-sort postprocess no longer rewrites existing
+  destination books.
+- Recorded, not adopted (roadmap audit block): the enum count-operator
+  gap, negative `Ndaysago`, `loc:="X"`'s contains-vs-exact degradation,
+  translated date vocabulary, the search-behavior prefs, upstream's
+  localized language node names, ICU sort keys, and the popularity/
+  first-letter sort parameters -- each dependency-bound or GUI-state-
+  bound, now named in spec §5 or the roadmap.
+- Housekeeping: the compat branch carries the merge-review erratum
+  (restored its own 1.18.0+py313.1 entry; suite count corrected to 653).
+- Suite: 672 tests (flat -- every fix reshaped existing pins rather than adding volume; the new pins replaced the wrong-shape ones one-for-one).
+
+
 ## v1.25.0 (2026-10-02)
 
 ### The parity program's second release: Phases 16, 17, and 18 land

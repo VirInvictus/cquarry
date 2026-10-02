@@ -347,9 +347,28 @@ agents and an independent claim-verification pass (8/8 top claims confirmed,
 zero refuted). Findings below are the durable record; dispositions are boxes
 because each needs either a fix lane or a recorded decision.
 
-### Confirmed bugs (shipped code)
+### Confirmed bugs (shipped code) -- ALL FIXED in 1.26.0
 
-- [ ] **`set_book_storage` writes the wrong column shape** (round-trip corrupt;
+Every box below shipped in the 1.26.0 fix wave (2026-10-02, same day as the
+audit): the book_storage shape + its missing read half
+(`get_book_storage`), the remove_book stranding cleanup, the
+get_categories rule + identifiers category + expression escaping, the
+compat-branch erratum commit, the bare-term identifier-key sweep, the
+custom-series index writer (`set_custom_series_index` + the 1.0 seed),
+the all:false loop, cover's numeric vocabulary, the creation-time author
+flip + comma->pipe, remove_format's needs_scan, always-JSON plugin data,
+the conversion-options frame (with the copy path unwrapping framed
+sources), and the honest sort-writer no-op + update_books=False. Recorded
+as spec §5 additions rather than changed: the enum count-operator gap,
+negative `Ndaysago`, `dayago` singular, `loc:="X"`'s contains-vs-exact
+degradation, the translated date vocabulary, the search-behavior prefs,
+and the unregistered-`@name:` sweep (each is dependency-bound or
+GUI-state-bound; §5 carries them). Also recorded, not adopted: upstream's
+localized language node names, ICU sort keys, avg_rating's 0-vs-None
+default, and the popularity/first-letter sort parameters (presentational
+or ICU-bound).
+
+- [x] **`set_book_storage` writes the wrong column shape** (round-trip corrupt;
   claim-verified): cquarry stores `json.dumps({"timestamp", "data"})` in the
   `data` column where upstream stores ONLY `json.dumps(entry['data'])` (the
   timestamp is its own REAL column), and upstream's reader validates every data
@@ -360,7 +379,7 @@ because each needs either a fix lane or a recorded decision.
   1 MiB UTF-16 cap, str-only validation. The `book_storage` READ half never
   shipped at all (roadmap Phase 17's "reads exist for all three tables" was
   false for it).
-- [ ] **`remove_book` strands `books_pages_link` (and `book_storage`) rows**
+- [x] **`remove_book` strands `books_pages_link` (and `book_storage`) rows**
   (claim-verified): cquarry's write connection never sets `PRAGMA
   foreign_keys=ON`; upstream relies on those two tables' `ON DELETE CASCADE`
   (its `books_delete_trg` does not cover them), so cquarry's manual cleanup
@@ -369,13 +388,13 @@ because each needs either a fix lane or a recorded decision.
   `move_book_from_trash` (re-inserting the original id) aborts with
   IntegrityError: the remove-to-trash-to-restore round trip is broken on any
   library with page rows.
-- [ ] **`get_categories` emits engine-unparseable expressions** for bool custom
+- [x] **`get_categories` emits engine-unparseable expressions** for bool custom
   columns (`#x:="1"` -> the boolean matcher raises; it lowercases the `=`
   prefix), datetime custom columns (the ISO time component breaks the date
   parser's int() call), and any value containing a double quote (never
   escaped). Violates the node/search-expression agreement guarantee; the
   sweep test's fixture only has enum+int columns.
-- [ ] **The compat branch's tagged record needs an erratum** (v1.25.0+py313.1):
+- [x] **The compat branch's tagged record needs an erratum** (v1.25.0+py313.1):
   its entry says "413 collected ... green" where the actual final 3.13.15 run
   was 653 collected, green (413 was the pre-fix intermediate that FAILED on
   test_write import); the branch's own `## v1.18.0+py313.1` entry was dropped
@@ -386,55 +405,55 @@ because each needs either a fix lane or a recorded decision.
 
 ### Parity divergences (confirmed; fix or record in spec §5)
 
-- [ ] **Bare-term sweep never text-matches identifier KEYS; upstream does**
+- [x] **Bare-term sweep never text-matches identifier KEYS; upstream does**
   (claim-verified): upstream's identifiers field is a searchable text field
   whose searchable values are dicts, and the matcher iterates the dict (its
   keys) -- bare `isbn` matches key-holding books upstream. spec §3.2's "the
   code now matches upstream instead of the claim" is factually wrong about
   upstream (the 1.18 change replaced a true claim with a false one). Fix the
   sweep, then rewrite the sentence.
-- [ ] **Custom series columns have no index writer**: upstream writes `extra`
+- [x] **Custom series columns have no index writer**: upstream writes `extra`
   (default 1.0) on series-column assignment and ships a `custom_series_index`
   setter; cquarry's `_write_pattern_a` inserts (book, value) only, so its own
   writes leave `#label_index` NULL and permanently unset. **NEW DECISION NEEDED** (the
   survey never surfaced it).
-- [ ] **`all:false` computes missing-ALL-fields; upstream computes
+- [x] **`all:false` computes missing-ALL-fields; upstream computes
   missing-AT-LEAST-ONE** (claim-verified; single-field `false` agrees). Also
   upstream's sweep probes datetime/bool customs in the presence branch and
   sweeps numeric customs in the numeric probe; cquarry probes four builtin
   numerics only.
-- [ ] **`cover:` is numeric upstream** (int 0/1; `cover:yes` RAISES) vs bool
+- [x] **`cover:` is numeric upstream** (int 0/1; `cover:yes` RAISES) vs bool
   in cquarry (`cover:1` raises); spec §5.9's "full yes/no vocabulary" claim
   overstates for cover specifically.
-- [ ] **New-author sort at row creation** (claim-verified): upstream applies
+- [x] **New-author sort at row creation** (claim-verified): upstream applies
   `author_to_author_sort` at creation on writer paths; spec §3.6's "runs on
   GUI metadata edits, not row creation" is factually wrong, and cquarry's
   unflipped default is a real divergence. Related, same code path: upstream
   stores author names containing commas with the comma as `|`; cquarry stores
   verbatim (the render-side unpipe convention implies the storage one).
-- [ ] **`remove_format` never sets `needs_scan`** where upstream's
+- [x] **`remove_format` never sets `needs_scan`** where upstream's
   remove_formats queues a pages rescan.
-- [ ] **`set_plugin_data` stores plain strings unquoted** where upstream
+- [x] **`set_plugin_data` stores plain strings unquoted** where upstream
   json.dumps everything (upstream's reader json.loads -- unquoted strings
   fail to the default, row invisible to Calibre); datetime/bytearray envelope
   serialization also differs.
-- [ ] **`set_conversion_options` omits upstream's 10-byte pickle envelope**
+- [x] **`set_conversion_options` omits upstream's 10-byte pickle envelope**
   (protocol-2 frame; fresh cquarry-written rows are undecodable by Calibre's
   reader; only copied-from-upstream blobs round-trip). Documented as
   passthrough, but the envelope is 10 bytes of stdlib struct and the failure
   mode was understated.
-- [ ] **get_categories vs upstream categories.py**, beyond the recorded
+- [x] **get_categories vs upstream categories.py**, beyond the recorded
   subset: upstream has an IDENTIFIERS category (one node per identifier key);
   upstream's is_category rule is `normalized` (int/float/bool/datetime
   customs are NOT categories -- cquarry over-includes them); languages nodes
   carry localized names vs cquarry's raw codes; sort keys differ (ICU
   sort_key with hierarchy handling vs plain .lower(); the
   categories_using_hierarchy pref is unread); avg_rating defaults 0 vs None.
-- [ ] **copy_book_from_library**: maps series index 0.0 to 1.0 (falsy-or),
+- [x] **copy_book_from_library**: maps series index 0.0 to 1.0 (falsy-or),
   and its author-sort postprocess recomputes every destination book of the
   author where upstream passes update_books=False (existing books rewritten
   + OPF-queued).
-- [ ] **`set_author_sort_name`'s documented honest no-op does not exist** (an
+- [x] **`set_author_sort_name`'s documented honest no-op does not exist** (an
   equal sort still touches and queues every book of the author; the test
   enshrines the opposite of the docstring).
 
