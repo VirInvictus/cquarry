@@ -638,6 +638,86 @@ class CalibreDB:
         ids = self.search(query)
         return [b for b in self.get_all_books() if b["id"] in ids]
 
+    # The default facet set: the browse-bar fields a result set is narrowed
+    # by. Custom columns join by explicit "#label" location.
+    _FACET_LOCATIONS = (
+        "authors",
+        "tags",
+        "series",
+        "publisher",
+        "languages",
+        "formats",
+        "rating",
+    )
+
+    def facet_counts(
+        self, query: str, *, locations: Sequence[str] | None = None
+    ) -> dict[str, list[tuple[Any, int]]]:
+        """Browse facets over a restricted search result (1.24).
+
+        Per-value counts of every field the RESULT SET carries: search
+        first, then count, so the facets answer "what is in here" and not
+        "what is in the library" (the distinction
+        :meth:`get_tag_browser_counts` cannot make; its views are
+        whole-library). The default facet set is the browse-bar fields
+        (:data:`_FACET_LOCATIONS`); custom columns join by explicit
+        ``#label`` location, values exactly as :meth:`field` yields them
+        (ratings in stars). Returns ``{location: [(value, count), ...]}``
+        per location, count-descending then value-ascending; empty and
+        None values produce no facet entry. Unknown locations raise
+        ValueError. The restriction plumbing is
+        :meth:`facet_counts_for_ids`, which this composes with
+        :meth:`search`.
+        """
+        return self.facet_counts_for_ids(self.search(query), locations=locations)
+
+    def facet_counts_for_ids(
+        self, ids: set[int] | None, locations: Sequence[str] | None = None
+    ) -> dict[str, list[tuple[Any, int]]]:
+        """Per-value counts over a caller-restricted book-id set (1.24).
+
+        The Phase 18 seam: any id set works (a search result, a virtual
+        library, a hand-picked shelf); ``None`` means the whole library.
+        See :meth:`facet_counts` for the counting rules.
+        """
+        if locations is None:
+            locations = self._FACET_LOCATIONS
+        custom_labels = self._custom_by_label()
+        for location in locations:
+            if location in self._FACET_LOCATIONS:
+                continue
+            if location.startswith("#") and location[1:].lower() in custom_labels:
+                continue
+            raise ValueError(
+                f"Unknown facet location {location!r}. Builtins: "
+                + ", ".join(self._FACET_LOCATIONS)
+                + "; custom columns by #label"
+            )
+        wanted = ids
+        out: dict[str, list[tuple[Any, int]]] = {}
+        for location in locations:
+            counts: dict[Any, int] = {}
+            for b in self.get_all_books():
+                if wanted is not None and b["id"] not in wanted:
+                    continue
+                if location.startswith("#"):
+                    value: Any = self._custom_value(b["id"], location)
+                elif location == "rating":
+                    # Stars, exactly as the engine's field() yields them;
+                    # the hydrated row stores the internal 0-10 value.
+                    value = calibre_rating_to_stars(b.get("rating"))
+                else:
+                    value = b.get(location)
+                if value is None or value == "":
+                    continue
+                values = value if isinstance(value, (list, tuple)) else [value]
+                for one in values:
+                    if one is None or (isinstance(one, str) and not one.strip()):
+                        continue
+                    counts[one] = counts.get(one, 0) + 1
+            out[location] = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        return out
+
     def get_format_path(self, book_id: int, fmt: str, verify: bool = True) -> str:
         """Resolve the absolute filesystem path of a book's format file.
 

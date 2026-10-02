@@ -2249,6 +2249,80 @@ class TestResidueReads(TestCalibreDB):
         self.assertEqual(self.db.get_all_formats(), {1: ["EPUB", "MOBI"], 2: ["PDF"]})
 
 
+class TestFacetCounts(TestCalibreDB):
+    """facet_counts / facet_counts_for_ids (1.24, Phase 14): per-value
+    counts over a restricted result set, the seam Phase 18's restricted
+    tag browser reuses."""
+
+    def setUp(self):
+        super().setUp()
+        # Book 1: Author / Scifi + Space opera tags / series / rated 5
+        # stars; book 2: Author / History tag / no series / unrated.
+        self.conn.execute(
+            "INSERT INTO tags (id, name) VALUES (1, 'Scifi'), (2, 'Scifi.Space'), (3, 'History')"
+        )
+        self.conn.execute(
+            "INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (1, 2), (2, 3)"
+        )
+        self.conn.execute("INSERT INTO ratings (id, rating) VALUES (1, 10)")
+        self.conn.execute("INSERT INTO books_ratings_link (book, rating) VALUES (1, 1)")
+        self.conn.execute(
+            "UPDATE books SET series_index = 1.0, path = 'x' WHERE id IN (1, 2)"
+        )
+        self.conn.execute(
+            "INSERT INTO series (id, name, sort) VALUES (1, 'Wing Series', 'Wing')"
+        )
+        self.conn.execute("INSERT INTO books_series_link (book, series) VALUES (1, 1)")
+        self.conn.commit()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_counts_are_restricted_to_the_result_set(self):
+        facets = self.db.facet_counts("authors:Author")
+        self.assertEqual(facets["authors"], [("Author", 2)])
+        self.assertEqual(
+            facets["tags"], [("History", 1), ("Scifi", 1), ("Scifi.Space", 1)]
+        )
+        self.assertEqual(facets["series"], [("Wing Series", 1)])
+        self.assertEqual(facets["publisher"], [])
+        self.assertEqual(facets["rating"], [(5.0, 1)])
+
+    def test_restriction_changes_the_answer(self):
+        everything = self.db.facet_counts_for_ids(None)
+        self.assertEqual(
+            everything["tags"], [("History", 1), ("Scifi", 1), ("Scifi.Space", 1)]
+        )
+        only_one = self.db.facet_counts_for_ids({1})
+        self.assertEqual(only_one["tags"], [("Scifi", 1), ("Scifi.Space", 1)])
+        self.assertEqual(only_one["series"], [("Wing Series", 1)])
+
+    def test_locations_restrict_and_unknown_raises(self):
+        facets = self.db.facet_counts_for_ids(None, locations=("tags",))
+        self.assertEqual(list(facets), ["tags"])
+        with self.assertRaises(ValueError):
+            self.db.facet_counts_for_ids(None, locations=("title",))
+        with self.assertRaises(ValueError):
+            self.db.facet_counts_for_ids(None, locations=("#nope",))
+
+    def test_custom_column_facet_by_label(self):
+        self.conn.execute(
+            "INSERT INTO custom_columns (id, label, name, datatype, is_multiple)"
+            " VALUES (1, 'aud', 'Audience', 'text', 0)"
+        )
+        self.conn.execute(
+            "CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, book INTEGER UNIQUE, value TEXT)"
+        )
+        self.conn.execute(
+            "INSERT INTO custom_column_1 (book, value) VALUES (1, 'Adults')"
+        )
+        self.conn.commit()
+        self.db.refresh()
+        facets = self.db.facet_counts_for_ids(None, locations=("#aud",))
+        self.assertEqual(facets["#aud"], [("Adults", 1)])
+
+
 if __name__ == "__main__":
     unittest.main()
 
