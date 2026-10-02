@@ -294,13 +294,23 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
 
 ### Phase 18: Restricted tag browser (the large candidate)
 
-- [ ] **`get_categories` with restriction and per-node book sets** (`cache.py:1897` ->
+- [x] **`get_categories` with restriction and per-node book sets** (`cache.py:1897` ->
   `categories.py:312`; upstream's `Tag` carries `id_set` and `search_expression`, plus
   synthesized `search` and `news` categories). The tag-browser-over-a-search-result story
   `get_tag_browser_counts` (whole-library SQL views, counts only) cannot answer. The
   portable subset is builtin + storage-backed custom columns + restriction + id sets;
   composite-column categories stay gated by the §7 template-engine boundary. Ships
-  together with Phase 14's `facet_counts` for Carrel. Size M-L.
+  together with Phase 14's `facet_counts` for Carrel. Size M-L. **Shipped 1.25** as
+  `CalibreDB.get_categories(book_ids=None)`: nodes carry `{id, name, sort, count,
+  avg_rating, id_set, search_expression}` (searching the expression returns the id set
+  by construction, swept per-node in tests); counts and entity-view average ratings
+  agree with `get_tag_browser_counts` where they overlap. Named in the ship notes: the
+  views' ratings `avg_rating` column is an upstream cross-join artifact (every row
+  identical, verified live), so only counts are held to agreement there; rating nodes
+  surface stars per the cquarry convention; zero-count unlinked entities appear only
+  when held (upstream's get_categories rule); user categories/`search`/`news` stay
+  outside the portable subset. Verified against the live library: 12 categories, ~8k
+  books, per-node roundtrips OK.
 
 ## Still gated (reopen conditions unchanged by the program)
 

@@ -3300,3 +3300,201 @@ class TestTagRollupIds(unittest.TestCase):
             self.assertEqual(
                 rolled, {"Fic": frozenset({2}), "Fic.SciFi": frozenset({2})}
             )
+
+
+class TestGetCategories(unittest.TestCase):
+    """get_categories: the restricted tag browser (1.25, Phase 18)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            INSERT INTO books (id, title, sort, path, has_cover) VALUES
+                (1, 'Alpha', 'Alpha', 'a/1', 0), (2, 'Beta', 'Beta', 'a/2', 0),
+                (3, 'Gamma', 'Gamma', 'a/3', 0);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT DEFAULT '');
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            INSERT INTO authors (id, name, sort) VALUES (1, 'Ann Leckie', 'Leckie, Ann'), (2, 'Zed Writer', 'Writer, Zed');
+            INSERT INTO books_authors_link (book, author) VALUES (1, 1), (2, 1), (3, 2);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            INSERT INTO tags (id, name) VALUES (1, 'Fic.Fantasy'), (2, 'Fic.SciFi'), (3, 'NonFic');
+            INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (2, 2), (2, 3), (3, 2);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            INSERT INTO series (id, name, sort) VALUES (1, 'Radch', 'Radch');
+            INSERT INTO books_series_link (book, series) VALUES (1, 1), (2, 1);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            INSERT INTO publishers (id, name, sort) VALUES (1, 'Orbit', 'Orbit');
+            INSERT INTO books_publishers_link (book, publisher) VALUES (1, 1);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            INSERT INTO ratings (id, rating) VALUES (1, 8), (2, 4);
+            INSERT INTO books_ratings_link (book, rating) VALUES (1, 1), (3, 2);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            INSERT INTO languages (id, lang_code) VALUES (1, 'eng');
+            INSERT INTO books_languages_link (book, lang_code) VALUES (1, 1), (2, 1);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            INSERT INTO data (book, format, name, uncompressed_size) VALUES
+                (1, 'EPUB', 'alpha', 10), (2, 'EPUB', 'beta', 10), (3, 'PDF', 'gamma', 10);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT, is_multiple INTEGER, editable INTEGER DEFAULT 1, display TEXT DEFAULT '{}', normalized INTEGER DEFAULT 0);
+            INSERT INTO custom_columns (id, label, name, datatype, is_multiple, normalized) VALUES
+                (1, 'status', 'Status', 'enumeration', 0, 1),
+                (2, 'pages', 'Pages', 'int', 0, 0),
+                (3, 'comp', 'Composite', 'composite', 0, 0);
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT, link TEXT DEFAULT '');
+            CREATE TABLE books_custom_column_1_link (id INTEGER PRIMARY KEY, book INTEGER, value INTEGER);
+            INSERT INTO custom_column_1 (id, value) VALUES (1, 'Read'), (2, 'To Read');
+            INSERT INTO books_custom_column_1_link (book, value) VALUES (1, 1), (2, 1), (3, 2);
+            CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, book INTEGER, value INT, link TEXT DEFAULT '');
+            INSERT INTO custom_column_2 (book, value) VALUES (1, 321), (3, 55);
+            """
+        )
+        # The real views, verbatim shapes, so the agreement test has teeth.
+        con.executescript(
+            """
+            CREATE VIEW tag_browser_authors AS SELECT
+                id, name,
+                (SELECT COUNT(id) FROM books_authors_link WHERE author=authors.id) count,
+                (SELECT AVG(ratings.rating) FROM books_authors_link AS tl,
+                      books_ratings_link AS bl, ratings
+                 WHERE tl.author=authors.id AND bl.book=tl.book AND
+                 ratings.id = bl.rating AND ratings.rating <> 0) avg_rating,
+                sort AS sort FROM authors;
+            CREATE VIEW tag_browser_tags AS SELECT
+                id, name,
+                (SELECT COUNT(id) FROM books_tags_link WHERE tag=tags.id) count,
+                (SELECT AVG(ratings.rating) FROM books_tags_link AS tl,
+                      books_ratings_link AS bl, ratings
+                 WHERE tl.tag=tags.id AND bl.book=tl.book AND
+                 ratings.id = bl.rating AND ratings.rating <> 0) avg_rating,
+                name AS sort FROM tags;
+            CREATE VIEW tag_browser_ratings AS SELECT
+                id, rating,
+                (SELECT COUNT(id) FROM books_ratings_link WHERE rating=ratings.id) count,
+                (SELECT AVG(ratings.rating) FROM books_ratings_link AS tl,
+                      books_ratings_link AS bl, ratings
+                 WHERE tl.rating=ratings.id AND bl.book=tl.book AND
+                 ratings.id = bl.rating AND ratings.rating <> 0) avg_rating,
+                rating AS sort FROM ratings;
+            """
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_categories_and_counts_agree_with_the_views(self):
+        cats = self.db.get_categories()
+        views = self.db.get_tag_browser_counts()
+        # The views key the ratings category 'ratings' (the entity table's
+        # name); nodes there name the internal 0-10 text.
+        for key, view_key in (
+            ("authors", "authors"),
+            ("tags", "tags"),
+            ("rating", "ratings"),
+        ):
+            by_name = {n["name"]: n for n in cats[key]}
+            for row in views[view_key]:
+                name = row["name"]
+                if view_key == "ratings":
+                    # The views name the internal 0-10 text; nodes surface
+                    # stars, the documented naming difference.
+                    name = f"{int(name) / 2:g}"
+                self.assertIn(name, by_name, f"{key}:{name} missing from categories")
+                self.assertEqual(by_name[name]["count"], row["count"], f"{key}:{name}")
+                if view_key == "ratings":
+                    # Upstream's ratings view averages over an uncorrelated
+                    # cross join: every row carries the same value (verified
+                    # identical on the live library). Its avg column is an
+                    # artifact, so only the counts are held to agreement.
+                    continue
+                if row["avg_rating"] is None:
+                    self.assertIsNone(by_name[name]["avg_rating"])
+                else:
+                    self.assertAlmostEqual(
+                        by_name[name]["avg_rating"], row["avg_rating"] / 2.0
+                    )
+
+    def test_whole_library_nodes(self):
+        cats = self.db.get_categories()
+        self.assertEqual(
+            [n["name"] for n in cats["authors"]], ["Ann Leckie", "Zed Writer"]
+        )  # sort column order
+        tag_names = {n["name"]: n for n in cats["tags"]}
+        self.assertEqual(tag_names["Fic.SciFi"]["count"], 2)
+        self.assertEqual(tag_names["Fic.Fantasy"]["count"], 1)
+        # Descending by stars, Calibre's default rating-category order.
+        self.assertEqual([n["name"] for n in cats["rating"]], ["4", "2"])
+        self.assertEqual({n["name"] for n in cats["formats"]}, {"EPUB", "PDF"})
+        self.assertEqual(cats["#status"][0]["name"], "Read")
+        self.assertEqual(cats["#status"][1]["name"], "To Read")
+        self.assertEqual([n["name"] for n in cats["#pages"]], ["321", "55"])
+
+    def test_node_shape_and_expression_roundtrip(self):
+        cats = self.db.get_categories()
+        fantasy = next(n for n in cats["tags"] if n["name"] == "Fic.Fantasy")
+        self.assertEqual(fantasy["id_set"], {1})
+        self.assertEqual(fantasy["search_expression"], 'tags:="Fic.Fantasy"')
+        self.assertEqual(self.db.search(fantasy["search_expression"]), {1})
+        leckie = next(n for n in cats["authors"] if n["name"] == "Ann Leckie")
+        self.assertEqual(leckie["id_set"], {1, 2})
+        self.assertEqual(self.db.search(leckie["search_expression"]), {1, 2})
+        self.assertEqual(leckie["sort"], "Leckie, Ann")
+        # avg_rating in stars: author 1's books are rated 4 stars (book 1)
+        # and unrated (book 2), so the mean is 4.0.
+        self.assertEqual(leckie["avg_rating"], 4.0)
+        stars = cats["rating"][0]  # descending: 4 stars first
+        self.assertEqual(stars["name"], "4")
+        self.assertEqual(stars["id_set"], {1})
+        self.assertEqual(stars["search_expression"], "rating:=4")
+
+    def test_restriction_narrows_and_drops_unheld_values(self):
+        cats = self.db.get_categories(book_ids=[1])
+        self.assertEqual([n["name"] for n in cats["authors"]], ["Ann Leckie"])
+        self.assertEqual([n["name"] for n in cats["tags"]], ["Fic.Fantasy"])
+        self.assertEqual([n["name"] for n in cats["formats"]], ["EPUB"])
+        self.assertEqual([n["name"] for n in cats["rating"]], ["4"])
+
+    def test_empty_restriction_answers_empty_categories(self):
+        cats = self.db.get_categories(book_ids=[])
+        self.assertTrue(all(nodes == [] for nodes in cats.values()))
+
+    def test_composite_and_comments_columns_stay_out(self):
+        cats = self.db.get_categories()
+        self.assertNotIn("#comp", cats)
+        self.assertNotIn("#nothere", cats)
+
+    def test_custom_enum_ids_and_agreement_with_facet_counts(self):
+        cats = self.db.get_categories()
+        read_node = next(n for n in cats["#status"] if n["name"] == "Read")
+        self.assertEqual(read_node["id"], 1)  # the value-table id
+        self.assertEqual(read_node["id_set"], {1, 2})
+        # facet_counts over the same restriction agrees node-for-node.
+        facets = self.db.facet_counts_for_ids([1, 2], locations=["#status"])
+        facet_counts = dict(facets["#status"])
+        for node in cats["#status"]:
+            if node["id_set"] <= {1, 2}:
+                self.assertEqual(facet_counts.get(node["name"]), node["count"])
+
+    def test_search_expression_agrees_for_every_node(self):
+        # The construction guarantee, swept across every node of the
+        # whole-library browser: searching a node's expression returns
+        # exactly that node's id set.
+        for key, nodes in self.db.get_categories().items():
+            for node in nodes:
+                self.assertEqual(
+                    self.db.search(node["search_expression"]),
+                    set(node["id_set"]),
+                    f"{key}:{node['name']}",
+                )

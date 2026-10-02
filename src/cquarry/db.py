@@ -2547,6 +2547,180 @@ class CalibreDB:
             self.conn.create_function("title_sort", 1, None)
         return out
 
+    # --- Restricted tag browser (1.25, Phase 18) ---
+
+    def get_categories(
+        self, book_ids: Sequence[int] | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The tag browser over a restricted result set (upstream
+        ``Cache.get_categories`` -> ``categories.get_categories``, the
+        portable subset the roadmap scoped): ``{category: [node, ...]}``
+        where every node carries its book-id set and a reproducing search
+        expression.
+
+        Node shape: ``{id, name, sort, count, avg_rating, id_set,
+        search_expression}`` -- ``count`` is ``len(id_set)`` (only books
+        from the restriction land in a node, so a value no restricted book
+        holds appears nowhere, upstream's zero-count rule),
+        ``avg_rating`` is the mean over the node's rated books in stars
+        (None with no rated books, the ``tag_browser_*`` views' AVG-over-
+        nonzero rule), and ``search_expression`` is the exact-match query
+        reproducing the node against the engine.
+
+        Categories: the builtin browse fields (authors, series, publisher,
+        tags, languages, formats, rating) plus every storage-backed custom
+        column keyed ``#label``. Composite columns stay gated by the §7 GPM
+        boundary; comments columns have no category values; user
+        categories, ``search``, and ``news`` are upstream GUI
+        synthesizations outside the portable subset. Where results overlap
+        :meth:`get_tag_browser_counts`, counts and average ratings agree
+        (same data, same rule); two documented naming differences remain:
+        rating nodes surface STARS -- ``"4.0"``, matching ``field()`` and
+        ``facet_counts`` -- where the views name the internal 0-10 text,
+        and unlinked entity rows (the views' zero-count entries) appear
+        here only when a book actually holds them, upstream's
+        ``get_categories`` behavior. ``book_ids=None`` means the whole
+        library; an empty restriction answers empty categories, like
+        upstream. Nodes sort name-ascending (case-insensitive), rating
+        descending -- Calibre's default browse order.
+        """
+        rows = self.get_all_books()
+        if book_ids is None:
+            restricted = rows
+        else:
+            wanted = set(book_ids)
+            restricted = [b for b in rows if b["id"] in wanted]
+        rating_map = {b["id"]: b["rating"] for b in restricted if b["rating"]}
+
+        def _avg(ids: set[int]) -> float | None:
+            vals = [rating_map[b] for b in ids if b in rating_map]
+            return (sum(vals) / len(vals)) / 2.0 if vals else None
+
+        def _node(
+            node_id: int | None,
+            name: str,
+            sort: str,
+            ids: set[int],
+            expression: str,
+        ) -> dict[str, Any]:
+            return {
+                "id": node_id,
+                "name": name,
+                "sort": sort,
+                "count": len(ids),
+                "avg_rating": _avg(ids),
+                "id_set": frozenset(ids),
+                "search_expression": expression,
+            }
+
+        def _from_rows(
+            field: str, location: str, entity_kind: str | None = None
+        ) -> list[dict[str, Any]]:
+            meta: dict[str, dict[str, Any]] = {}
+            if entity_kind is not None:
+                meta = {e["name"]: e for e in self.get_entities(entity_kind)}
+            buckets: dict[str, set[int]] = {}
+            for b in restricted:
+                value = b[field]
+                # List fields bucket per element; scalar fields (series,
+                # publisher) are one value, never iterated as a string.
+                for one in value if isinstance(value, (list, tuple)) else [value]:
+                    if one:
+                        buckets.setdefault(str(one), set()).add(b["id"])
+            nodes = [
+                _node(
+                    meta.get(name, {}).get("id"),
+                    name,
+                    (meta.get(name, {}) or {}).get("sort") or name,
+                    ids,
+                    f'{location}:="{name}"',
+                )
+                for name, ids in buckets.items()
+            ]
+            nodes.sort(key=lambda n: n["sort"].lower())
+            return nodes
+
+        out: dict[str, list[dict[str, Any]]] = {
+            "authors": _from_rows("authors", "authors", "authors"),
+            "series": _from_rows("series", "series", "series"),
+            "publisher": _from_rows("publisher", "publisher", "publishers"),
+            "tags": _from_rows("tags", "tags", "tags"),
+            "languages": _from_rows("languages", "languages", "languages"),
+            "formats": _from_rows("formats", "formats"),
+        }
+
+        # Rating: star nodes merged across legacy duplicate rating rows
+        # (upstream merges same-star tags too), descending.
+        star_buckets: dict[float, set[int]] = {}
+        for b in restricted:
+            stars = calibre_rating_to_stars(b["rating"])
+            if stars is not None:
+                star_buckets.setdefault(stars, set()).add(b["id"])
+        out["rating"] = [
+            _node(None, f"{stars:g}", f"{stars:g}", ids, f"rating:={stars:g}")
+            for stars, ids in sorted(star_buckets.items(), reverse=True)
+        ]
+
+        # Storage-backed custom columns, keyed #label. Normalized columns
+        # carry entity ids from their value tables; direct-storage columns
+        # name their nodes (id None, like formats).
+        for col in self.get_custom_columns().values():
+            datatype = col["datatype"]
+            if datatype in ("composite", "comments"):
+                continue
+            location = "#" + col["label"]
+            try:
+                values = self.load_custom_column(col["name"])
+            except ValueError, sqlite3.OperationalError:
+                continue
+            value_ids: dict[Any, int] = {}
+            if col["normalized"]:
+                cid = int(col["id"])
+                try:
+                    value_ids = {
+                        r["value"]: r["id"]
+                        for r in self.conn.execute(
+                            f"SELECT id, value FROM custom_column_{cid}"
+                        )
+                    }
+                except sqlite3.OperationalError:
+                    value_ids = {}
+            buckets = {}
+            for b in restricted:
+                value = values.get(b["id"])
+                if value is None:
+                    continue
+                for one in value if isinstance(value, (list, tuple)) else [value]:
+                    if one is None or (isinstance(one, str) and not one.strip()):
+                        continue
+                    buckets.setdefault(one, set()).add(b["id"])
+            if datatype == "rating":
+                converted: dict[float, set[int]] = {}
+                for value, ids in buckets.items():
+                    stars = calibre_rating_to_stars(int(value))
+                    if stars is not None:
+                        converted.setdefault(stars, set()).update(ids)
+                nodes = [
+                    _node(
+                        None, f"{stars:g}", f"{stars:g}", ids, f"{location}:={stars:g}"
+                    )
+                    for stars, ids in sorted(converted.items(), reverse=True)
+                ]
+            else:
+                nodes = [
+                    _node(
+                        value_ids.get(value),
+                        str(value),
+                        str(value),
+                        ids,
+                        f'{location}:="{value}"',
+                    )
+                    for value, ids in buckets.items()
+                ]
+                nodes.sort(key=lambda n: n["sort"].lower())
+            out[location] = nodes
+        return out
+
     # --- Preferences (generic accessor) ---
 
     def _preferences(self) -> dict[str, Any]:

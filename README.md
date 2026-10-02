@@ -106,7 +106,7 @@ The full per-method reference lives in [API.md](API.md). One line per module:
 
 | Module | What it is |
 |--------|------------|
-| `cquarry.db` | The read-only database layer (`CalibreDB`): hydrated rows, single-entity fetches, format/cover path resolution, custom columns, preferences, annotations and progress extractors, VL/saved-search resolution, and the composed `get_book_dossier()` deep fetch. |
+| `cquarry.db` | The read-only database layer (`CalibreDB`): hydrated rows, single-entity fetches, format/cover resolution, custom columns, preferences, annotations and progress extractors, VL/saved-search resolution, the restricted tag browser (`get_categories`), and the composed `get_book_dossier()` deep fetch. |
 | `cquarry.search` | The lexer/parser/evaluator porting Calibre's search grammar; usable standalone behind the `MetadataProvider` protocol. |
 | `cquarry.helpers` | Domain utilities: rating conversion, comment sanitization, author display (including the unpiped-author and identifier-link helpers), series gaps, image dimension sniffing, the ISBN family (`isbn_normalize`, `isbn_check_digit_is_valid`, `to_isbn13`), and `tag_rollup`. |
 | `cquarry.integrity` | The shared library-integrity predicates: untagged, unrated, authorless, formatless, coverless, missing cover files, deprecated formats, low-res covers, duplicates, failed text extractions, series gaps, plus the metadata-quality trio (invalid UUIDs, sentinel pubdates, bad language codes) and the extra-side disk walk (`check_library_disk`). |
