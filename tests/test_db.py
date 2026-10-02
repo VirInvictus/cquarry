@@ -2781,7 +2781,10 @@ class TestFormatHashAndMetadata(unittest.TestCase):
         import hashlib
 
         with CalibreDB(self.db_path) as db:
-            self.assertEqual(db.format_hash(1, "EPUB"), hashlib.sha256(b"EPUB-CONTENTS-v1").hexdigest())
+            self.assertEqual(
+                db.format_hash(1, "EPUB"),
+                hashlib.sha256(b"EPUB-CONTENTS-v1").hexdigest(),
+            )
             self.assertEqual(db.format_hash(1, "epub"), db.format_hash(1, "EPUB"))
 
     def test_hash_follows_a_file_swap(self):
