@@ -178,8 +178,10 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
 
 ### Phase 16: Read-surface wave and shared-helper promotions
 
-- [ ] Cover bytes and freshness: `Cache.cover()` / `cover_last_modified()`
+- [x] Cover bytes and freshness: `Cache.cover()` / `cover_last_modified()`
   (`cache.py:1426`, `:1481`); web frontends need bytes and conditional-GET mtimes. Size XS.
+  **Shipped 1.25** as `get_cover_bytes` / `get_cover_last_modified` (aware-UTC stamp),
+  riding `get_cover_path`'s resolution and unknown-book ValueError.
 - [ ] Inverse virtual-library map: `virtual_libraries_for_books` (`cache.py:3600`).
   Size S.
 - [ ] Inverse user-category map: `user_categories_for_books` (`cache.py:3645`). Size S.

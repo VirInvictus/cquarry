@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from datetime import UTC
 
 from cquarry.db import CalibreDB
 
@@ -2554,3 +2555,57 @@ class TestAnnotationsDecoded(unittest.TestCase):
             self.assertEqual(db.search("annotations:mark"), {1})
             self.assertEqual(db.search("annotations:true"), {1, 2})
             self.assertEqual(db.search("annotations:false"), set())
+
+
+class TestCoverBytesAndFreshness(unittest.TestCase):
+    """get_cover_bytes / get_cover_last_modified: the web-frontend half (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        d1 = os.path.join(self.temp_dir, "Author A", "Thick Book (1)")
+        os.makedirs(d1)
+        with open(os.path.join(d1, "cover.jpg"), "wb") as f:
+            f.write(b"jpeg-bytes")
+        d2 = os.path.join(self.temp_dir, "Author A", "Png Cover (2)")
+        os.makedirs(d2)
+        with open(os.path.join(d2, "cover.png"), "wb") as f:
+            f.write(b"png-bytes")
+        os.makedirs(os.path.join(self.temp_dir, "Author A", "Bare Book (3)"))
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_cover_bytes_roundtrip_and_png_fallback(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.get_cover_bytes(1), b"jpeg-bytes")
+            self.assertEqual(db.get_cover_bytes(2), b"png-bytes")
+
+    def test_cover_bytes_none_without_file(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertIsNone(db.get_cover_bytes(3))
+
+    def test_cover_bytes_unknown_book_raises(self):
+        with CalibreDB(self.db_path) as db, self.assertRaises(ValueError):
+            db.get_cover_bytes(999)
+
+    def test_cover_last_modified_is_aware_utc_or_none(self):
+
+        with CalibreDB(self.db_path) as db:
+            stamp = db.get_cover_last_modified(1)
+            self.assertIsNotNone(stamp)
+            self.assertEqual(stamp.tzinfo, UTC)
+            self.assertIsNone(db.get_cover_last_modified(3))
+
+    def test_cover_last_modified_unknown_book_raises(self):
+        with CalibreDB(self.db_path) as db, self.assertRaises(ValueError):
+            db.get_cover_last_modified(999)
+
+    def test_cover_bytes_follow_the_file_when_it_changes(self):
+        d1 = os.path.join(self.temp_dir, "Author A", "Thick Book (1)")
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.get_cover_bytes(1), b"jpeg-bytes")
+        with open(os.path.join(d1, "cover.jpg"), "wb") as f:
+            f.write(b"replaced")
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.get_cover_bytes(1), b"replaced")

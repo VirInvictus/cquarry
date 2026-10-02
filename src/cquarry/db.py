@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any, Self
 
 from cquarry.helpers import (
@@ -820,6 +821,37 @@ class CalibreDB:
         if os.path.exists(png):
             return png
         return None
+
+    def get_cover_bytes(self, book_id: int) -> bytes | None:
+        """A book's raw cover image bytes (``cover.jpg``, falling back to
+        ``cover.png``), or None when no cover file exists on disk.
+
+        The bytes half of :meth:`get_cover_path` (upstream ``Cache.cover()``,
+        the bytestring mode web frontends serve and thumbnailers consume);
+        resolution and the unknown-book ValueError are exactly
+        :meth:`get_cover_path`'s. The catalogued ``has_cover`` flag is not
+        consulted: the file's presence is the answer, so a catalogued-but-
+        missing cover reads as None the same way the verified path read does.
+        """
+        path = self.get_cover_path(book_id)
+        if path is None:
+            return None
+        with open(path, "rb") as f:
+            return f.read()
+
+    def get_cover_last_modified(self, book_id: int) -> datetime | None:
+        """The cover file's mtime as a UTC datetime, or None without a file.
+
+        The conditional-GET half (upstream ``cover_last_modified``): a web
+        frontend compares this against its cached copy's timestamp instead of
+        re-serving bytes that have not changed. Resolution follows
+        :meth:`get_cover_path`; the datetime is timezone-aware UTC (upstream
+        surfaces a naive UTC stamp).
+        """
+        path = self.get_cover_path(book_id)
+        if path is None:
+            return None
+        return datetime.fromtimestamp(os.stat(path).st_mtime, tz=UTC)
 
     def format_path_index(self) -> dict[str, int]:
         """Map every catalogued format file path to its book id.
