@@ -133,8 +133,11 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   the engine's anchored-subtree rule; ratings out, a rating slice is a search), and
   `get_all_formats()` (cached `{book_id: [FMT]}`). Carrel's adoption stays waived this
   round per the decision record.
-- [ ] **`facet_counts`**: browse facets over a search result; ungated with Carrel's lane,
-  ships together with Phase 18's restricted tag browser. Size M.
+- [x] **`facet_counts`**: browse facets over a search result; ungated with Carrel's lane,
+  ships together with Phase 18's restricted tag browser. Size M. **Shipped 1.24** as
+  `facet_counts(query)` + the Phase 18 seam `facet_counts_for_ids(ids)`: per-value counts
+  over the restricted set, builtin facet fields plus custom columns by `#label`, ratings
+  in stars, count-desc then value-asc.
 
 ### Phase 15: Maintenance ring (the lifecycle layer around the write module)
 
