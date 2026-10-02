@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from datetime import UTC
 
 from cquarry.db import CalibreDB
 
@@ -113,6 +114,39 @@ class TestListBooks(unittest.TestCase):
     def test_offset_and_limit(self):
         self.assertEqual(self._ids(self.db.list_books(offset=1, limit=1)), [2])
         self.assertEqual(len(self.db.list_books(offset=2)), 1)
+
+    def test_ids_sort_preserves_the_caller_order(self):
+        # The 1.21 ids-order mode: a caller that carries its own ordering
+        # (relevance rank, shelf order) gets its sequence back verbatim.
+        # (Retires Carrel-calibre-web's preserve_order re-sort shim.)
+        self.assertEqual(
+            self._ids(self.db.list_books(ids=[2, 3, 1], sort="ids")), [2, 3, 1]
+        )
+        self.assertEqual(self._ids(self.db.list_books(ids=[3, 1], sort="ids")), [3, 1])
+
+    def test_ids_sort_edges(self):
+        # A duplicated id keeps its first slot; unknown ids are skipped;
+        # empty ids are an empty page; descending reverses the sequence;
+        # offset/limit slice after the ordering.
+        self.assertEqual(
+            self._ids(self.db.list_books(ids=[3, 3, 1], sort="ids")), [3, 1]
+        )
+        self.assertEqual(self._ids(self.db.list_books(ids=[999, 2], sort="ids")), [2])
+        self.assertEqual(self.db.list_books(ids=[], sort="ids"), [])
+        self.assertEqual(
+            self._ids(self.db.list_books(ids=[1, 3, 2], sort="ids", descending=True)),
+            [2, 3, 1],
+        )
+        self.assertEqual(
+            self._ids(self.db.list_books(ids=[1, 2, 3], sort="ids", offset=1, limit=1)),
+            [2],
+        )
+
+    def test_ids_sort_validation(self):
+        with self.assertRaises(ValueError):
+            self.db.list_books(sort="ids")  # requires ids
+        with self.assertRaises(ValueError):
+            self.db.list_books(ids=[1], sort=("ids", "title"))  # stands alone
 
     def test_multi_key_sort_with_one_direction(self):
         # The authaz shape: author_sort primary, series name then series
@@ -1664,8 +1698,14 @@ class TestLockedDBSnapshot(unittest.TestCase):
         conn.execute("INSERT INTO books (id, title) VALUES (1, 'Committed')")
         conn.commit()
         conn.close()
+        # The holder keeps the lock for the whole test; the backup-API
+        # snapshot would wait it out on the production leash (10 s), so the
+        # test shortens it to exercise the fallback path instead.
+        self._real_leash = CalibreDB.SNAPSHOT_LEASH
+        CalibreDB.SNAPSHOT_LEASH = 0.2
 
     def tearDown(self):
+        CalibreDB.SNAPSHOT_LEASH = self._real_leash
         shutil.rmtree(self.temp_dir)
 
     def test_locked_db_falls_back_to_snapshot_and_cleans_up(self):
@@ -1911,6 +1951,32 @@ class TestFTSSidecar(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.search_book_text("")
 
+    def test_get_dirtied_formats_lists_the_queue(self):
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.executemany(
+            "INSERT INTO dirtied_formats (book, format) VALUES (?, ?)",
+            [(2, "epub"), (1, "MOBI"), (1, "epub")],
+        )
+        fts.commit()
+        fts.close()
+        # Sorted by book then format, formats uppercased as stored.
+        self.assertEqual(
+            self.db.get_dirtied_formats(), [(1, "EPUB"), (1, "MOBI"), (2, "EPUB")]
+        )
+
+    def test_get_dirtied_formats_empty_without_queue_or_sidecar(self):
+        # A sidecar with no queue rows yet...
+        self.assertEqual(self.db.get_dirtied_formats(), [])
+        # ...and no sidecar at all.
+        other = os.path.join(self.temp_dir, "lib2")
+        os.makedirs(other)
+        os.link(self.db_path, os.path.join(other, "metadata.db"))
+        db = CalibreDB(os.path.join(other, "metadata.db"))
+        try:
+            self.assertEqual(db.get_dirtied_formats(), [])
+        finally:
+            db.close()
+
     def test_refresh_rediscovers_a_late_sidecar(self):
         other = os.path.join(self.temp_dir, "lib3")
         os.makedirs(other)
@@ -2048,5 +2114,1387 @@ class TestCustomSeriesIndex(unittest.TestCase):
         self.assertEqual(self.db.field(1, "#old"), "Ancient")
 
 
+class TestPrecedentTags(unittest.TestCase):
+    """precedent_tags: the tag-by-precedent suggestion read (1.22).
+
+    Promoted verbatim from CalibreQuarry's run.py phase-3 prompt, which
+    had grown the only raw four-table JOIN in a consumer: an engine read
+    belongs here. Two deltas from the promoted form, both deliberate:
+    results are ORDER BY name (the original relied on SQLite's arbitrary
+    DISTINCT order) and the limit is a parameter (was a hardcoded 12).
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY,
+                book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY,
+                book INTEGER, tag INTEGER);
+            INSERT INTO authors VALUES (1, 'Herbert, Frank'),
+                (2, 'herbert, frank'), (3, 'Austen, Jane');
+            INSERT INTO books VALUES (1), (2), (3);
+            INSERT INTO books_authors_link VALUES (1, 1, 1), (2, 2, 2),
+                (3, 3, 3);
+            INSERT INTO tags VALUES (1, 'Fic.SciFi'), (2, 'Dune'),
+                (3, 'Fic.Classic');
+            INSERT INTO books_tags_link VALUES (1, 1, 1), (2, 1, 2),
+                (3, 2, 2), (4, 3, 3);
+            """
+        )
+        conn.commit()
+        conn.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_distinct_tags_across_an_authors_books(self):
+        self.assertEqual(
+            self.db.precedent_tags(["Herbert, Frank"]), ["Dune", "Fic.SciFi"]
+        )
+
+    def test_author_match_is_case_insensitive(self):
+        # Both spellings link books carrying Dune; NOCASE resolves them
+        # to the same author set (the promoted JOIN's COLLATE NOCASE).
+        self.assertEqual(
+            self.db.precedent_tags(["HERBERT, FRANK"]), ["Dune", "Fic.SciFi"]
+        )
+
+    def test_unknown_author_yields_nothing(self):
+        self.assertEqual(self.db.precedent_tags(["Nobody, Alice"]), [])
+
+    def test_empty_authors_short_circuits(self):
+        self.assertEqual(self.db.precedent_tags([]), [])
+
+    def test_limit_caps_the_result(self):
+        self.assertEqual(self.db.precedent_tags(["Herbert, Frank"], limit=1), ["Dune"])
+
+
+class TestResidueReads(TestCalibreDB):
+    """The Carrel residue trio (1.24, Phase 14): get_book_by_uuid (the
+    Calibre-Companion endpoint shape), get_entity_book_ids (the id-set half
+    of get_entities), get_all_formats (the bulk formats map)."""
+
+    def setUp(self):
+        super().setUp()
+        self.conn.execute("ALTER TABLE books ADD COLUMN uuid TEXT")
+        self.conn.execute("UPDATE books SET uuid = ? WHERE id = 1", ("uuid-one",))
+        self.conn.execute(
+            "INSERT INTO tags (name) VALUES ('Fiction'), ('Fiction.Scifi'), ('Fiction.Scifi.Space'), ('History')"
+        )
+        for book, tag in ((1, 1), (1, 2), (1, 3), (2, 4)):
+            self.conn.execute(
+                "INSERT INTO books_tags_link (book, tag) VALUES (?, ?)", (book, tag)
+            )
+        self.conn.execute(
+            "INSERT INTO series (id, name, sort) VALUES (1, 'Wing Series', 'Wing Series')"
+        )
+        self.conn.execute("INSERT INTO books_series_link (book, series) VALUES (2, 1)")
+        self.conn.commit()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_get_book_by_uuid(self):
+        row = self.db.get_book_by_uuid("uuid-one")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["id"], 1)
+        self.assertEqual(row["title"], "Book 1")
+        # Case-insensitive, trimmed; unknown is None; blank is None.
+        self.assertEqual(self.db.get_book_by_uuid("  UUID-ONE ")["id"], 1)
+        self.assertIsNone(self.db.get_book_by_uuid("uuid-nope"))
+        self.assertIsNone(self.db.get_book_by_uuid(""))
+        self.assertIsNone(self.db.get_book_by_uuid(None))
+
+    def test_get_entity_book_ids_tags_are_anchored_subtrees(self):
+        # 'Fiction' covers the tag and its whole subtree; 'History' is exact.
+        self.assertEqual(self.db.get_entity_book_ids("tags", "Fiction"), {1})
+        self.assertEqual(self.db.get_entity_book_ids("tags", "Fiction.Scifi"), {1})
+        self.assertEqual(
+            self.db.get_entity_book_ids("tags", "fiction.scifi.space"), {1}
+        )
+        self.assertEqual(self.db.get_entity_book_ids("tags", "History"), {2})
+        self.assertEqual(self.db.get_entity_book_ids("tags", "Fict"), set())
+
+    def test_get_entity_book_ids_other_kinds(self):
+        self.assertEqual(self.db.get_entity_book_ids("authors", "author"), {1, 2})
+        self.assertEqual(self.db.get_entity_book_ids("series", "wing series"), {2})
+        self.assertEqual(self.db.get_entity_book_ids("publishers", "Nobody"), set())
+        with self.assertRaises(ValueError):
+            self.db.get_entity_book_ids("ratings", "4")
+        with self.assertRaises(ValueError):
+            self.db.get_entity_book_ids("nope", "x")
+        self.assertEqual(self.db.get_entity_book_ids("tags", ""), set())
+
+    def test_get_all_formats(self):
+        # The base fixture catalogues EPUB for book 1 and PDF for book 2.
+        self.assertEqual(self.db.get_all_formats(), {1: ["EPUB"], 2: ["PDF"]})
+        # Cached: a second call answers from the map without re-deriving.
+        self.assertIs(self.db.get_all_formats(), self.db.get_all_formats())
+        # refresh() clears the map with everything else.
+        self.conn.execute(
+            "INSERT INTO data (book, format, uncompressed_size, name)"
+            " VALUES (1, 'MOBI', 10, 'BookOne')"
+        )
+        self.conn.commit()
+        self.db.refresh()
+        self.assertEqual(self.db.get_all_formats(), {1: ["EPUB", "MOBI"], 2: ["PDF"]})
+
+
+class TestFacetCounts(TestCalibreDB):
+    """facet_counts / facet_counts_for_ids (1.24, Phase 14): per-value
+    counts over a restricted result set, the seam Phase 18's restricted
+    tag browser reuses."""
+
+    def setUp(self):
+        super().setUp()
+        # Book 1: Author / Scifi + Space opera tags / series / rated 5
+        # stars; book 2: Author / History tag / no series / unrated.
+        self.conn.execute(
+            "INSERT INTO tags (id, name) VALUES (1, 'Scifi'), (2, 'Scifi.Space'), (3, 'History')"
+        )
+        self.conn.execute(
+            "INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (1, 2), (2, 3)"
+        )
+        self.conn.execute("INSERT INTO ratings (id, rating) VALUES (1, 10)")
+        self.conn.execute("INSERT INTO books_ratings_link (book, rating) VALUES (1, 1)")
+        self.conn.execute(
+            "UPDATE books SET series_index = 1.0, path = 'x' WHERE id IN (1, 2)"
+        )
+        self.conn.execute(
+            "INSERT INTO series (id, name, sort) VALUES (1, 'Wing Series', 'Wing')"
+        )
+        self.conn.execute("INSERT INTO books_series_link (book, series) VALUES (1, 1)")
+        self.conn.commit()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_counts_are_restricted_to_the_result_set(self):
+        facets = self.db.facet_counts("authors:Author")
+        self.assertEqual(facets["authors"], [("Author", 2)])
+        self.assertEqual(
+            facets["tags"], [("History", 1), ("Scifi", 1), ("Scifi.Space", 1)]
+        )
+        self.assertEqual(facets["series"], [("Wing Series", 1)])
+        self.assertEqual(facets["publisher"], [])
+        self.assertEqual(facets["rating"], [(5.0, 1)])
+
+    def test_restriction_changes_the_answer(self):
+        everything = self.db.facet_counts_for_ids(None)
+        self.assertEqual(
+            everything["tags"], [("History", 1), ("Scifi", 1), ("Scifi.Space", 1)]
+        )
+        only_one = self.db.facet_counts_for_ids({1})
+        self.assertEqual(only_one["tags"], [("Scifi", 1), ("Scifi.Space", 1)])
+        self.assertEqual(only_one["series"], [("Wing Series", 1)])
+
+    def test_locations_restrict_and_unknown_raises(self):
+        facets = self.db.facet_counts_for_ids(None, locations=("tags",))
+        self.assertEqual(list(facets), ["tags"])
+        with self.assertRaises(ValueError):
+            self.db.facet_counts_for_ids(None, locations=("title",))
+        with self.assertRaises(ValueError):
+            self.db.facet_counts_for_ids(None, locations=("#nope",))
+
+    def test_custom_column_facet_by_label(self):
+        self.conn.execute(
+            "INSERT INTO custom_columns (id, label, name, datatype, is_multiple)"
+            " VALUES (1, 'aud', 'Audience', 'text', 0)"
+        )
+        self.conn.execute(
+            "CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, book INTEGER UNIQUE, value TEXT)"
+        )
+        self.conn.execute(
+            "INSERT INTO custom_column_1 (book, value) VALUES (1, 'Adults')"
+        )
+        self.conn.commit()
+        self.db.refresh()
+        facets = self.db.facet_counts_for_ids(None, locations=("#aud",))
+        self.assertEqual(facets["#aud"], [("Adults", 1)])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCustomColumnIdCastAndComposite(unittest.TestCase):
+    """L2.5/L2.12: a corrupt store's TEXT custom_columns.id must never
+    reach f-string SQL raw (the Wave-13 quoted-identifier defense's
+    siblings), and composite columns read as a documented empty (computed,
+    not stored) instead of a stderr warning from a failed table probe."""
+
+    def _make(self, col_id, datatype="text", storage=True):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " author_sort TEXT, timestamp TEXT, pubdate TEXT, has_cover INTEGER,"
+            " last_modified TEXT, series_index REAL, path TEXT)"
+        )
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'One')")
+        conn.execute(
+            "CREATE TABLE custom_columns (id TEXT PRIMARY KEY, label TEXT,"
+            " name TEXT, datatype TEXT, is_multiple INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO custom_columns VALUES (?, 'aud', 'Audience', ?, 1)",
+            (col_id, datatype),
+        )
+        if storage:
+            conn.execute(
+                "CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, value TEXT)"
+            )
+            conn.execute("INSERT INTO custom_column_2 (value) VALUES ('Youth')")
+            conn.execute(
+                "CREATE TABLE books_custom_column_2_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, value INTEGER, UNIQUE(book, value))"
+            )
+            conn.execute(
+                "INSERT INTO books_custom_column_2_link (book, value) VALUES (1, 1)"
+            )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_numeric_text_id_still_resolves(self):
+        self._make("2")
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.load_custom_column("#aud"), {1: ["Youth"]})
+
+    def test_non_numeric_text_id_raises_clean_valueerror(self):
+        self._make("2; DROP TABLE books")
+        with CalibreDB(self.db_path) as db:
+            self.assertRaises(ValueError, db.load_custom_column, "#aud")
+
+    def test_composite_column_reads_as_documented_empty(self):
+        self._make("3", datatype="composite", storage=False)
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.load_custom_column("#aud"), {})
+
+
+class TestExternalChangesAndBackup(unittest.TestCase):
+    """1.23: external_changes_detected() over PRAGMA data_version (the
+    cheap staleness token) and the backup-API copy (backup_to)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT, series_index REAL, path TEXT, has_cover INTEGER)"
+        )
+        conn.execute("INSERT INTO books (id, title) VALUES (1, 'One')")
+        # Empty join partners so get_book()'s 6-JOIN works on the copy.
+        for ddl in (
+            (
+                "CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT,"
+                " sort TEXT, link TEXT)"
+            ),
+            (
+                "CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, author INTEGER)"
+            ),
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)",
+            (
+                "CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, tag INTEGER)"
+            ),
+            (
+                "CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,"
+                " format TEXT, uncompressed_size INTEGER, name TEXT)"
+            ),
+            "CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT)",
+            (
+                "CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, lang_code INTEGER)"
+            ),
+            "CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT)",
+            (
+                "CREATE TABLE books_series_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, series INTEGER)"
+            ),
+            "CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER)",
+            (
+                "CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, rating INTEGER)"
+            ),
+            "CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT)",
+            (
+                "CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY,"
+                " book INTEGER, publisher INTEGER)"
+            ),
+        ):
+            conn.execute(ddl)
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_external_changes_flips_after_a_foreign_write(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertFalse(db.external_changes_detected())
+            self.assertFalse(db.external_changes_detected())  # stable
+            other = sqlite3.connect(self.db_path)
+            other.execute("INSERT INTO books (title) VALUES ('Two')")
+            other.commit()
+            other.close()
+            self.assertTrue(db.external_changes_detected())
+            # Level-triggered: it stays True until refresh() re-primes.
+            self.assertTrue(db.external_changes_detected())
+            db.refresh()
+            self.assertFalse(db.external_changes_detected())
+
+    def test_backup_to_copies_the_whole_library(self):
+        with CalibreDB(self.db_path) as db:
+            dest = os.path.join(self.temp_dir, "backup", "copy.db")
+            out = db.backup_to(dest)
+            self.assertEqual(out, os.path.abspath(dest))
+            with CalibreDB(out) as copy:
+                self.assertEqual(copy.count_books(), 1)
+                self.assertEqual(copy.get_book(1)["title"], "One")
+
+
+class TestAnnotationsDecoded(unittest.TestCase):
+    """1.23: the decoded renderer-facing annotation view; the
+    annotations: location keeps answering from the bulk text map."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+        conn.executemany(
+            "INSERT INTO books (id, title) VALUES (?, ?)", [(1, "One"), (2, "Two")]
+        )
+        conn.execute(
+            "CREATE TABLE annotations (id INTEGER PRIMARY KEY, book INTEGER,"
+            " format TEXT, user_type TEXT, user TEXT, timestamp TEXT,"
+            " annot_id TEXT, annot_type TEXT, annot_data TEXT,"
+            " searchable_text TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO annotations (book, format, annot_id, annot_type,"
+            " annot_data, searchable_text) VALUES (?, 'EPUB', ?, ?, ?, ?)",
+            [
+                (
+                    1,
+                    "a1",
+                    "highlight",
+                    '{"type": "highlight", "text": "quoted words", "notes": "a note"}',
+                    "quoted words\x1f a note",
+                ),
+                (1, "a2", "bookmark", '{"type": "bookmark", "title": "Mark"}', "Mark"),
+                (2, "a3", "highlight", "not-json", "raw text"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_decoded_view_projects_renderer_fields(self):
+        with CalibreDB(self.db_path) as db:
+            rows = db.get_annotations_decoded(1)
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "book": 1,
+                    "format": "EPUB",
+                    "kind": "highlight",
+                    "annot_id": "a1",
+                    "timestamp": None,
+                    "text": "quoted words",
+                    "notes": "a note",
+                    "title": None,
+                },
+                {
+                    "book": 1,
+                    "format": "EPUB",
+                    "kind": "bookmark",
+                    "annot_id": "a2",
+                    "timestamp": None,
+                    "text": None,
+                    "notes": None,
+                    "title": "Mark",
+                },
+            ],
+        )
+
+    def test_decoded_view_survives_unparseable_payloads(self):
+        with CalibreDB(self.db_path) as db:
+            rows = db.get_annotations_decoded(2)
+        self.assertEqual(rows[0]["kind"], "highlight")
+        self.assertIsNone(rows[0]["text"])
+        self.assertIsNone(rows[0]["notes"])
+
+    def test_decoded_view_scopes_and_defaults(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(len(db.get_annotations_decoded()), 3)
+            self.assertEqual(db.get_annotations_decoded(99), [])
+
+    def test_annotations_search_still_answers_from_the_text(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.search("annotations:quoted"), {1})
+            self.assertEqual(db.search("annotations:mark"), {1})
+            self.assertEqual(db.search("annotations:true"), {1, 2})
+            self.assertEqual(db.search("annotations:false"), set())
+
+
+class TestCoverBytesAndFreshness(unittest.TestCase):
+    """get_cover_bytes / get_cover_last_modified: the web-frontend half (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        d1 = os.path.join(self.temp_dir, "Author A", "Thick Book (1)")
+        os.makedirs(d1)
+        with open(os.path.join(d1, "cover.jpg"), "wb") as f:
+            f.write(b"jpeg-bytes")
+        d2 = os.path.join(self.temp_dir, "Author A", "Png Cover (2)")
+        os.makedirs(d2)
+        with open(os.path.join(d2, "cover.png"), "wb") as f:
+            f.write(b"png-bytes")
+        os.makedirs(os.path.join(self.temp_dir, "Author A", "Bare Book (3)"))
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_cover_bytes_roundtrip_and_png_fallback(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.get_cover_bytes(1), b"jpeg-bytes")
+            self.assertEqual(db.get_cover_bytes(2), b"png-bytes")
+
+    def test_cover_bytes_none_without_file(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertIsNone(db.get_cover_bytes(3))
+
+    def test_cover_bytes_unknown_book_raises(self):
+        with CalibreDB(self.db_path) as db, self.assertRaises(ValueError):
+            db.get_cover_bytes(999)
+
+    def test_cover_last_modified_is_aware_utc_or_none(self):
+
+        with CalibreDB(self.db_path) as db:
+            stamp = db.get_cover_last_modified(1)
+            self.assertIsNotNone(stamp)
+            self.assertEqual(stamp.tzinfo, UTC)
+            self.assertIsNone(db.get_cover_last_modified(3))
+
+    def test_cover_last_modified_unknown_book_raises(self):
+        with CalibreDB(self.db_path) as db, self.assertRaises(ValueError):
+            db.get_cover_last_modified(999)
+
+    def test_cover_bytes_follow_the_file_when_it_changes(self):
+        d1 = os.path.join(self.temp_dir, "Author A", "Thick Book (1)")
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.get_cover_bytes(1), b"jpeg-bytes")
+        with open(os.path.join(d1, "cover.jpg"), "wb") as f:
+            f.write(b"replaced")
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.get_cover_bytes(1), b"replaced")
+
+
+class TestInverseLibraryMaps(unittest.TestCase):
+    """virtual_libraries_for_books: the inverse VL map (1.25, Phase 16)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT, is_multiple INTEGER, editable INTEGER DEFAULT 1, display TEXT DEFAULT '{}', normalized INTEGER DEFAULT 0);
+            CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
+            INSERT INTO books (id, title, sort, path, has_cover) VALUES
+                (1, 'Alpha Book', 'Alpha Book', 'A/Alpha (1)', 0),
+                (2, 'Beta Book', 'Beta Book', 'A/Beta (2)', 0),
+                (3, 'Gamma Book', 'Gamma Book', 'A/Gamma (3)', 0);
+            INSERT INTO authors (id, name, sort) VALUES (1, 'Ann Alpha', 'Alpha, Ann');
+            INSERT INTO books_authors_link (book, author) VALUES (1, 1), (2, 1);
+            INSERT INTO tags (id, name) VALUES (1, 'Alpha'), (2, 'Beta');
+            INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (2, 1), (2, 2);
+            INSERT INTO preferences (key, val) VALUES ('virtual_libraries', ?), ('virtual_libraries2', NULL);
+            """
+        )
+        # Three wings: two healthy, one whose expression references a missing
+        # target (the per-name fault-isolation case).
+        vl_json = '{"Alpha Wing": "tags:Alpha", "Beta Wing": "tags:Beta", "Broken": "vl:\\"Missing\\""}'
+        con.execute(
+            "UPDATE preferences SET val = ? WHERE key = 'virtual_libraries'",
+            (vl_json,),
+        )
+        con.execute("DELETE FROM preferences WHERE key = 'virtual_libraries2'")
+        # A composite custom column (no storage) so the inverse user-category
+        # map can prove composite members fall out as no match, not an error.
+        con.execute(
+            "INSERT INTO custom_columns (id,label,name,datatype,is_multiple) "
+            "VALUES (1,'comp','Composite','composite',0)"
+        )
+        uc_json = (
+            '{"Favorites": [["Alpha", "tags"], ["Ann Alpha", "authors"]], '
+            '"Comp Cat": [["x", "#comp"]], '
+            '"Nowhere": [["Ghost", "publisher"]]}'
+        )
+        con.execute(
+            "INSERT INTO preferences (key, val) VALUES ('user_categories', ?)",
+            (uc_json,),
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_map_names_the_wings_per_book(self):
+        result = self.db.virtual_libraries_for_books()
+        self.assertEqual(result[1], ("Alpha Wing",))
+        self.assertEqual(result[2], ("Alpha Wing", "Beta Wing"))
+        self.assertEqual(result[3], ())
+
+    def test_restriction_answers_only_the_asked_ids(self):
+        result = self.db.virtual_libraries_for_books([3, 999])
+        self.assertEqual(result, {3: (), 999: ()})
+
+    def test_broken_wing_is_skipped_with_a_warning(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = self.db.virtual_libraries_for_books()
+        self.assertNotIn("Broken", result[1])
+        self.assertIn("Broken", err.getvalue())
+
+    def test_refresh_picks_up_preference_changes(self):
+        self.assertEqual(self.db.virtual_libraries_for_books()[1], ("Alpha Wing",))
+        self.assertFalse(self.db.external_changes_detected())  # prime the baseline
+        con = sqlite3.connect(self.db_path)
+        con.execute(
+            "UPDATE preferences SET val = ? WHERE key = 'virtual_libraries'",
+            ('{"Gamma Wing": "title:Gamma"}',),
+        )
+        con.commit()
+        con.close()
+        self.assertTrue(self.db.external_changes_detected())
+        self.db.refresh()
+        result = self.db.virtual_libraries_for_books()
+        self.assertEqual(result[3], ("Gamma Wing",))
+        self.assertEqual(result[1], ())
+
+
+class TestInverseUserCategories(TestInverseLibraryMaps):
+    """user_categories_for_books: the inverse @Name map (1.25, Phase 16).
+
+    Rides TestInverseLibraryMaps' fixture (books 1/2 tagged+authored, book 3
+    bare; a composite column and three user categories defined)."""
+
+    def test_members_list_what_each_book_holds(self):
+        result = self.db.user_categories_for_books()
+        self.assertEqual(
+            result[1]["Favorites"], [["Alpha", "tags"], ["Ann Alpha", "authors"]]
+        )
+        self.assertEqual(
+            result[2]["Favorites"], [["Alpha", "tags"], ["Ann Alpha", "authors"]]
+        )
+        # Book 3 holds nothing anywhere, but every category key is present.
+        self.assertEqual(result[3], {"Favorites": [], "Comp Cat": [], "Nowhere": []})
+
+    def test_restriction_answers_only_the_asked_ids(self):
+        result = self.db.user_categories_for_books([3])
+        self.assertEqual(list(result), [3])
+        self.assertEqual(result[3]["Favorites"], [])
+
+    def test_composite_member_matches_nothing_without_erroring(self):
+        result = self.db.user_categories_for_books([1, 2])
+        self.assertEqual(result[1]["Comp Cat"], [])
+        self.assertEqual(result[2]["Comp Cat"], [])
+
+    def test_unknown_member_location_matches_nothing(self):
+        result = self.db.user_categories_for_books([1])
+        self.assertEqual(result[1]["Nowhere"], [])
+
+    def test_agrees_with_the_name_search_location(self):
+        # The documented construction guarantee: the members this inverse map
+        # lists are exactly the books @Name:<category> matches.
+        for book_id in (1, 2, 3):
+            for ucat in ("Favorites", "Nowhere"):
+                listed = {
+                    name
+                    for name, _loc in self.db.user_categories_for_books([book_id])[
+                        book_id
+                    ][ucat]
+                }
+                if listed:
+                    self.assertIn(book_id, self.db.search(f"@{ucat}:true"))
+                else:
+                    self.assertNotIn(book_id, self.db.search(f"@{ucat}:true"))
+
+
+class TestFormatHashAndMetadata(unittest.TestCase):
+    """format_hash / format_metadata: the file-changed detector pair (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        d1 = os.path.join(self.temp_dir, "Author A", "Thick Book (1)")
+        os.makedirs(d1)
+        self.epub = os.path.join(d1, "thick.epub")
+        with open(self.epub, "wb") as f:
+            f.write(b"EPUB-CONTENTS-v1")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_hash_is_the_file_sha256(self):
+        import hashlib
+
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(
+                db.format_hash(1, "EPUB"),
+                hashlib.sha256(b"EPUB-CONTENTS-v1").hexdigest(),
+            )
+            self.assertEqual(db.format_hash(1, "epub"), db.format_hash(1, "EPUB"))
+
+    def test_hash_follows_a_file_swap(self):
+        with CalibreDB(self.db_path) as db:
+            before = db.format_hash(1, "EPUB")
+        with open(self.epub, "wb") as f:
+            f.write(b"EPUB-CONTENTS-v2")
+        with CalibreDB(self.db_path) as db:
+            self.assertNotEqual(db.format_hash(1, "EPUB"), before)
+
+    def test_hash_errors_follow_get_format_path(self):
+        with CalibreDB(self.db_path) as db:
+            with self.assertRaises(ValueError):
+                db.format_hash(1, "MOBI")  # not catalogued
+            with self.assertRaises(ValueError):
+                db.format_hash(999, "EPUB")  # unknown book
+
+    def test_format_metadata_reports_disk_facts(self):
+        from datetime import UTC
+
+        with CalibreDB(self.db_path) as db:
+            meta = db.format_metadata(1, "EPUB")
+            self.assertEqual(meta["path"], self.epub)
+            self.assertEqual(meta["size"], len(b"EPUB-CONTENTS-v1"))
+            self.assertEqual(meta["mtime"].tzinfo, UTC)
+
+
+class TestBooksByDateBuckets(unittest.TestCase):
+    """books_by_year / books_by_month over any date field (1.25, Phase 16)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT, is_multiple INTEGER, editable INTEGER DEFAULT 1, display TEXT DEFAULT '{}', normalized INTEGER DEFAULT 0);
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, book INTEGER, value TEXT, link TEXT DEFAULT '');
+            INSERT INTO books (id, title, sort, path, has_cover, pubdate, timestamp) VALUES
+                (1, 'One', 'One', 'a/1', 0, '1991-10-01 00:00:00+00:00', '2020-01-15 00:00:00+00:00'),
+                (2, 'Two', 'Two', 'a/2', 0, '1991-03-05 00:00:00+00:00', '2021-07-02 00:00:00+00:00'),
+                (3, 'Three', 'Three', 'a/3', 0, NULL, '2020-01-15 00:00:00+00:00'),
+                (4, 'Sentinel', 'Sentinel', 'a/4', 0, '0101-01-01 00:00:00+00:00', '2019-12-31 00:00:00+00:00');
+            INSERT INTO custom_columns (id,label,name,datatype,is_multiple) VALUES (1,'acquired','Acquired','datetime',0);
+            INSERT INTO custom_column_1 (book, value) VALUES
+                (1, '2022-05-05 00:00:00+00:00'), (2, '2022-05-05 00:00:00+00:00');
+            """
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_pubdate_years_skip_null_and_sentinel(self):
+        result = self.db.books_by_year()
+        self.assertEqual(result, {1991: {1, 2}})
+
+    def test_timestamp_years(self):
+        result = self.db.books_by_year("timestamp")
+        self.assertEqual(result, {2019: {4}, 2020: {1, 3}, 2021: {2}})
+
+    def test_month_buckets_key_on_tuples(self):
+        result = self.db.books_by_month("timestamp")
+        self.assertEqual(
+            result,
+            {
+                (2019, 12): {4},
+                (2020, 1): {1, 3},
+                (2021, 7): {2},
+            },
+        )
+
+    def test_custom_date_column_by_label(self):
+        result = self.db.books_by_year("#acquired")
+        self.assertEqual(result, {2022: {1, 2}})
+
+    def test_restriction_narrows_the_buckets(self):
+        result = self.db.books_by_year("timestamp", ids=[1, 4])
+        self.assertEqual(result, {2019: {4}, 2020: {1}})
+
+    def test_unknown_and_non_date_fields_raise(self):
+        with self.assertRaises(ValueError):
+            self.db.books_by_year("nope")
+        with self.assertRaises(ValueError):
+            self.db.books_by_year("title")
+
+
+class TestNextSeriesNum(unittest.TestCase):
+    """get_next_series_num_for: the preference-aware next number (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT, is_multiple INTEGER, editable INTEGER DEFAULT 1, display TEXT DEFAULT '{}', normalized INTEGER DEFAULT 0);
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT);
+            CREATE TABLE books_custom_column_1_link (id INTEGER PRIMARY KEY, book INTEGER, value INTEGER, extra REAL);
+            CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
+            INSERT INTO books (id, title, sort, path, has_cover, series_index) VALUES
+                (1, 'A1', 'A1', 'a/1', 0, 1.0), (2, 'A2', 'A2', 'a/2', 0, 3.0),
+                (3, 'A5', 'A5', 'a/3', 0, 5.0), (4, 'B1', 'B1', 'a/4', 0, 1.0),
+                (5, 'Other', 'Other', 'a/5', 0, 9.0);
+            INSERT INTO series (id, name) VALUES (1, 'Radch'), (2, 'Vorkosigan');
+            INSERT INTO books_series_link (book, series) VALUES (1, 1), (2, 1), (3, 1), (4, 2);
+            INSERT INTO custom_columns (id,label,name,datatype,is_multiple) VALUES (1,'myseries','My Series','series',0);
+            INSERT INTO custom_column_1 (id, value) VALUES (1, 'Saga'), (2, 'Cosmere');
+            INSERT INTO books_custom_column_1_link (book, value, extra) VALUES
+                (1, 1, 2.0), (3, 1, 4.0), (4, 2, 1.0);
+            """
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def _set_pref(self, value):
+        con = sqlite3.connect(self.db_path)
+        con.execute("DELETE FROM preferences WHERE key = 'series_index_auto_increment'")
+        con.execute(
+            "INSERT INTO preferences (key, val) VALUES ('series_index_auto_increment', ?)",
+            (value,),
+        )
+        con.commit()
+        con.close()
+        self.db.refresh()
+
+    def test_default_next_is_max_plus_one(self):
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 6.0)
+        self.assertEqual(self.db.get_next_series_num_for("Vorkosigan"), 2.0)
+
+    def test_unknown_series_and_numeric_pref(self):
+        self.assertEqual(self.db.get_next_series_num_for("Ghost Series"), 1.0)
+        self._set_pref("7")
+        self.assertEqual(self.db.get_next_series_num_for("Ghost Series"), 7.0)
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 7.0)
+
+    def test_next_first_free_next_free_last_free(self):
+        self._set_pref('"next"')
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 6.0)
+        self._set_pref('"first_free"')
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 2.0)
+        self._set_pref('"next_free"')
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 2.0)
+        self._set_pref('"last_free"')
+        self.assertEqual(self.db.get_next_series_num_for("Radch"), 4.0)
+
+    def test_case_insensitive_series_match(self):
+        self.assertEqual(self.db.get_next_series_num_for("radch"), 6.0)
+
+    def test_current_indices_map(self):
+        self.assertEqual(
+            self.db.get_next_series_num_for("Radch", current_indices=True),
+            {1: 1.0, 2: 3.0, 3: 5.0},
+        )
+
+    def test_custom_series_column(self):
+        self.assertEqual(
+            self.db.get_next_series_num_for("Saga", field="#myseries"), 5.0
+        )
+        self.assertEqual(
+            self.db.get_next_series_num_for(
+                "Saga", field="#myseries", current_indices=True
+            ),
+            {1: 2.0, 3: 4.0},
+        )
+
+    def test_non_series_field_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.get_next_series_num_for("x", field="#myseries_index")
+        with self.assertRaises(ValueError):
+            self.db.get_next_series_num_for("x", field="title")
+
+
+class TestAnnotationConveniences(unittest.TestCase):
+    """get_annotations_filtered and the users/types/styles discoveries
+    (1.25, Phase 16)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            INSERT INTO books (id, title, sort, path, has_cover) VALUES
+                (1, 'One', 'One', 'a/1', 0), (2, 'Two', 'Two', 'a/2', 0);
+            CREATE TABLE annotations (id INTEGER PRIMARY KEY, book INTEGER,
+                format TEXT, user_type TEXT, user TEXT, timestamp TEXT,
+                annot_id TEXT, annot_type TEXT, annot_data TEXT, searchable_text TEXT);
+            INSERT INTO annotations (id, book, format, user_type, user, timestamp, annot_id, annot_type, annot_data) VALUES
+                (1, 1, 'EPUB', 'local', 'viewer', '2024-01-01T00:00:00+00:00', 'a1', 'highlight',
+                 '{"type": "highlight", "text": "quoted passage", "notes": "a note", "style": {"kind": "color", "which": "yellow"}}'),
+                (2, 1, 'EPUB', 'local', 'viewer', '2024-01-02T00:00:00+00:00', 'a2', 'highlight',
+                 '{"type": "highlight", "text": "second passage", "style": {"kind": "color", "which": "green"}}'),
+                (3, 1, 'EPUB', 'web', 'reader', '2024-01-03T00:00:00+00:00', 'a3', 'bookmark',
+                 '{"type": "bookmark", "title": "Chapter 2"}'),
+                (4, 2, 'EPUB', 'local', 'viewer', '2024-01-05T00:00:00+00:00', 'a4', 'highlight',
+                 '{"removed": true, "timestamp": "2024-01-05T00:00:00+00:00", "type": "highlight", "uuid": "a4"}');
+            """
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_filter_by_user_and_kind(self):
+        rows = self.db.get_annotations_filtered(user="reader")
+        self.assertEqual([r["annot_id"] for r in rows], ["a3"])
+        rows = self.db.get_annotations_filtered(kind="highlight", book_id=1)
+        self.assertEqual([r["annot_id"] for r in rows], ["a1", "a2"])
+
+    def test_removed_skeletons_hidden_by_default(self):
+        rows = self.db.get_annotations_filtered(book_id=2)
+        self.assertEqual(rows, [])
+        rows = self.db.get_annotations_filtered(book_id=2, include_removed=True)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["removed"])
+        self.assertIsNone(rows[0]["text"])
+
+    def test_style_filter_matches_the_whole_dict(self):
+        rows = self.db.get_annotations_filtered(
+            style={"kind": "color", "which": "yellow"}
+        )
+        self.assertEqual([r["annot_id"] for r in rows], ["a1"])
+        # A partial dict still requires every key it names.
+        rows = self.db.get_annotations_filtered(style={"kind": "color"})
+        self.assertEqual([r["annot_id"] for r in rows], ["a1", "a2"])
+
+    def test_limit_applies_after_filtering(self):
+        rows = self.db.get_annotations_filtered(kind="highlight", limit=1)
+        self.assertEqual([r["annot_id"] for r in rows], ["a1"])
+
+    def test_rows_carry_user_and_removed(self):
+        row = self.db.get_annotations_filtered(user="reader")[0]
+        self.assertEqual(row["user_type"], "web")
+        self.assertFalse(row["removed"])
+
+    def test_discovery_reads(self):
+        self.assertEqual(
+            self.db.get_annotation_users(), [("local", "viewer"), ("web", "reader")]
+        )
+        self.assertEqual(self.db.get_annotation_types(), ["bookmark", "highlight"])
+        self.assertEqual(
+            self.db.get_annotation_styles(),
+            [
+                {"kind": "color", "which": "green"},
+                {"kind": "color", "which": "yellow"},
+            ],
+        )
+
+
+class TestReadBackup(unittest.TestCase):
+    """read_backup: Calibre's stored sidecar OPF, readable (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        d1 = os.path.join(self.temp_dir, "Author A", "Thick Book (1)")
+        os.makedirs(d1)
+        with open(os.path.join(d1, "metadata.opf"), "wb") as f:
+            f.write(b"<?xml version='1.0'?><metadata/>")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_roundtrip_the_stored_bytes(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.read_backup(1), b"<?xml version='1.0'?><metadata/>")
+
+    def test_none_without_the_file_or_the_directory(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertIsNone(db.read_backup(2))  # no dir, no file
+            self.assertIsNone(db.read_backup(3))  # dir exists, no backup yet
+
+    def test_unknown_book_raises(self):
+        with CalibreDB(self.db_path) as db, self.assertRaises(ValueError):
+            db.read_backup(999)
+
+
+class TestSmallerReads(unittest.TestCase):
+    """size_stats, is_fts_enabled, the per-book link map, and the
+    last-read-position filters (1.25, Phase 16's XS tail)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        con = sqlite3.connect(self.db_path)
+        # The v27 fixture schema predates entity link columns; add them.
+        con.execute("ALTER TABLE authors ADD COLUMN link TEXT")
+        con.execute("ALTER TABLE publishers ADD COLUMN link TEXT")
+        # authors.link populated for the link-map read.
+        con.execute("UPDATE authors SET link = 'https://example.com/author-a'")
+        con.execute(
+            "INSERT INTO publishers (id, name, link) VALUES (1, 'Orbit', 'https://example.com/orbit')"
+        )
+        con.execute("INSERT INTO books_publishers_link (book, publisher) VALUES (1, 1)")
+        # link-carrying custom column: value-table link for book 1's value.
+        con.execute(
+            "INSERT INTO custom_columns (id,label,name,datatype,is_multiple) "
+            "VALUES (1,'src','Source','text',0)"
+        )
+        con.execute(
+            "CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT, link TEXT DEFAULT '')"
+        )
+        con.execute(
+            "INSERT INTO custom_column_1 (id, value, link) VALUES (1, 'GR', 'https://example.com/gr')"
+        )
+        con.execute(
+            "CREATE TABLE books_custom_column_1_link (id INTEGER PRIMARY KEY, book INTEGER, value INTEGER)"
+        )
+        con.execute(
+            "INSERT INTO books_custom_column_1_link (book, value) VALUES (1, 1)"
+        )
+        # Reading positions for the filter read.
+        con.execute(
+            "CREATE TABLE last_read_positions (id INTEGER PRIMARY KEY, book INTEGER,"
+            " format TEXT, user TEXT, device TEXT, cfi TEXT, epoch REAL, pos_frac REAL)"
+        )
+        con.executemany(
+            "INSERT INTO last_read_positions (book, format, user, device, cfi, epoch, pos_frac) VALUES (?,?,?,?,?,?,?)",
+            [
+                (1, "EPUB", "viewer", "kobo", "epub.cfi/4", 1700000000, 0.4),
+                (1, "EPUB", "viewer", "kindle", "epub.cfi/12", 1710000000, 0.8),
+                (1, "PDF", "viewer", "kobo", "pdf.cfi/2", 1690000000, 0.1),
+                (2, "EPUB", "other", "kobo", "epub.cfi/1", 1680000000, 0.05),
+            ],
+        )
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_size_stats_reports_main_and_sidecar(self):
+        with CalibreDB(self.db_path) as db:
+            stats = db.get_size_stats()
+            self.assertGreater(stats["main"], 0)
+            self.assertEqual(stats["fts"], 0)  # no sidecar in this fixture
+            self.assertEqual(stats["notes"], 0)
+
+    def test_is_fts_enabled_reads_the_preference(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertFalse(db.is_fts_enabled())
+        con = sqlite3.connect(self.db_path)
+        con.execute("INSERT INTO preferences (key, val) VALUES ('fts_enabled', 'true')")
+        con.commit()
+        con.close()
+        with CalibreDB(self.db_path) as db:
+            self.assertTrue(db.is_fts_enabled())
+
+    def test_link_map_covers_builtin_and_custom(self):
+        with CalibreDB(self.db_path) as db:
+            links = db.get_all_link_maps_for_book(1)
+            self.assertEqual(
+                links["authors"], {"Author A": "https://example.com/author-a"}
+            )
+            self.assertEqual(links["publisher"], {"Orbit": "https://example.com/orbit"})
+            self.assertEqual(links["#src"], {"GR": "https://example.com/gr"})
+            self.assertEqual(
+                links.get("tags"), None if not links.get("tags") else links["tags"]
+            )
+            # Book 3 shares Author A (and thus that link) but nothing else.
+            self.assertEqual(
+                db.get_all_link_maps_for_book(3),
+                {"authors": {"Author A": "https://example.com/author-a"}},
+            )
+
+    def test_position_filters(self):
+        with CalibreDB(self.db_path) as db:
+            rows = db.get_last_read_positions(1, fmt="epub")
+            self.assertEqual(len(rows), 2)  # format filter is case-insensitive
+            rows = db.get_last_read_positions(1, order_by="epoch", limit=1)
+            self.assertEqual(rows[0]["device"], "kindle")  # most recent first
+            rows = db.get_last_read_positions(1, order_by="pos_frac", limit=1)
+            self.assertEqual(rows[0]["pos_frac"], 0.8)
+            rows = db.get_last_read_positions(user="other")
+            self.assertEqual([r["book"] for r in rows], [2])
+
+
+class TestOrderedVlNames(unittest.TestCase):
+    """ordered_virtual_library_names: the promoted sidebar-order helper
+    (1.25; Carrel/Hermitage carried near-identical private copies)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            INSERT INTO preferences (key, val) VALUES
+                ('virtual_libraries', '{"Beta Wing": "title:Beta", "Alpha Wing": "title:Alpha", "Gamma Wing": "title:Gamma", "New Wing": "title:New"}'),
+                ('virt_libs_hidden', '["gamma wing"]'),
+                ('virt_libs_order', '{"Alpha Wing": 1, "Beta Wing": 0, "Gamma Wing": "not-a-number"}');
+            """
+        )
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_stored_order_first_then_alphabetical(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(
+                db.ordered_virtual_library_names(),
+                ["Beta Wing", "Alpha Wing", "New Wing"],
+            )
+
+    def test_hidden_dropped_unless_asked(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertIn(
+                "Gamma Wing", db.ordered_virtual_library_names(include_hidden=True)
+            )
+            self.assertNotIn("Gamma Wing", db.ordered_virtual_library_names())
+
+    def test_unparseable_position_ranks_with_unknowns(self):
+        with CalibreDB(self.db_path) as db:
+            names = db.ordered_virtual_library_names(include_hidden=True)
+            # Gamma's stored order is 'not-a-number': it ranks after the
+            # known positions, alphabetically among the unknowns.
+            self.assertEqual(
+                names,
+                ["Beta Wing", "Alpha Wing", "Gamma Wing", "New Wing"],
+            )
+
+
+class TestTagRollupIds(unittest.TestCase):
+    """tag_rollup_ids: the id-set sibling of helpers.tag_rollup (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            DELETE FROM books_tags_link;
+            DELETE FROM tags;
+            INSERT INTO tags (id, name) VALUES (1, 'Fic.Fantasy.Epic'), (2, 'Fic.SciFi'), (3, 'NonFic');
+            INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (2, 2), (3, 3);
+            """
+        )
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_implied_prefixes_accumulate_descendants(self):
+        with CalibreDB(self.db_path) as db:
+            rolled = db.tag_rollup_ids()
+            self.assertEqual(rolled["Fic"], frozenset({1, 2}))
+            self.assertEqual(rolled["Fic.Fantasy"], frozenset({1}))
+            self.assertEqual(rolled["Fic.Fantasy.Epic"], frozenset({1}))
+            self.assertEqual(rolled["NonFic"], frozenset({3}))
+            self.assertEqual(len(rolled["Fic"]), len(db.tag_rollup_ids()["Fic"]))
+
+    def test_counts_agree_with_the_counts_only_rollup(self):
+        from cquarry.helpers import tag_rollup
+
+        with CalibreDB(self.db_path) as db:
+            by_ids = {k: len(v) for k, v in db.tag_rollup_ids().items()}
+            counts = tag_rollup(dict(db.get_tag_counts()))
+            self.assertEqual(by_ids, counts)
+
+    def test_restriction_narrows_the_sets(self):
+        with CalibreDB(self.db_path) as db:
+            rolled = db.tag_rollup_ids(ids=[2])
+            self.assertEqual(
+                rolled, {"Fic": frozenset({2}), "Fic.SciFi": frozenset({2})}
+            )
+
+
+class TestGetCategories(unittest.TestCase):
+    """get_categories: the restricted tag browser (1.25, Phase 18)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            INSERT INTO books (id, title, sort, path, has_cover) VALUES
+                (1, 'Alpha', 'Alpha', 'a/1', 0), (2, 'Beta', 'Beta', 'a/2', 0),
+                (3, 'Gamma', 'Gamma', 'a/3', 0);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT DEFAULT '');
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            INSERT INTO authors (id, name, sort) VALUES (1, 'Ann Leckie', 'Leckie, Ann'), (2, 'Zed Writer', 'Writer, Zed');
+            INSERT INTO books_authors_link (book, author) VALUES (1, 1), (2, 1), (3, 2);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            INSERT INTO tags (id, name) VALUES (1, 'Fic.Fantasy'), (2, 'Fic.SciFi'), (3, 'NonFic');
+            INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (2, 2), (2, 3), (3, 2);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            INSERT INTO series (id, name, sort) VALUES (1, 'Radch', 'Radch');
+            INSERT INTO books_series_link (book, series) VALUES (1, 1), (2, 1);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            INSERT INTO publishers (id, name, sort) VALUES (1, 'Orbit', 'Orbit');
+            INSERT INTO books_publishers_link (book, publisher) VALUES (1, 1);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            INSERT INTO ratings (id, rating) VALUES (1, 8), (2, 4);
+            INSERT INTO books_ratings_link (book, rating) VALUES (1, 1), (3, 2);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            INSERT INTO languages (id, lang_code) VALUES (1, 'eng');
+            INSERT INTO books_languages_link (book, lang_code) VALUES (1, 1), (2, 1);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            INSERT INTO data (book, format, name, uncompressed_size) VALUES
+                (1, 'EPUB', 'alpha', 10), (2, 'EPUB', 'beta', 10), (3, 'PDF', 'gamma', 10);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT, is_multiple INTEGER, editable INTEGER DEFAULT 1, display TEXT DEFAULT '{}', normalized INTEGER DEFAULT 0);
+            INSERT INTO custom_columns (id, label, name, datatype, is_multiple, normalized) VALUES
+                (1, 'status', 'Status', 'enumeration', 0, 1),
+                (2, 'pages', 'Pages', 'int', 0, 0),
+                (3, 'comp', 'Composite', 'composite', 0, 0);
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT, link TEXT DEFAULT '');
+            CREATE TABLE books_custom_column_1_link (id INTEGER PRIMARY KEY, book INTEGER, value INTEGER);
+            INSERT INTO custom_column_1 (id, value) VALUES (1, 'Read'), (2, 'To Read');
+            INSERT INTO books_custom_column_1_link (book, value) VALUES (1, 1), (2, 1), (3, 2);
+            CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, book INTEGER, value INT, link TEXT DEFAULT '');
+            INSERT INTO custom_column_2 (book, value) VALUES (1, 321), (3, 55);
+            """
+        )
+        # The real views, verbatim shapes, so the agreement test has teeth.
+        con.executescript(
+            """
+            CREATE VIEW tag_browser_authors AS SELECT
+                id, name,
+                (SELECT COUNT(id) FROM books_authors_link WHERE author=authors.id) count,
+                (SELECT AVG(ratings.rating) FROM books_authors_link AS tl,
+                      books_ratings_link AS bl, ratings
+                 WHERE tl.author=authors.id AND bl.book=tl.book AND
+                 ratings.id = bl.rating AND ratings.rating <> 0) avg_rating,
+                sort AS sort FROM authors;
+            CREATE VIEW tag_browser_tags AS SELECT
+                id, name,
+                (SELECT COUNT(id) FROM books_tags_link WHERE tag=tags.id) count,
+                (SELECT AVG(ratings.rating) FROM books_tags_link AS tl,
+                      books_ratings_link AS bl, ratings
+                 WHERE tl.tag=tags.id AND bl.book=tl.book AND
+                 ratings.id = bl.rating AND ratings.rating <> 0) avg_rating,
+                name AS sort FROM tags;
+            CREATE VIEW tag_browser_ratings AS SELECT
+                id, rating,
+                (SELECT COUNT(id) FROM books_ratings_link WHERE rating=ratings.id) count,
+                (SELECT AVG(ratings.rating) FROM books_ratings_link AS tl,
+                      books_ratings_link AS bl, ratings
+                 WHERE tl.rating=ratings.id AND bl.book=tl.book AND
+                 ratings.id = bl.rating AND ratings.rating <> 0) avg_rating,
+                rating AS sort FROM ratings;
+            """
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_categories_and_counts_agree_with_the_views(self):
+        cats = self.db.get_categories()
+        views = self.db.get_tag_browser_counts()
+        # The views key the ratings category 'ratings' (the entity table's
+        # name); nodes there name the internal 0-10 text.
+        for key, view_key in (
+            ("authors", "authors"),
+            ("tags", "tags"),
+            ("rating", "ratings"),
+        ):
+            by_name = {n["name"]: n for n in cats[key]}
+            for row in views[view_key]:
+                name = row["name"]
+                if view_key == "ratings":
+                    # The views name the internal 0-10 text; nodes surface
+                    # stars, the documented naming difference.
+                    name = f"{int(name) / 2:g}"
+                self.assertIn(name, by_name, f"{key}:{name} missing from categories")
+                self.assertEqual(by_name[name]["count"], row["count"], f"{key}:{name}")
+                if view_key == "ratings":
+                    # Upstream's ratings view averages over an uncorrelated
+                    # cross join: every row carries the same value (verified
+                    # identical on the live library). Its avg column is an
+                    # artifact, so only the counts are held to agreement.
+                    continue
+                if row["avg_rating"] is None:
+                    self.assertIsNone(by_name[name]["avg_rating"])
+                else:
+                    self.assertAlmostEqual(
+                        by_name[name]["avg_rating"], row["avg_rating"] / 2.0
+                    )
+
+    def test_whole_library_nodes(self):
+        cats = self.db.get_categories()
+        self.assertEqual(
+            [n["name"] for n in cats["authors"]], ["Ann Leckie", "Zed Writer"]
+        )  # sort column order
+        tag_names = {n["name"]: n for n in cats["tags"]}
+        self.assertEqual(tag_names["Fic.SciFi"]["count"], 2)
+        self.assertEqual(tag_names["Fic.Fantasy"]["count"], 1)
+        # Descending by stars, Calibre's default rating-category order.
+        self.assertEqual([n["name"] for n in cats["rating"]], ["4", "2"])
+        self.assertEqual({n["name"] for n in cats["formats"]}, {"EPUB", "PDF"})
+        self.assertEqual(cats["#status"][0]["name"], "Read")
+        self.assertEqual(cats["#status"][1]["name"], "To Read")
+        self.assertEqual([n["name"] for n in cats["#pages"]], ["321", "55"])
+
+    def test_node_shape_and_expression_roundtrip(self):
+        cats = self.db.get_categories()
+        fantasy = next(n for n in cats["tags"] if n["name"] == "Fic.Fantasy")
+        self.assertEqual(fantasy["id_set"], {1})
+        self.assertEqual(fantasy["search_expression"], 'tags:="Fic.Fantasy"')
+        self.assertEqual(self.db.search(fantasy["search_expression"]), {1})
+        leckie = next(n for n in cats["authors"] if n["name"] == "Ann Leckie")
+        self.assertEqual(leckie["id_set"], {1, 2})
+        self.assertEqual(self.db.search(leckie["search_expression"]), {1, 2})
+        self.assertEqual(leckie["sort"], "Leckie, Ann")
+        # avg_rating in stars: author 1's books are rated 4 stars (book 1)
+        # and unrated (book 2), so the mean is 4.0.
+        self.assertEqual(leckie["avg_rating"], 4.0)
+        stars = cats["rating"][0]  # descending: 4 stars first
+        self.assertEqual(stars["name"], "4")
+        self.assertEqual(stars["id_set"], {1})
+        self.assertEqual(stars["search_expression"], "rating:=4")
+
+    def test_restriction_narrows_and_drops_unheld_values(self):
+        cats = self.db.get_categories(book_ids=[1])
+        self.assertEqual([n["name"] for n in cats["authors"]], ["Ann Leckie"])
+        self.assertEqual([n["name"] for n in cats["tags"]], ["Fic.Fantasy"])
+        self.assertEqual([n["name"] for n in cats["formats"]], ["EPUB"])
+        self.assertEqual([n["name"] for n in cats["rating"]], ["4"])
+
+    def test_empty_restriction_answers_empty_categories(self):
+        cats = self.db.get_categories(book_ids=[])
+        self.assertTrue(all(nodes == [] for nodes in cats.values()))
+
+    def test_composite_and_comments_columns_stay_out(self):
+        cats = self.db.get_categories()
+        self.assertNotIn("#comp", cats)
+        self.assertNotIn("#nothere", cats)
+
+    def test_custom_enum_ids_and_agreement_with_facet_counts(self):
+        cats = self.db.get_categories()
+        read_node = next(n for n in cats["#status"] if n["name"] == "Read")
+        self.assertEqual(read_node["id"], 1)  # the value-table id
+        self.assertEqual(read_node["id_set"], {1, 2})
+        # facet_counts over the same restriction agrees node-for-node.
+        facets = self.db.facet_counts_for_ids([1, 2], locations=["#status"])
+        facet_counts = dict(facets["#status"])
+        for node in cats["#status"]:
+            if node["id_set"] <= {1, 2}:
+                self.assertEqual(facet_counts.get(node["name"]), node["count"])
+
+    def test_search_expression_agrees_for_every_node(self):
+        # The construction guarantee, swept across every node of the
+        # whole-library browser: searching a node's expression returns
+        # exactly that node's id set.
+        for key, nodes in self.db.get_categories().items():
+            for node in nodes:
+                self.assertEqual(
+                    self.db.search(node["search_expression"]),
+                    set(node["id_set"]),
+                    f"{key}:{node['name']}",
+                )

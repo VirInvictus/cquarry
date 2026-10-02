@@ -135,12 +135,24 @@ def genre_distribution(db: CalibreDB) -> dict[str, float]:
 
     ordered: dict[str, float] = {}
 
-    def _emit(parent: str) -> None:
-        for key in sorted(children.get(parent, ()), key=lambda k: (-share[k], k)):
-            ordered[key] = share[key]
-            _emit(key)
-
-    _emit("")
+    # Iterative depth-first emission (parents before children, siblings
+    # share-descending then name): a hostile tag with thousands of
+    # dot-segments must not overflow the interpreter stack, which the
+    # recursive form would. Nodes record when POPPED, and kids push in
+    # reverse sorted order so the highest-priority sibling pops first,
+    # matching the recursive form's ordering exactly.
+    stack = [""]
+    while stack:
+        parent = stack.pop()
+        stack.extend(
+            sorted(
+                children.get(parent, ()),
+                key=lambda k: (-share[k], k),
+                reverse=True,
+            )
+        )
+        if parent:
+            ordered[parent] = share[parent]
     if untagged:
         ordered["untagged"] = untagged / total
     return ordered

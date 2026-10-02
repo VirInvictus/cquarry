@@ -1,0 +1,8 @@
+# Actions-only: the workflows pin third-party actions by SHA (see
+# publish.yml); this keeps the pins current.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

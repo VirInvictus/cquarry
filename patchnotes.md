@@ -1,31 +1,498 @@
-## v1.18.0+py313.1 (2026-09-15)
+## v1.25.0+py313.1 (2026-10-02)
 
-### The Python 3.13 compatibility branch (the Hermitage Flatpak ledger)
+### The compat branch syncs forward to 1.25.0 (the Hermitage Flatpak ledger)
 
-Hermitage's Flatpak manifest pins cquarry 132aa2c (= 1.18.0), which
-cannot build on the GNOME 50 runtime's Python 3.13: this line requires
-Python >=3.14 and used PEP 758 bare except-groups (`except A, B:`),
-a SyntaxError on 3.13. Recorded decision #81 chose an upstream compat
-branch over a runtime bump.
+Hermitage 1.8.6 adopts cquarry's four 1.23-1.25 helpers, and its Flatpak
+manifest needs a cquarry carrying them on the GNOME 50 runtime's Python
+3.13: main's 1.19-1.25 line stays Python 3.14+ by contract, so the
+compat branch merges main (90 commits, through v1.25.0) and re-applies
+the recorded decision #81 deltas.
 
-- Branch `compat-py313`, cut from 132aa2c (1.18.0), NOT from main:
-  main's 1.19-1.23 line stays Python 3.14+ by contract.
-- `requires-python >=3.13`.
-- The seven bare except-groups parenthesized (verified count at the
-  branch point: db.py x2, helpers.py x1, search.py x2, write.py x2;
-  the recorded count of eight was off by one). No other 3.14-only
-  syntax exists on this line.
-- Distinct version series `1.18.0+py313.x` (PEP 440 local version), so
-  a branch build can never be confused with a mainline release; the
-  version-sync guard's carriers all agree on it.
-- The publish workflow's tag trigger is defused (`v-disabled-*`): the
-  compat line never publishes to PyPI (PyPI stays 3.14-only;
-  Hermitage's Flatpak pins a commit, and a `+local` version is not
-  uploadable anyway).
+- `requires-python >=3.13`; the version series is `1.25.0+py313.1`
+  (PEP 440 local version, never publishable, never confused with a
+  mainline release); all eight carriers agree on it.
+- The PEP 758 bare except-groups main's ruff-format-on-3.14 produced
+  since the branch point are parenthesized again (five sites: db.py x3,
+  integrity.py x1, plus one type-first spelling the compile check on
+  3.13 caught); no other 3.14-only syntax exists on the line.
+- One genuine compatibility fix the merge surfaced: the
+  `copy_book_from_library` annotation on its `CalibreDB` parameter is
+  quoted, because 3.13 evaluates annotations eagerly and the
+  TYPE_CHECKING import is runtime-absent there (3.14's lazy annotations
+  masked it on main).
+- The publish trigger stays defused (`v-disabled-*`): the compat line
+  never publishes to PyPI; Hermitage's Flatpak pins a commit.
+- Suite on Python 3.13.15: 413 collected (CI's discover shape), green.
 
-Mainline consumers (CalibreQuarry, bindery-cli, Carrel-calibre-web)
-are unaffected: PyPI remains the 3.14+ line. Hermitage's manifest pin
-moves to this branch's HEAD under cross-repo grant #117.
+## v1.25.0 (2026-10-02)
+
+### The parity program's second release: Phases 16, 17, and 18 land
+
+The 2026-09-29 reopen's remaining three phases ship in one release: the
+read-surface wave with the four shared-helper promotions (Phase 16), the
+write-side extras (Phase 17), and the restricted tag browser (Phase 18). The
+Cross-Repo Rule consumers affected this round are Carrel-calibre-web and
+Hermitage; the four promotions carry the standing 2026-10-01 waiver (the
+helpers land here, the consumers' private copies retire in a future consumer
+wave), and both consumer roadmaps carry the adoption rows.
+
+- **Phase 16 reads.** `get_cover_bytes`/`get_cover_last_modified` (the
+  web-frontend pair: raw bytes for serving, an aware-UTC mtime for
+  conditional GET, riding `get_cover_path`'s resolution);
+  `virtual_libraries_for_books` and `user_categories_for_books` (the
+  inverse maps: every book -> the wings / `@Name` members it holds, resolved
+  through the same engine paths as the search locations so the answers
+  agree with `vl:`/`@Name:` queries; wings that fail to evaluate are
+  skipped with a warning where upstream splices an error string into the
+  name tuples); `format_hash`/`format_metadata` (the SHA-256 file-changed
+  detector the FTS sidecar's hash columns compare against, plus the
+  on-disk `{path, size, mtime}` facts); `books_by_year`/`books_by_month`
+  (upstream's date bucketing generalized to any date field, builtin or
+  date-typed custom column, restriction-shaped; the 0101/0100 sentinels
+  bucket nowhere, exactly as the search engine treats them);
+  `get_next_series_num_for` (the preference-aware next number, builtin or
+  series-typed custom column, with `current_indices=True`; one boundary
+  named rather than faked: upstream reads `series_index_auto_increment`
+  from its tweaks files, which metadata.db never carries, so the setting
+  comes from the library's preferences table with upstream's shipped
+  default "next"); `get_annotations_filtered` plus
+  `get_annotation_users`/`get_annotation_types`/`get_annotation_styles`
+  (the annotation conveniences: the decoded view plus user/kind/style
+  filters, a limit, and Calibre's removed-skeleton tombstones hidden by
+  default -- upstream's `ignore_removed` inverted to the renderer-facing
+  default; styles cover only what the library holds, since the viewer's
+  builtin catalog is GUI constants, not data); `read_backup` (Calibre's
+  stored sidecar OPF as bytes, for diffing its last write against the
+  rows; reads what Calibre wrote, the OPF-generation decline untouched);
+  and the XS tail: `get_size_stats` (notes always 0 per the recorded
+  decline), `is_fts_enabled` (the preference; the in-process pool state
+  is not database-visible), `get_all_link_maps_for_book` (the four
+  builtin fields plus link-carrying custom columns), and
+  `get_last_read_positions` fmt/user/order_by/limit filters. The tail
+  rode one real fix: `load_custom_column` built every normalized column's
+  link map but stashed it series-only, so `custom_column_links` answered
+  empty for text/enumeration/rating despite documenting all four.
+- **Phase 16 promotions** (the 2026-10-01 waiver applies to all four):
+  `ordered_virtual_library_names` (Calibre's sidebar order: stored tab
+  position first, unknown names alphabetical, unparseable positions
+  ranking with the unknowns), `helpers.unpipe_author` (the
+  pipe-flattening display helper, render-identical with the consumer
+  copies), `CalibreDB.tag_rollup_ids` (the id-set sibling of the
+  counts-only rollup, the engine's anchored-subtree rule), and
+  `helpers.IDENTIFIER_LINKS` + `identifier_link()` (Hermitage's canonical
+  identifier-to-link table; ISBN resolves to openlibrary.org per
+  Brandon's 2026-09-29 call, Carrel's WorldCat mapping switches in its
+  consumer wave).
+- **Phase 17 writes.** `set_author_sort_name` (the row-level author sort
+  writer; book-level `author_sort` recomputed " & "-joined in link
+  order) and `set_link_map` (the generic per-value link writer over
+  authors/series/publishers/tags plus normalized custom columns by
+  `#label`; one named deviation: unknown values raise where upstream
+  skips silently, because a link aimed at a misspelling should fail
+  loudly); `set_pages` (the page-count row writer clearing `needs_scan`:
+  a real value is what the pending rescan waited for); the data/
+  directory verbs (`list_data_files`/`get_data_file` reads,
+  `add_data_file`/`rename_data_file`/`remove_data_files` writes -- pure
+  filesystem like the trash verbs, one shared traversal guard, upstream's
+  merge-conflict auto-rename layout); `copy_book_from_library` (the
+  blessed cross-library copy composed from sanctioned reads and writes,
+  one `batch()` on the destination, format files through `add_book`'s
+  seed path, per-author sorts then the book-level `author_sort` verbatim;
+  annotations, data/ extras, custom columns, and the uuid each stay out
+  for a recorded reason, and duplicate policy stays with the frontend);
+  and the blob passthrough writers `set_plugin_data`/
+  `set_conversion_options`/`set_book_storage` (opaque payloads, none of
+  them OPF-queued, matching upstream; upstream's in-process recipe
+  pickling is deliberately the caller's boundary). The copy primitive
+  carries conversion options; plugin data it does not, exactly like
+  upstream's copy.
+- **Phase 18: `get_categories(book_ids=None)`**, the restricted tag
+  browser. Nodes over the builtin browse fields plus storage-backed
+  custom columns carry `{id, name, sort, count, avg_rating, id_set,
+  search_expression}`, and searching a node's expression returns that
+  node's id set (swept per-node in the tests). Restriction narrows to
+  values the restricted books actually hold; counts and entity-view
+  average ratings agree with `get_tag_browser_counts` where they
+  overlap. Named in the ship notes: the views' ratings `avg_rating`
+  column is an upstream cross-join artifact (every row identical,
+  verified against the live library), rating nodes surface stars per the
+  cquarry convention rather than the views' internal 0-10 text, and
+  composite columns stay gated by the section 7 GPM boundary.
+  User categories, `search`, and `news` are upstream GUI synthesizations
+  outside the portable subset. Verified against the live library: 12
+  categories over ~8k books with per-node roundtrips clean.
+- Housekeeping: the pre-tag slop pass returned zero kill findings and
+  three fix-grade notes, all applied (a repeated guarantee clause,
+  a recurring triple negation, and a stale `__version__` example).
+- Suite: 556 -> 653 tests (pytest and CI's unittest discover agree).
+
+## v1.24.0 (2026-10-02)
+
+### The parity program's first release: Phases 14 and 15 land
+
+The 2026-09-29 reopen (roadmap.md) committed five parity phases; this release ships the first two, the completion wave and the maintenance ring, plus the Dependabot bookkeeping. The Cross-Repo Rule consumers affected this round are CalibreQuarry (adopts `get_dirtied_formats()` in its Phase 20 lane) and Carrel-calibre-web (the residue trio; adoption waived this round per the decision record).
+
+- **Restore-from-trash verbs** (`cquarry.write`): the trash stops being a dead end. `copy_format_from_trash`/`copy_book_from_trash` rescue entries out of `.caltrash` (pure filesystem), `move_format_from_trash` undeletes one format into its live book, `delete_trash_entry` removes one entry, and `move_book_from_trash` rebuilds the row from the entry's sidecar `metadata.opf` (Calibre's own backup, read with stdlib ElementTree and never generated, keeping the OPF-generation decline intact): core metadata restored, every extension-bearing file re-registered in `data`, the cover flag from the file, OPF resync and FTS extraction queued, and the directory moved back only after the rows commit. Custom columns, annotations, and plugin data are not restored (the OPF carries none of them).
+- **`get_dirtied_formats()`** (read side): the FTS sidecar's extraction queue as sorted `(book_id, format)` pairs, the formats sibling of `get_dirtied_books()`. Retires CalibreQuarry's raw sidecar read when its lane adopts it.
+- **`set_custom_column_metadata`** (write side): name/editable/display edits on an existing column, upstream `backend.py:1407`'s shape. The headline use: `display={"enum_values": [...]}` populates an enumeration without Calibre open. Honest no-op on equal values; a change sets `update_all_last_mod_dates_on_start` like upstream's wrapper; datatype and label changes are refused by omission (type is baked into the storage layout; the label is the `#label` search token).
+- **The Carrel residue trio** (read side): `get_book_by_uuid` (the Calibre-Companion lookup; case-insensitive, None on miss), `get_entity_book_ids(kind, name)` (the id-set half of `get_entities`; tags resolve the engine's anchored-subtree rule so a browse node's set covers its children), and `get_all_formats()` (a cached `{book_id: [FMT]}` map).
+- **`facet_counts` / `facet_counts_for_ids`** (read side): per-value counts over a restricted result set (the builtin browse fields plus custom columns by `#label`; ratings surfaced as stars exactly as `field()` yields them). The `_for_ids` half is the restriction plumbing Phase 18's restricted tag browser reuses.
+- **`WritableCalibreDB.maintain()`**: vacuum, analyze, and integrity_check over the library DB and the attached FTS sidecar in one standalone pass (upstream `backend.py` `vacuum` extended with the two statements calibredb users run by hand; the notes DB stays out of scope). Refuses `batch()` and mid-transaction states; reports the check rows (`["ok"]` on a healthy file).
+- **`check_library_disk()`** (`cquarry.integrity`): the extra-side disk checks of upstream's `check_library` in one tree walk: extra titles/authors, malformed paths and formats, extra formats, unknown files, extra covers, failed folders. The missing side is deliberately not re-answered (`find_missing_format_files`/`find_missing_cover_files` own it). The format-vs-unknown-file classifier is structural (a token extension minus the image/OPF/junk set), not upstream's curated `BOOK_EXTENSIONS`; POSIX case sensitivity assumed.
+- **FTS queue verbs** (`cquarry.write`): `fts_reindex_book`, `fts_reindex_all`, and `fts_queue_clear` are the queue half of upstream's `fts_unindex` family as pure sidecar SQL. One boundary named rather than faked: upstream's index-row deletion runs `books_text` delete triggers that tokenize through Calibre's custom FTS5 tokenizer, which does not exist outside Calibre, so removing indexed text stays Calibre's job (an O-lane `calibredb fts_unindex` wrap if a consumer asks).
+- **Typed preference writes** (`cquarry.write`): `set_preference(key, value)` over a five-key whitelist (`saved_searches`, `virtual_libraries`, `user_categories`, `grouped_search_terms`, `fts_enabled`), each payload validated by key before anything lands and stored as one JSON row in Calibre's shape; `saved_search_add`/`saved_search_delete`/`saved_search_rename` are the calibredb `saved_searches` parity item (rename resolves case-insensitively to the stored spelling and refuses to overwrite an existing name where upstream silently overwrites).
+- Housekeeping: the Dependabot gate ticked (both major-bump PRs merged 2026-09-30), the import skills swept per the skill-sync rule, and an API.md table row the `maintain()` insert had split was repaired in the same window.
+- Suite: 500 -> 556 tests (pytest; 550 collected by CI's unittest discover).
+
+## v1.23.2 (2026-09-16)
+
+### The version guard runs again; every carrier agrees
+The v1.23.1 hotfix shipped with four stale version carriers (`src/cquarry/__init__.py`, `src/cquarry/config.py`, `spec.md`, `API.md` all still reading 1.23.0), so the published wheel reported `cquarry.__version__ == "1.23.0"` and every consumer reading the constant saw the wrong release. The guard that should have caught it, `tests/test_version_sync.py`, was the one file in the suite written as plain pytest-style functions -- and CI runs `unittest discover`, which silently collected zero tests from it. The file is now a `unittest.TestCase` (469 -> 471 collected tests), every carrier agrees at 1.23.2, and the discover run that gates each push executes the guard.
+
+Found by the post-blitz verification day's deep pass on the foundation repos.
+
+## v1.23.1 (2026-09-16)
+
+### Series clears no longer crash on real libraries
+
+- **Bugfix: `set_series(book_id, None)` and `remove_entity_everywhere("series", ...)` wrote
+  `series_index = NULL`, which the real Calibre schema rejects.** `books.series_index` is
+  declared `REAL NOT NULL DEFAULT 1.0` in every live library, so both verbs raised
+  `IntegrityError` inside the caller's batch and rolled the whole pass back (field find on
+  book 9136 during the 2026-09-16 math/classics phase 3; the test fixtures' nullable column
+  hid it until now).
+- **Clear semantics are reset-to-1.0, matching Calibre's own no-series state.** Both verbs
+  now reset `series_index` to 1.0 when the link goes: the DDL default, what upstream's own
+  series-removal path writes, and what series-less books hold in practice (5438 of the 5442
+  series-less books in the reference library; zero NULLs anywhere).
+- **Pinned against the real DDL.** New `TestSeriesClearAgainstNotNullSchema` fixture carries
+  the NOT NULL column; the two older tests asserting the NULL clear were corrected to 1.0.
+
+## v1.23.0 (2026-09-15)
+
+### The final blitz: the integrity family closes, staleness gets cheap, the snapshot turns consistent
+
+THE FINAL AUDIT's feature spine (L4 ranks 1-4) plus the approved bare
+setter, the LOW bug tail, the docs-truth debt, and the storefront
+polish, in one release.
+
+- **`integrity.find_missing_format_files(db)`**: catalogued format rows
+  whose file is absent on disk; the integrity family's last disk hole.
+  Rides `get_format_path(verify=True)`'s check exactly the way the cover
+  checks ride `get_cover_path`; empty `books.path` books are skipped
+  (nowhere to look, same rule as `find_missing_cover_files`).
+- **`CalibreDB.external_changes_detected()`**: `PRAGMA data_version` as
+  the cheap staleness token long-lived holders (Hermitage, Carrel) have
+  had recorded twice; poll it and call `refresh()` only on True. The
+  answer stays True until `refresh()` re-primes the baseline, so a poll
+  loop cannot miss a change; on a locked-database snapshot connection it
+  can never fire, which is that boundary's reminder to reopen.
+- **Consistent snapshots.** The locked-database lock-escape now copies
+  through sqlite3's backup API: one consistent page image with the WAL
+  folded in, replacing three racing `copy2` calls (the same torn-snapshot
+  shape Wave 14 flagged in CalibreQuarry's own backup). Python's backup
+  retries a busy source forever, so the copy runs on a leash:
+  `CalibreDB.SNAPSHOT_LEASH` (10 s) bounds the wait, and a writer still
+  holding the lock past it trips a documented fallback to the old raw
+  file copy rather than hanging the reader. **`backup_to(dest)`** gives
+  consumers the same consistency for their own backups; CalibreQuarry's
+  `copy2` site can retire onto it at that repo's release.
+- **Annotations.** The `annotations:` search location bulk-loads its
+  text map in one query (the per-book probe was an N+1), and
+  **`get_annotations_decoded()`** projects Calibre's raw rows onto
+  `{book, format, kind, annot_id, timestamp, text, notes, title}` so a
+  renderer never re-learns `annot_data`'s shape (wiring it into
+  Hermitage's Codex is that repo's recorded lane).
+- **`write.set_series_index(book_id, index)`** (the approved write API):
+  the bare index correction completing the 1.19 passthrough family.
+  Updates `books.series_index` in place, the link row untouched (no
+  delete-and-reinsert like `set_series`); the book must already belong
+  to a series, `None` raises, and an equal value is an honest no-op.
+- **The LOW bug tail** (L2, all eight): `pubdate:Ndaysago` with a
+  gigantic count converts to `ParseException` instead of a raw
+  OverflowError; `set_format` stores integer sizes like `add_format`;
+  the boolean vocabulary is one shared constant pair (`BOOL_TRUE_WORDS`
+  / `BOOL_FALSE_WORDS`) so search and write agree on `_checked`,
+  `_blank`, `_empty` and friends; `custom_columns.id` is int()-cast
+  before every f-string table name on both sides (the Wave-13 defense's
+  siblings); `_custom_column_meta` raises the house ValueError on
+  schemas predating editable/display; `genre_distribution`'s node
+  emission is iterative (a hostile deep tag no longer risks
+  RecursionError, output order identical); `uuid4` registers without
+  deterministic=True (SQLite may reuse a deterministic result within a
+  statement); `empty_trash`/`expire_trash` no longer materialize a
+  `.caltrash` tree in libraries that never trashed; `list_books`' dead
+  end-recompute and `add_book`'s always-true batch guard are gone;
+  composite custom columns read as a documented empty instead of a
+  stderr warning.
+- **Docs truth** (the release-sync debt from the 2026-09-13 blitz):
+  API.md's tristate note now allocates correctly (numeric/rating/date
+  locations take exactly true/false; boolean locations take the tristate
+  set; re-dated 1.18), the false "identifier keys sweep as text" claim
+  is gone, the refresh() locked-snapshot boundary clause reached
+  README/spec/API, the README glance table gained the metadata-quality
+  trio, spec section 4 lists formats+languages in the bare-term sweep,
+  and `find_db`'s config auto-persist is documented. Prose batch:
+  README's write mega-bullet split per verb family, the bindery-cli
+  rename and link, the spec identifier-cleaning garble and dossier seam
+  fixed, the three live em-dashes recast, the roadmap opener rewritten,
+  and the comment contracts (the module-docstring "EVERY mutation"
+  overclaim and the last retired ATTACH claim) corrected.
+- **Storefront**: pyproject carries the canonical description (it
+  discloses the opt-in write path; the library-graduation check-in
+  closes as acknowledged), Bug Tracker/Changelog/Documentation project
+  URLs, an absolute logo URL (PyPI rendered a broken image), a README
+  badge row, pytest `pythonpath = ["src"]`, and the version-sync guard
+  now covers the patchnotes head and `__init__.py` (eight of eight
+  carriers guarded).
+- Housekeeping: .gitignore trimmed to what a stdlib library produces;
+  REPORT-12-Sept.md retired per the :988 precedent (the declined-lines
+  payload extracted into the roadmap, archive copy in audit-final); the
+  repo-local `testing_facility/` (28 MB of byte-identical bootstrap
+  duplicates) reclaimed; ci.yml SHA-pinned like publish.yml; the
+  no-force-push/no-delete ruleset applied on main; wiki and Projects
+  disabled (repo settings, outside the file tree).
+- Both import skills swept per the skill-sync rule: phase-3-import
+  gains the set_series_index line; the spine touches nothing the
+  phase-1 import loop teaches.
+- Suite: 439 -> 464 tests.
+
+## v1.22.0 (2026-09-15)
+
+### The precedent-tags read comes home, and the publish path hardens
+
+The CalibreQuarry blitz lane's two cquarry touches under cross-repo
+grant #117 (decision 2026-09-15), shipped as one additive release.
+
+- **`CalibreDB.precedent_tags(authors, limit=12)`**: the tag-by-precedent
+  suggestion read (distinct tags across the named authors' books, NOCASE
+  author match, capped and alphabetized for stability). Promoted from
+  CalibreQuarry's run.py phase-3 prompt, whose four-table JOIN was the
+  only unrecorded raw-SQL read in the frontend tier (THE FINAL AUDIT
+  L2.6). Two deliberate deltas from the promoted form: results are
+  ORDER BY name (the original relied on SQLite's arbitrary DISTINCT
+  order) and the limit is a parameter (was a hardcoded 12). Documented
+  in API.md; five fixtures in test_db.py.
+- **The publish path hardened** (the audit's publish-workflow box):
+  pypa/gh-action-pypi-publish is SHA-pinned (release/v1 was a moving
+  branch holding id-token: write), the workflow carries a top-level
+  contents: read permissions block with the publish job keeping only
+  id-token: write and a scoped contents: write release job, the
+  concurrency group refuses cancellation mid-publish, the test job runs
+  the CI ruff gates first, the build gets a strict twine check and a
+  wheel smoke-install, and a create-release job mints the GitHub
+  Release from the tag's verbatim message. actions-only dependabot
+  keeps the pins current. The no-force-push ruleset on main remains
+  recorded for cquarry's own lane.
+
+  Erratum (2026-09-15, post-release): this entry as tagged also said
+  the pypi environment's deployment policies now admit only the
+  v*.*.* pattern. That part was reverted the same day: the REST API
+  only creates branch-type policies, and a tag deployment is rejected
+  outright whenever custom branch policies exist, so the policy broke
+  this very publish (the v1.22.0 tag shipped only after the policy was
+  reverted and the failed job re-ran). Tag policies are UI-only today;
+  the workflow's v*.*.* tag trigger remains the effective gate, and a
+  UI-applied tag policy is a recorded reopen item.
+- Suite: 434 → 438 tests.
+
+## v1.21.0 (2026-09-13)
+
+### The two blitz candidates with live demand
+
+The six-lens audit's riders decision, executed: 1.20.1 shipped green and
+pushed, so the two recorded candidates that have a real consumer rode as
+this minor release. Additive API only; no floor bumps owed anywhere.
+
+- **`list_books(sort="ids", ids=...)`: the caller's-order mode.** The
+  listing's contract said its order comes from `sort`, never from the
+  id order; the special key `ids` (requires `ids`, stands alone) now
+  replaces the sort with the caller's id sequence verbatim. A duplicated
+  id keeps its first slot, ids absent from the library are skipped,
+  `descending` reverses the sequence, and `offset`/`limit` slice after
+  the ordering. This is the mode Carrel-calibre-web's `preserve_order`
+  re-sort shim (added page-by-page after `list_books` came back
+  title-sorted) has been waiting for; the fork can retire the shim at
+  its own release.
+- **The metadata-quality trio in `integrity.py`.** The routed bindery
+  OPF-085 item (51 warnings counted in the audit), promoted to the
+  shared predicate family so every consumer answers identically:
+  `find_invalid_uuids(db)` (books whose `uuid` is empty or does not
+  parse as a UUID; the pre-uuid-column degrade spelling `""` reports
+  honestly), `find_sentinel_pubdates(db)` (the `0101-01-01` undefined
+  date sentinel and its `0100-01-01` ancestor, the same pair the
+  search engine already treats as dateless), and
+  `find_bad_language_codes(db)` (a linked language code that is not
+  exactly three lowercase ASCII letters: bare names like `English`,
+  two-letter codes, empty strings; shape check only, so a valid but
+  rare code never false-positives). CalibreQuarry renders the audit
+  rows in its own lane.
+
+Both import skills swept; neither rider touches the import loops, so no
+skill edits. Consumer floors stay where they are (adoption notes in the
+roadmap's cascade block).
+
+## v1.20.1 (2026-09-13)
+
+### The six-lens audit's write-path findings
+
+A bug-fix release from the 2026-09-12 six-lens audit (Wave 13): five
+write-path defects plus a LOW hardening batch, no API changes. Two of
+the fixes restore contract claims the docs already made; the release
+closes the gap instead of rewording the promise.
+
+- **`save_original_format` attaches the FTS sidecar before its batch
+  (HIGH).** The save opened its transaction without
+  `_ensure_fts_attached()`, so the nested `add_format`/`set_format`
+  attached inside it; on SQLite builds that forbid in-transaction ATTACH
+  (pre-3.21.0) the caught failure cached `_fts_state=False` for the
+  connection lifetime, silently killing `dirtied_formats` queueing and
+  `needs_scan` for every later format verb. The one-line fix mirrors
+  `restore_original_format`. On modern SQLite the poison cannot fire
+  (in-transaction ATTACH has been legal since 3.21.0, 2017), so this is
+  attach-first discipline plus armor for old builds, and the docstring
+  no longer claims modern SQLite forbids it.
+- **A failed batch flush can no longer strand committed books'
+  directories.** `batch()`'s finally ran the three post-commit flushes
+  BEFORE resetting `_batch_dirs`/`_batch_poisoned`; a flush OSError left
+  the caller with a COMMITTED transaction plus registered directories
+  that a LATER failed exit would rmtree (rows pointing at deleted
+  directories). The state now resets in a nested finally before the
+  error propagates, and `_remove_book_dir` is idempotent (a retried
+  flush skips directories that are already gone instead of raising on
+  the missing source). A failed flush's committed removals stay queued
+  and a later flush completes them.
+- **`remove_book` clears the FTS queue for the book's formats.** It
+  cleaned `metadata_dirtied` and `annotations_dirtied` but never the
+  sidecar's `dirtied_formats`, while its docstring and API.md claimed
+  the queues are cleaned; Calibre would have re-extracted vanished
+  files. The sidecar attaches before the transaction, the book's
+  formats are captured before the cascade, and each queue entry is
+  cleared; the docstring and API.md now name the FTS queue explicitly.
+- **`add_book` seeds the FTS/pages queue for its formats.** Seeded
+  formats were inserted directly, bypassing `add_format`, so new books
+  never entered `dirtied_formats` or got `needs_scan`; upstream's own
+  add path queues every `data` INSERT. `add_book` now attaches before
+  its batch and queues each seeded format; the queue writes join the
+  batch and roll back with it.
+- **A failed commit no longer diverges rows from files.** Bare
+  (non-batched) `update_title`/`set_authors` applied the filesystem
+  re-lay BEFORE the commit, so a commit failure left rolled-back rows
+  under moved/renamed files (exactly what `_relayout_book_path`'s
+  docstring promised could not happen). The re-lay now queues in every
+  path and lands after the rows commit: the outermost batch commit
+  inside a batch, the setter's own commit otherwise, and a failed
+  commit drops the queued op instead of leaking it into a later batch.
+- **LOW hardening.** `expire_trash` counts only actual removals (a
+  failed rmtree used to be counted as removed); `refresh()`'s docstring
+  no longer overpromises on the locked-DB snapshot path (the snapshot
+  is not retaken; reopen the CalibreDB for current data); `load_config`
+  catches only `OSError`/`JSONDecodeError` and notes a broken config on
+  stderr instead of failing silently into "no config";
+  `get_tag_browser_counts` narrows its label-map suppress to
+  `sqlite3.Error` and double-quotes the view identifiers it reads
+  (defense-in-depth: the names come from sqlite_master).
+
+Both import skills swept: they teach "since 1.18 format writes queue
+FTS", which these fixes restore rather than change; no skill edits
+needed. Patch release: consumer floors stay where they are.
+
+## v1.20.0 (2026-09-12)
+
+### The last two promotion candidates, figured out
+
+Brandon un-deferred C.5 and C.7 ("get that done as 1.20.0, along with
+anything upstream"). The upstream delta since the 09-10/11 research
+turned out to be two trivial commits (a notes-import birthtime fix --
+notes stay declined -- and a typing nit); no schema, search, or write
+surface changed, and the real-library schema version still matches the
+add_book census.
+
+- **Trash lifecycle: `list_trash()` / `empty_trash()` /
+  `expire_trash(older_than=)`.** The management half of
+  `remove_book(delete_files="trash")`, over upstream's
+  `.caltrash/b`/`.caltrash/f` layout. `empty_trash` is upstream's
+  `clear_trash_dir` (remove whole, recreate empty); `expire_trash` is
+  `expire_old_trash`'s mtime rule with upstream's 14-day default
+  (`timedelta` accepted; `<= 0` expires everything); `list_trash` is the
+  added reviewable inventory (`{category, book_id, mtime, files}`) so the
+  destructive half can be looked at before it runs. Pure filesystem
+  verbs: trashed rows are already gone, so nothing touches the database.
+- **`create_custom_column(label, name, datatype, *, is_multiple,
+  editable, display)` / `delete_custom_column(label)`.** The library
+  bootstrap. Creation mirrors upstream's DDL statement-for-statement:
+  the `custom_columns` row, value/link storage per the normalized vs
+  direct split, the fkc guard triggers, the series `extra` index column,
+  and the `tag_browser` views (including the `filtered_` one -- views are
+  lazy, so its Calibre-only function is safe to reference). Calibre's
+  `update_all_last_mod_dates_on_start` pref is set like upstream so the
+  next start refreshes every book. Two deliberate deviations, documented:
+  column numbers allocate past the highest row id AND storage-table
+  number (a bare `lastrowid` can collide with tables still awaiting
+  Calibre's purge of a flag-deleted column), and the link-table update
+  guard fires on `UPDATE OF value` where upstream's `OF author` names a
+  column the table does not have (its guard was dead code).
+  Deletion drops NOTHING, exactly like upstream: it sets
+  `mark_for_delete=1` and the physical purge is Calibre's own
+  next-startup job; the flagged column stays listed and functional until
+  then. Created columns work end to end immediately -- `set_custom_column`
+  writes through them, and a fresh reader loads and searches them,
+  including the series `#label_index` location.
+
+Riders: none this wave -- no consumer consumes these verbs yet
+(CalibreQuarry's management surfaces and the acquisition importer come
+later), so the ecosystem floors stay at >=1.19.0 per the four-program
+rule's no-purpose-no-bump clause.
+
+Suite: 412 passed (was 400).
+
+## v1.19.0 (2026-09-12)
+
+### The approved promotion candidates: the four loop-closers
+
+Brandon approved four of the six researched write-API candidates from
+REPORT-12-Sept.md (Phase 13 section C); the other two stay deferred with
+their consumers. Every verb ships with tests against the trigger-hazard
+schema, keeps its file work behind the commit boundary, and rides the
+1.18 machinery (path re-laying, FTS dirtying, the batch queues).
+
+- **`rename_entity(kind, old, new)` / `remove_entity_everywhere(kind,
+  name)`.** The fix-the-misspelled-name verb for authors, series,
+  publishers, and tags. A rename whose target already exists merges:
+  colliding links drop against the survivor's UNIQUE(book, fk) and the
+  old row is deleted. Author renames recompute `books.author_sort` and
+  re-lay every affected book's on-disk path; series merges renumber
+  incoming books to max+1 over the survivor's other books; series removal
+  nulls `series_index` like `set_series(None)`. Both return the affected
+  book count and queue every affected book for OPF resync.
+- **`set_cover(book_id, data)` / `remove_cover(book_id)`.** The
+  audit-to-fix loop closes: `find_low_res_covers` names the bad cover,
+  `set_cover` replaces it. JPEG/PNG sniff-or-raise (the `add_book` rule;
+  no stdlib transcoding), written to `cover.jpg`/`cover.png` with any
+  stale cover under the other extension removed; `remove_cover` sweeps
+  both and clears `has_cover`.
+- **`set_author_sort` / `set_title_sort` / `set_timestamp`.** Verbatim
+  passthrough corrections for mangled sorts (`set_timestamp` normalizes
+  like `set_pubdate`). A later `set_authors`/`update_title` recomputes
+  over an override by design; that interplay is documented on both sides.
+- **`save_original_format(book_id, fmt)` /
+  `restore_original_format(book_id, "ORIGINAL_<FMT>")`.** The undo-able
+  repair primitive bindery's lane asked for. The copy is a real
+  `ORIGINAL_<FMT>` data row plus a `<stem>.original_<ext>` file --
+  upstream's own convention, so Calibre sees it natively. Restore swaps
+  the bytes back, keeps the target's filename stem, removes the original
+  row/file/queue entry, and always queues the restored format for FTS
+  re-extraction (the bytes changed even when the row was already
+  correct).
+
+Deferred: the trash lifecycle (nothing uses
+`remove_book(delete_files="trash")` in anger yet) and
+`create_custom_column`/`delete_custom_column` (the acquisition importer
+is a future project; schema DDL waits for a real consumer).
+
+Suite: 400 passed (was 381). Consumers: CalibreQuarry and bindery-cli
+bump their floors to >=1.19.0 (the consuming riders); Hermitage consumes
+none of the four and stays at the 1.18.0 pin.
 
 ## v1.18.0 (2026-09-12)
 

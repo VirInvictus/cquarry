@@ -188,7 +188,9 @@ def calibre_rating_to_stars(rating: int | None) -> float | None:
     return rating / CALIBRE_RATING_SCALE
 
 
-# Canonical name for the rating conversion; consumers should prefer this.
+# Canonical name for the rating conversion: renderers (Hermitage's Insights)
+# import this spelling. calibre_rating_to_stars stays as the historical and
+# in-repo alias (db.py/analytics.py were seeded with it); the two are identical.
 normalize_rating = calibre_rating_to_stars
 
 
@@ -342,6 +344,60 @@ def author_sort_key(author_sort: str | None, primary_only: bool = False) -> str:
     if primary_only:
         key = key.split("&")[0].strip()
     return key
+
+
+def unpipe_author(name: str | None) -> str:
+    """Resolve Calibre's legacy pipe separator in one author display name.
+
+    Old Calibre stored multi-author strings pipe-joined and migrations left
+    pipes inside single author rows; every consumer display site needs the
+    same ``"|" -> ","`` flattening (the promoted helper, 1.25: the
+    ``replace("|", ",")`` copies across Carrel and Hermitage). Render-identical
+    with those copies -- a bare comma, no space -- so switching call sites is
+    not a visual change. None-safe: "" in, "" out.
+    """
+    if not name:
+        return ""
+    return str(name).replace("|", ",")
+
+
+# The identifier-to-link table (1.25, Brandon's 2026-09-29 canonical call):
+# display label first, URL template second. ISBN resolves to Open Library --
+# the canonical choice -- not Carrel's old WorldCat mapping. The formatter
+# receives the raw value with no escaping (every site linked uses opaque ids
+# or already-encoded paths). Types Calibre's own set_identifier cleaning
+# produces are lowercase; lookups normalize defensively anyway.
+IDENTIFIER_LINKS: dict[str, tuple[str, str]] = {
+    "isbn": ("Open Library", "https://openlibrary.org/isbn/{}"),
+    "goodreads": ("Goodreads", "https://www.goodreads.com/book/show/{}"),
+    "google": ("Google Books", "https://books.google.com/books?id={}"),
+    "amazon": ("Amazon", "https://www.amazon.com/dp/{}"),
+    "asin": ("Amazon", "https://www.amazon.com/dp/{}"),
+    "mobi-asin": ("Amazon", "https://www.amazon.com/dp/{}"),
+    "barnesnoble": ("Barnes & Noble", "https://www.barnesandnoble.com/s/{}"),
+    "storygraph": ("StoryGraph", "https://app.thestorygraph.com/books/{}"),
+    "hardcover": ("Hardcover", "https://hardcover.app/books/{}"),
+    "fictiondb": ("FictionDB", "https://www.fictiondb.com/title/{}"),
+    "doi": ("DOI", "https://doi.org/{}"),
+    "url": ("Link", "{}"),
+    "uri": ("Link", "{}"),
+}
+
+
+def identifier_link(id_type: str, value: str | None) -> tuple[str, str] | None:
+    """``(label, url)`` for a known identifier type, None when unknown.
+
+    The consumer-facing half of :data:`IDENTIFIER_LINKS`: the type is
+    normalized (stripped, lowercased) before lookup and the raw value is
+    substituted into the URL template unescaped. An unknown type answers
+    None -- the caller hides the link button, which is exactly what the
+    canonical Hermitage table's consumer does.
+    """
+    entry = IDENTIFIER_LINKS.get(str(id_type or "").strip().lower())
+    if entry is None:
+        return None
+    label, template = entry
+    return (label, template.format(value or ""))
 
 
 def detect_series_gaps(indices_str: str, max_index: float | None) -> list[int]:

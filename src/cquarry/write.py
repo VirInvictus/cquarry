@@ -10,13 +10,16 @@ Safety contract:
   - Registers the custom SQL functions Calibre's triggers call (``title_sort``,
     ``uuid4``) plus its ``PYNOCASE`` collation BEFORE any statement runs;
     without them ``books_insert_trg`` / ``books_update_trg`` abort writes.
-  - Every mutation bumps ``books.last_modified`` AND records the book id in
-    the ``metadata_dirtied`` queue. Calibre only regenerates a book's sidecar
-    .opf (and pushes it to wireless readers) for ids present in that table
-    (backend.py ``dirtied_books()``), so skipping the insert would leave
-    external edits invisible to Calibre's sync machinery forever. Databases
-    from before the table existed keep working: the insert is guarded by an
-    existence check.
+  - Every row-level mutation bumps ``books.last_modified`` AND records the
+    book id in the ``metadata_dirtied`` queue. Removals invert the rule:
+    ``remove_book`` clears the queues instead (metadata, annotations, FTS),
+    so Calibre never resyncs a deleted book; the trash lifecycle and the
+    custom-column schema verbs touch no rows at all. Calibre only
+    regenerates a book's sidecar .opf (and pushes it to wireless readers)
+    for ids present in that table (backend.py ``dirtied_books()``), so
+    skipping the insert would leave external edits invisible to Calibre's
+    sync machinery forever. Databases from before the table existed keep
+    working: the insert is guarded by an existence check.
   - Mutations run inside explicit ``BEGIN IMMEDIATE`` transactions.
   - Tag deletion cleans ``books_tags_link`` before ``tags`` to satisfy the
     ``fkc_delete_on_tags`` trigger ordering.
@@ -37,12 +40,18 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 import uuid as _uuid
-from collections.abc import Generator
-from datetime import UTC, date, datetime
-from typing import Any, Self
+from collections.abc import Callable, Generator
+from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Self
+from xml.etree import ElementTree
 
 from cquarry.helpers import sniff_image_format, title_sort
+from cquarry.search import BOOL_FALSE_WORDS, BOOL_TRUE_WORDS
+
+if TYPE_CHECKING:
+    from cquarry.db import CalibreDB
 
 __all__ = ["WritableCalibreDB", "register_udfs", "title_sort", "uuid4"]
 
@@ -69,7 +78,11 @@ def register_udfs(conn: sqlite3.Connection) -> None:
     schema triggers invoke ``title_sort()`` and ``uuid4()`` on insert/update.
     """
     conn.create_function("title_sort", 1, title_sort)
-    conn.create_function("uuid4", 0, uuid4, deterministic=True)
+    # deliberately NOT deterministic=True: SQLite may reuse a deterministic
+    # function's result within one statement, and a UUID must be fresh on
+    # every call. Today's triggers call uuid4() at most once per statement,
+    # but the honest registration costs nothing and survives new callers.
+    conn.create_function("uuid4", 0, uuid4)
     conn.create_collation("PYNOCASE", _pynocase)
 
 
@@ -118,6 +131,126 @@ def _same_instant(current: str | None, new: str) -> bool:
         return datetime.fromisoformat(current) == datetime.fromisoformat(new)
     except (ValueError, TypeError):
         return False
+
+
+# ---------------------------------------------------------------------------
+# Calibre's sidecar metadata.opf parser (the restore-from-trash source).
+# Calibre writes this backup into every book directory it manages; a trashed
+# book directory carries the last one, and move_book_from_trash rebuilds the
+# row from it. Reads what Calibre wrote -- it does not generate OPFs (that
+# stays Calibre's own backup thread / the declined OPF-generation family).
+# ---------------------------------------------------------------------------
+
+
+def _opf_localname(tag: str) -> str:
+    """Local name of an ElementTree tag, namespaces stripped."""
+    return tag.rpartition("}")[2]
+
+
+def _read_trash_opf(opf_path: str) -> dict[str, Any]:
+    """Parse a Calibre sidecar ``metadata.opf`` into the core row fields.
+
+    Stdlib ElementTree over Calibre's own OPF, matching elements by local
+    name so namespaced and bare spellings both parse. Returns ``title``,
+    ``title_sort``, ``authors`` (deduplicated, order preserved),
+    ``author_sort``, ``tags``, ``identifiers`` (the uuid scheme becomes
+    ``uuid`` instead), ``comments``, ``publisher``, ``languages``,
+    ``pubdate``, ``timestamp``, ``series``, ``series_index``, and
+    ``rating`` (the raw 0-10 internal value). Per-author file-as sort keys,
+    custom-column values, and annotations in the OPF are deliberately not
+    returned: the restore path rebuilds the core row.
+    """
+    root = ElementTree.parse(opf_path).getroot()
+    metadata = None
+    for el in root.iter():
+        if _opf_localname(el.tag) == "metadata":
+            metadata = el
+            break
+    if metadata is None:
+        raise ValueError(f"No <metadata> element in {opf_path}")
+
+    def _text_of(localname: str) -> str | None:
+        for el in metadata:
+            if _opf_localname(el.tag) == localname:
+                text = "".join(el.itertext()).strip()
+                return text or None
+        return None
+
+    def _meta_content(name: str) -> str | None:
+        for el in metadata:
+            if _opf_localname(el.tag) == "meta" and el.get("name") == name:
+                content = (el.get("content") or "").strip()
+                return content or None
+        return None
+
+    def _float_or_none(raw: str | None) -> float | None:
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    out: dict[str, Any] = {
+        "title": _text_of("title"),
+        "title_sort": _meta_content("calibre:title_sort"),
+        "authors": [],
+        "author_sort": _meta_content("calibre:author_sort"),
+        "tags": [],
+        "identifiers": {},
+        "uuid": None,
+        "comments": _text_of("description"),
+        "publisher": _text_of("publisher"),
+        "languages": [],
+        "pubdate": _text_of("date"),
+        "timestamp": _meta_content("calibre:timestamp"),
+        "series": _meta_content("calibre:series"),
+        "series_index": _float_or_none(_meta_content("calibre:series_index")),
+        "rating": None,
+    }
+    seen_authors: set[str] = set()
+    for el in metadata:
+        if _opf_localname(el.tag) != "creator":
+            continue
+        role = (el.get("role") or "aut").strip().lower()
+        if role not in ("aut", "author"):
+            continue
+        name = "".join(el.itertext()).strip()
+        if name and name.lower() not in seen_authors:
+            seen_authors.add(name.lower())
+            out["authors"].append(name)
+    for el in metadata:
+        if _opf_localname(el.tag) != "subject":
+            continue
+        name = "".join(el.itertext()).strip()
+        if name:
+            out["tags"].append(name)
+    for el in metadata:
+        if _opf_localname(el.tag) != "identifier":
+            continue
+        scheme = (
+            el.get("scheme") or el.get("{http://www.idpf.org/2007/opf}scheme") or ""
+        ).strip()
+        value = "".join(el.itertext()).strip()
+        if not value:
+            continue
+        if scheme.lower() == "uuid":
+            out["uuid"] = value
+        elif scheme:
+            out["identifiers"][scheme.lower()] = value
+    for el in metadata:
+        if _opf_localname(el.tag) != "language":
+            continue
+        code = "".join(el.itertext()).strip()
+        if code:
+            out["languages"].append(code)
+    raw_rating = _meta_content("calibre:rating")
+    if raw_rating is not None:
+        try:
+            out["rating"] = int(float(raw_rating))
+        except ValueError:
+            pass
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +443,15 @@ class WritableCalibreDB:
         ] = []
         # full-text-search.db attach state: None = not tried yet, True =
         # attached as fts_db, False = absent or unusable for this
-        # connection. Tried lazily before the first format write (ATTACH
-        # is illegal inside a transaction, so never after _begin()).
+        # connection. Tried lazily before the first format write (SQLite
+        # builds before 3.21.0 forbid ATTACH inside a transaction, so never
+        # after _begin()).
         self._fts_state: bool | None = None
+        # File placements/removals deferred by set_cover, remove_cover, and
+        # the original-format verbs: callables appended inside the
+        # transaction, run only after the outermost COMMIT (a rollback drops
+        # them).
+        self._pending_fs_ops: list[Callable[[], None]] = []
 
     # -- lifecycle --
 
@@ -378,28 +517,36 @@ class WritableCalibreDB:
         finally:
             self._batch_depth -= 1
             if self._batch_depth == 0:
-                if ok and not self._batch_poisoned:
-                    self.conn.commit()
-                    self._flush_pending_removals()
-                    self._flush_pending_relayouts()
-                else:
-                    with contextlib.suppress(sqlite3.Error):
-                        self.conn.rollback()
-                    # The SQL is undone; directories created inside the
-                    # batch would survive as orphans that look like real
-                    # books no row points at. add_book's own failure path
-                    # already removed its directory; rmtree of a missing
-                    # path is a no-op (ignore_errors).
-                    for orphan in self._batch_dirs:
-                        shutil.rmtree(orphan, ignore_errors=True)
-                    # The rollback resurrected whatever the queued removals
-                    # and re-lays were aimed at: both queues are dropped
-                    # with the transaction, never flushed by a LATER batch
-                    # against rows the rollback brought back.
-                    self._pending_removals.clear()
-                    self._pending_relayouts.clear()
-                self._batch_dirs.clear()
-                self._batch_poisoned = False
+                try:
+                    if ok and not self._batch_poisoned:
+                        self.conn.commit()
+                        self._flush_pending_removals()
+                        self._flush_pending_relayouts()
+                        self._flush_pending_fs_ops()
+                    else:
+                        with contextlib.suppress(sqlite3.Error):
+                            self.conn.rollback()
+                        # The SQL is undone; directories created inside the
+                        # batch would survive as orphans that look like real
+                        # books no row points at. add_book's own failure path
+                        # already removed its directory; rmtree of a missing
+                        # path is a no-op (ignore_errors).
+                        for orphan in self._batch_dirs:
+                            shutil.rmtree(orphan, ignore_errors=True)
+                        # The rollback resurrected whatever the queued removals
+                        # and re-lays were aimed at: both queues are dropped
+                        # with the transaction, never flushed by a LATER batch
+                        # against rows the rollback brought back.
+                        self._pending_removals.clear()
+                        self._pending_relayouts.clear()
+                        self._pending_fs_ops.clear()
+                finally:
+                    # Reset BEFORE propagating: a flush failure after the
+                    # COMMIT must not leave this batch's directories queued
+                    # for a LATER failed exit to rmtree -- those directories
+                    # hold committed books now.
+                    self._batch_dirs.clear()
+                    self._batch_poisoned = False
             elif not ok:
                 # An inner batch's exception must stick even when the caller
                 # catches it: the inner segment's partial writes are still
@@ -416,6 +563,74 @@ class WritableCalibreDB:
         shape working; new code should use ``batch()``.
         """
         return self.batch()
+
+    # -- Maintenance (1.24; the Phase 15 ring) --
+
+    def maintain(
+        self,
+        *,
+        vacuum: bool = True,
+        analyze: bool = True,
+        integrity_check: bool = False,
+        include_fts: bool = True,
+    ) -> dict[str, Any]:
+        """Vacuum / analyze / integrity-check the library DB and its FTS
+        sidecar (upstream ``backend.py`` ``vacuum``, extended with the two
+        stdlib-free maintenance statements calibredb users run by hand).
+
+        ``vacuum`` rebuilds both files (main first, then the sidecar, as
+        upstream does; the notes DB stays out of scope -- it is a separate
+        ``.calnotes`` database this library never opens), ``analyze``
+        refreshes the query planner's statistics on both, and
+        ``integrity_check`` reports the ``PRAGMA integrity_check`` rows
+        (``["ok"]`` on a healthy file) instead of only compacting. With
+        ``include_fts=False`` or no sidecar present, the sidecar is left
+        alone.
+
+        Returns ``{"vacuumed", "analyzed", "fts_attached",
+        "integrity_check", "fts_integrity_check"}``: the flags record what
+        actually ran, and the check keys are None when not requested.
+        Raises RuntimeError inside a :meth:`batch` (VACUUM cannot run in a
+        transaction, and maintenance is a standalone pass by definition) or
+        when the connection is otherwise mid-transaction (commit first).
+        """
+        if self._batch_depth:
+            raise RuntimeError(
+                "maintain() runs its own transaction boundary; "
+                "it cannot run inside batch()"
+            )
+        if self.conn.in_transaction:
+            raise RuntimeError(
+                "maintain() needs a clean transaction state; commit the "
+                "pending writes first"
+            )
+        fts_attached = self._ensure_fts_attached() if include_fts else False
+        out: dict[str, Any] = {
+            "vacuumed": False,
+            "analyzed": False,
+            "fts_attached": fts_attached,
+            "integrity_check": None,
+            "fts_integrity_check": None,
+        }
+        if vacuum:
+            self.conn.execute("VACUUM")
+            if fts_attached:
+                self.conn.execute("VACUUM fts_db")
+            out["vacuumed"] = True
+        if analyze:
+            self.conn.execute("ANALYZE")
+            if fts_attached:
+                self.conn.execute("ANALYZE fts_db")
+            out["analyzed"] = True
+        if integrity_check:
+            out["integrity_check"] = [
+                row[0] for row in self.conn.execute("PRAGMA integrity_check")
+            ]
+            if fts_attached:
+                out["fts_integrity_check"] = [
+                    row[0] for row in self.conn.execute("PRAGMA fts_db.integrity_check")
+                ]
+        return out
 
     def _commit(self) -> None:
         """Commit unless inside a batch() — the batch owns that commit."""
@@ -495,8 +710,17 @@ class WritableCalibreDB:
             first_author = self._first_author_name(book_id)
             self._relayout_book_path(book_id, new_title, first_author)
             self._commit()
+            if not self._batch_depth:
+                # The queued re-lay is this call's own: apply it now that
+                # the rows are committed (inside a batch the outermost
+                # exit flushes it instead).
+                self._flush_pending_relayouts()
         except BaseException:
             self._rollback()
+            if not self._batch_depth:
+                # A failed commit must not leave its fs op queued for a
+                # LATER batch to flush against resurrected rows.
+                self._pending_relayouts.clear()
             raise
 
     def _first_author_name(self, book_id: int) -> str:
@@ -823,10 +1047,442 @@ class WritableCalibreDB:
                 self._first_author_name(book_id),
             )
             self._commit()
+            if not self._batch_depth:
+                # Same post-commit flush rule as update_title.
+                self._flush_pending_relayouts()
             return True
         except BaseException:
             self._rollback()
+            if not self._batch_depth:
+                # Same no-leaked-fs-op rule as update_title.
+                self._pending_relayouts.clear()
             raise
+
+    # -- Entity-wide renames and removals (1.19; the approved C.2) --
+
+    # The many-one/many-many entity kinds a rename/removal can address.
+    # Ratings have no name to rename; languages are out of scope (no
+    # consumer names them).
+    _ENTITY_NAME_TABLES = {
+        "authors": ("authors", "name", "author"),
+        "series": ("series", "name", "series"),
+        "publishers": ("publishers", "name", "publisher"),
+        "tags": ("tags", "name", "tag"),
+    }
+
+    def rename_entity(self, kind: str, old: str, new: str) -> int:
+        """Rename an author, series, publisher, or tag everywhere.
+
+        The fix-the-misspelled-name verb (upstream ``rename_items``,
+        cache.py:2758-2862). ``old`` resolves case-insensitively; ``new``
+        is the row's new spelling. When ``new`` already exists as another
+        row (a case-variant or duplicate spelling) the rows MERGE: the old
+        row's links move to the survivor, duplicate links are dropped, and
+        the old row is deleted. Every affected book is touched and queued
+        for OPF resync. For authors, ``books.author_sort`` is recomputed
+        from the surviving authors' sort keys and each affected book's
+        on-disk layout re-lays (the directory carries the author name; the
+        fs half lands after the commit, riding the batch machinery). For a
+        series MERGE, incoming books get the next free series index
+        (``max + 1`` over the survivor's books); an in-place series rename
+        keeps every index. Returns the number of affected books; renaming
+        to the row's current spelling is an honest 0.
+
+        Raises ValueError for an unknown kind, an empty name, or when no
+        row matches ``old``.
+        """
+        table, name_col, fk = self._entity_name_table(kind)
+        old = old.strip() if isinstance(old, str) else ""
+        new = new.strip() if isinstance(new, str) else ""
+        if not old or not new:
+            raise ValueError("Entity names must not be empty")
+        affected: list[int] = []
+        with self.batch():
+            # Exact spelling wins; the NOCASE fallback (lowest id) only
+            # fires when no exact match exists, so a library with several
+            # case variants resolves deterministically.
+            row = self.conn.execute(
+                f"SELECT id, {name_col} AS name FROM {table} WHERE {name_col} = ?",
+                (old,),
+            ).fetchone()
+            if row is None:
+                row = self.conn.execute(
+                    f"SELECT id, {name_col} AS name FROM {table} "
+                    f"WHERE {name_col} = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+                    (old,),
+                ).fetchone()
+            if row is None:
+                raise ValueError(f"No {kind} row matching {old!r}")
+            if row["name"] == new:
+                return 0  # identical spelling: honest no-op
+            other = self.conn.execute(
+                f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
+                f"AND id != ?",
+                (new, row["id"]),
+            ).fetchone()
+            affected = [
+                r["book"]
+                for r in self.conn.execute(
+                    f"SELECT book FROM books_{table}_link WHERE {fk} = ? ORDER BY book",
+                    (row["id"],),
+                )
+            ]
+            merge = other is not None
+            if merge:
+                survivor = other["id"]
+                # Drop links that would collide with the survivor's
+                # UNIQUE(book, fk), then move the rest.
+                self.conn.execute(
+                    f"DELETE FROM books_{table}_link WHERE {fk} = ? AND book IN "
+                    f"(SELECT book FROM books_{table}_link WHERE {fk} = ?)",
+                    (row["id"], survivor),
+                )
+                self.conn.execute(
+                    f"UPDATE OR IGNORE books_{table}_link SET {fk} = ? WHERE {fk} = ?",
+                    (survivor, row["id"]),
+                )
+                self.conn.execute(f"DELETE FROM {table} WHERE id = ?", (row["id"],))
+                if kind == "series":
+                    for book_id in affected:
+                        # Next free index over the survivor's OTHER books
+                        # (the moving book's stale index must not count).
+                        nxt = self.conn.execute(
+                            "SELECT COALESCE(MAX(series_index), 0) + 1 AS nxt "
+                            "FROM books_series_link l JOIN books b ON b.id = l.book "
+                            "WHERE l.series = ? AND b.id != ?",
+                            (survivor, book_id),
+                        ).fetchone()["nxt"]
+                        self.conn.execute(
+                            "UPDATE books SET series_index = ? WHERE id = ?",
+                            (nxt, book_id),
+                        )
+            else:
+                self.conn.execute(
+                    f"UPDATE {table} SET {name_col} = ? WHERE id = ?",
+                    (new, row["id"]),
+                )
+            for book_id in affected:
+                if kind == "authors":
+                    # Recompute the book's author_sort from the surviving
+                    # authors' sort keys, exactly like set_authors does.
+                    sorts = [
+                        r["s"] or r["name"]
+                        for r in self.conn.execute(
+                            "SELECT a.sort AS s, a.name AS name "
+                            "FROM books_authors_link bal JOIN authors a "
+                            "ON a.id = bal.author WHERE bal.book = ? "
+                            "ORDER BY bal.id",
+                            (book_id,),
+                        )
+                    ]
+                    self.conn.execute(
+                        "UPDATE books SET author_sort = ? WHERE id = ?",
+                        (" & ".join(sorts), book_id),
+                    )
+                self._touch_book(book_id)
+            if kind == "authors":
+                for book_id in affected:
+                    title = self.conn.execute(
+                        "SELECT title FROM books WHERE id = ?", (book_id,)
+                    ).fetchone()
+                    self._relayout_book_path(
+                        book_id,
+                        title["title"] or "",
+                        self._first_author_name(book_id),
+                    )
+        return len(affected)
+
+    def remove_entity_everywhere(self, kind: str, name: str) -> int:
+        """Remove an author, series, publisher, or tag from every book.
+
+        Resolves ``name`` case-insensitively, deletes the entity's links
+        (the fkc_delete_on_* order), then the row itself, and touches +
+        queues OPF resync for every affected book. For a series the
+        affected books' ``series_index`` is reset to 1.0 too, matching
+        :meth:`set_series`'s clear semantics (the column is NOT NULL in
+        real libraries; 1.0 is the schema's no-series value); for authors
+        the books' ``author_sort`` is recomputed from the remaining
+        authors and the on-disk layout re-lays (fs after the commit).
+        Returns the number of affected books; a name matching no row is
+        an honest 0.
+        """
+        table, name_col, fk = self._entity_name_table(kind)
+        name = name.strip() if isinstance(name, str) else ""
+        if not name:
+            raise ValueError("Entity name must not be empty")
+        affected: list[int] = []
+        with self.batch():
+            row = self.conn.execute(
+                f"SELECT id FROM {table} WHERE {name_col} = ?", (name,)
+            ).fetchone()
+            if row is None:
+                row = self.conn.execute(
+                    f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
+                    f"ORDER BY id LIMIT 1",
+                    (name,),
+                ).fetchone()
+            if row is None:
+                return 0
+            affected = [
+                r["book"]
+                for r in self.conn.execute(
+                    f"SELECT book FROM books_{table}_link WHERE {fk} = ? ORDER BY book",
+                    (row["id"],),
+                )
+            ]
+            self.conn.execute(
+                f"DELETE FROM books_{table}_link WHERE {fk} = ?", (row["id"],)
+            )
+            if kind == "series" and affected:
+                self.conn.execute(
+                    f"UPDATE books SET series_index = 1.0 WHERE id IN "
+                    f"({','.join('?' * len(affected))})",
+                    affected,
+                )
+            self.conn.execute(f"DELETE FROM {table} WHERE id = ?", (row["id"],))
+            for book_id in affected:
+                if kind == "authors":
+                    sorts = [
+                        r["s"] or r["name"]
+                        for r in self.conn.execute(
+                            "SELECT a.sort AS s, a.name AS name "
+                            "FROM books_authors_link bal JOIN authors a "
+                            "ON a.id = bal.author WHERE bal.book = ? "
+                            "ORDER BY bal.id",
+                            (book_id,),
+                        )
+                    ]
+                    self.conn.execute(
+                        "UPDATE books SET author_sort = ? WHERE id = ?",
+                        (" & ".join(sorts), book_id),
+                    )
+                self._touch_book(book_id)
+            if kind == "authors":
+                for book_id in affected:
+                    title = self.conn.execute(
+                        "SELECT title FROM books WHERE id = ?", (book_id,)
+                    ).fetchone()
+                    self._relayout_book_path(
+                        book_id,
+                        title["title"] or "",
+                        self._first_author_name(book_id),
+                    )
+        return len(affected)
+
+    def set_author_sort_name(self, name: str, sort: str) -> int:
+        """Set one author's per-author sort key (upstream
+        ``set_sort_for_authors``, the row-level column behind the book-level
+        ``author_sort``).
+
+        The author resolves exact-spelling-first with a lowest-id NOCASE
+        fallback, ``authors.sort`` stores ``sort`` verbatim, and every book
+        of the author recomputes ``books.author_sort`` as its authors' sort
+        keys joined " & " in link order -- the same computation
+        :meth:`set_authors` performs -- and is touched and queued for OPF
+        resync. Returns the number of books affected (0 when the sort was
+        already equal). Raises ValueError for an empty sort, an unknown
+        author, or a schema whose authors table predates the ``sort``
+        column.
+        """
+        if not isinstance(sort, str) or not sort.strip():
+            raise ValueError("Author sort must not be empty")
+        name = name.strip() if isinstance(name, str) else ""
+        if not name:
+            raise ValueError("Author name must not be empty")
+        affected: list[int] = []
+        with self.batch():
+            row = self.conn.execute(
+                "SELECT id FROM authors WHERE name = ?", (name,)
+            ).fetchone()
+            if row is None:
+                row = self.conn.execute(
+                    "SELECT id FROM authors WHERE name = ? COLLATE NOCASE "
+                    "ORDER BY id LIMIT 1",
+                    (name,),
+                ).fetchone()
+            if row is None:
+                raise ValueError(f"No author row matching {name!r}")
+            cols = {r[1] for r in self.conn.execute("PRAGMA table_info(authors)")}
+            if "sort" not in cols:
+                raise ValueError("Authors table predates the sort column")
+            self.conn.execute(
+                "UPDATE authors SET sort = ? WHERE id = ?", (sort, row["id"])
+            )
+            affected = [
+                r["book"]
+                for r in self.conn.execute(
+                    "SELECT book FROM books_authors_link WHERE author = ? "
+                    "ORDER BY book",
+                    (row["id"],),
+                )
+            ]
+            for book_id in affected:
+                sorts = [
+                    r["s"] or r["name"]
+                    for r in self.conn.execute(
+                        "SELECT a.sort AS s, a.name AS name "
+                        "FROM books_authors_link bal JOIN authors a "
+                        "ON a.id = bal.author WHERE bal.book = ? "
+                        "ORDER BY bal.id",
+                        (book_id,),
+                    )
+                ]
+                self.conn.execute(
+                    "UPDATE books SET author_sort = ? WHERE id = ?",
+                    (" & ".join(sorts), book_id),
+                )
+                self._touch_book(book_id)
+        return len(affected)
+
+    def set_link_map(
+        self,
+        kind: str,
+        value_to_link: dict[str, str | None],
+        *,
+        only_set_if_no_existing_link: bool = False,
+    ) -> int:
+        """Write link URLs per value (upstream ``set_link_map``):
+        ``{value: link}`` over authors/series/publishers/tags, or a custom
+        column by ``#label``.
+
+        This is the column cquarry could read but never edit before: the
+        ``link`` URL beside author (and publisher/series/tag) rows, and the
+        per-value ``link`` column of normalized custom-column value tables.
+        Names resolve exact-spelling-first with a NOCASE fallback; unknown
+        values raise (upstream skips them silently -- a link targeted at a
+        misspelled name should fail loudly, not vanish). ``None`` clears a
+        link; ``only_set_if_no_existing_link`` leaves values that already
+        carry one alone (the fill-in-the-blanks mode). Every book linked to
+        a changed value is touched and queued for OPF resync. Returns the
+        number of books affected. Raises ValueError for an unknown kind,
+        unknown values, or a schema whose table predates the ``link``
+        column.
+        """
+        if not isinstance(value_to_link, dict):
+            raise TypeError("value_to_link must be a dict of {value: link}")
+        kind = (kind or "").strip()
+        affected: set[int] = set()
+        with self.batch():
+            if kind.startswith("#") or kind.lower() in {
+                k for k in self._custom_by_meta_label()
+            }:
+                changed = self._set_custom_column_links(
+                    kind, value_to_link, only_set_if_no_existing_link
+                )
+                for book_id in changed:
+                    self._touch_book(book_id)
+                return len(changed)
+            table, name_col, fk = self._entity_name_table(kind)
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if "link" not in cols:
+                raise ValueError(f"{table} predates the link column")
+            for value, link in value_to_link.items():
+                value = value.strip() if isinstance(value, str) else ""
+                if not value:
+                    raise ValueError("Entity values must not be empty")
+                row = self.conn.execute(
+                    f"SELECT id, link FROM {table} WHERE {name_col} = ?",
+                    (value,),
+                ).fetchone()
+                if row is None:
+                    row = self.conn.execute(
+                        f"SELECT id, link FROM {table} WHERE {name_col} = ? "
+                        "COLLATE NOCASE ORDER BY id LIMIT 1",
+                        (value,),
+                    ).fetchone()
+                if row is None:
+                    raise ValueError(f"No {kind} row matching {value!r}")
+                if only_set_if_no_existing_link and row["link"]:
+                    continue
+                if (row["link"] or None) == (link or None):
+                    continue  # equal link: honest no-op
+                self.conn.execute(
+                    f"UPDATE {table} SET link = ? WHERE id = ?",
+                    (link, row["id"]),
+                )
+                affected.update(
+                    r["book"]
+                    for r in self.conn.execute(
+                        f"SELECT book FROM books_{table}_link WHERE {fk} = ?",
+                        (row["id"],),
+                    )
+                )
+        return len(affected)
+
+    def _custom_by_meta_label(self) -> dict[str, dict]:
+        # The write module addresses custom columns by #label (the reader's
+        # _custom_by_label is read-side); labels are case-insensitive.
+        return {
+            row["label"].lower(): row
+            for row in self.conn.execute(
+                "SELECT id, label, name, datatype FROM custom_columns"
+            ).fetchall()
+        }
+
+    def _set_custom_column_links(
+        self,
+        kind: str,
+        value_to_link: dict[str, str | None],
+        only_existing: bool,
+    ) -> set[int]:
+        """The custom-column arm of :meth:`set_link_map`.
+
+        ``kind`` resolves to a normalized (Pattern A) column; its value
+        table's ``link`` column is updated per stored value. Direct-storage
+        columns have no per-value link and raise. Returns the affected book
+        ids; the caller touches them (inside the caller's batch).
+        """
+        label = kind.removeprefix("#")
+        meta = self._custom_by_meta_label().get(label.lower())
+        if meta is None:
+            raise ValueError(f"No custom column matching {kind!r}")
+        cid = int(meta["id"])
+        value_table = f"custom_column_{cid}"
+        link_table = f"books_custom_column_{cid}_link"
+        has_link_table = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (link_table,),
+        ).fetchone()
+        cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({value_table})")}
+        if not has_link_table or "link" not in cols:
+            raise ValueError(
+                f"{kind!r} is not a normalized column with a value link column"
+            )
+        affected: set[int] = set()
+        for value, link in value_to_link.items():
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("Custom-column values must not be empty")
+            row = self.conn.execute(
+                f"SELECT id, link FROM {value_table} WHERE value = ?", (value,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"No {kind} value matching {value!r} (values must already exist)"
+                )
+            if only_existing and row["link"]:
+                continue
+            if (row["link"] or None) == (link or None):
+                continue
+            self.conn.execute(
+                f"UPDATE {value_table} SET link = ? WHERE id = ?",
+                (link, row["id"]),
+            )
+            affected.update(
+                r["book"]
+                for r in self.conn.execute(
+                    f"SELECT book FROM {link_table} WHERE value = ?", (row["id"],)
+                )
+            )
+        return affected
+
+    def _entity_name_table(self, kind: str) -> tuple[str, str, str]:
+        kind = (kind or "").strip().lower()
+        if kind not in self._ENTITY_NAME_TABLES:
+            raise ValueError(
+                f"Unknown entity kind {kind!r}. Available: "
+                + ", ".join(sorted(self._ENTITY_NAME_TABLES))
+            )
+        return self._ENTITY_NAME_TABLES[kind]
 
     def set_series(
         self, book_id: int, name: str | None, index: float | None = None
@@ -834,8 +1490,11 @@ class WritableCalibreDB:
         """Assign (or clear, with ``name=None``) the book's series.
 
         Returns True when stored state changed. ``index`` defaults to 1.0 on a
-        fresh assignment; clearing nulls both the link and
-        ``books.series_index``; orphaned series rows are pruned.
+        fresh assignment; clearing deletes the link and resets
+        ``books.series_index`` to 1.0 -- the column is NOT NULL in real
+        libraries (``REAL NOT NULL DEFAULT 1.0``) and Calibre's state for a
+        book that never had a series is index 1.0 with no link row;
+        orphaned series rows are pruned.
         """
         self._begin()
         try:
@@ -863,7 +1522,7 @@ class WritableCalibreDB:
                     "DELETE FROM books_series_link WHERE book = ?", (book_id,)
                 )
                 self.conn.execute(
-                    "UPDATE books SET series_index = NULL, last_modified = ? "
+                    "UPDATE books SET series_index = 1.0, last_modified = ? "
                     "WHERE id = ?",
                     (self._now(), book_id),
                 )
@@ -898,6 +1557,50 @@ class WritableCalibreDB:
                 (new_index, self._now(), book_id),
             )
             self._prune_orphans("series")
+            self._mark_dirty(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def set_series_index(self, book_id: int, index: float) -> bool:
+        """Set the book's series index verbatim (the bare-setter completion
+        of the 1.19 passthrough family; 1.23).
+
+        Unlike re-calling :meth:`set_series` -- which deletes and reinserts
+        the link row just to change the number -- this updates
+        ``books.series_index`` only. The book must already belong to a
+        series (assigning one is :meth:`set_series`'s job, and an index
+        without a series is not a correction); ``None`` raises too, since
+        clearing the index alone would strand the link (clearing both is
+        ``set_series(book_id, None)``). Returns True when stored state
+        changed; an equal value is an honest no-op."""
+        if index is None:
+            raise ValueError(
+                "set_series_index(None) is not supported; clearing both the "
+                "series and its index is set_series(book_id, None)"
+            )
+        new = float(index)
+        self._begin()
+        try:
+            self._require_book(book_id)
+            row = self.conn.execute(
+                "SELECT b.series_index AS idx, l.id AS link FROM books b "
+                "LEFT JOIN books_series_link l ON l.book = b.id WHERE b.id = ?",
+                (book_id,),
+            ).fetchone()
+            if row["link"] is None:
+                raise ValueError(
+                    f"Book {book_id} has no series to index; set_series() assigns one"
+                )
+            if row["idx"] is not None and float(row["idx"]) == new:
+                self._rollback()
+                return False
+            self.conn.execute(
+                "UPDATE books SET series_index = ?, last_modified = ? WHERE id = ?",
+                (new, self._now(), book_id),
+            )
             self._mark_dirty(book_id)
             self._commit()
             return True
@@ -1167,15 +1870,100 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    # -- Passthrough sort/timestamp setters (1.19; the approved C.6) --
+
+    def set_author_sort(self, book_id: int, value: str) -> bool:
+        """Override the book's ``author_sort`` string verbatim.
+
+        The passthrough for hand-tuned corrections: unlike
+        :meth:`set_authors`, which recomputes the sort from the authors'
+        sort keys, this stores exactly what you pass. Returns True when
+        stored state changed. A later ``set_authors``/author rename will
+        recompute over the override -- that is their job, not a bug.
+        """
+        return self._set_book_text_column(book_id, "author_sort", value)
+
+    def set_title_sort(self, book_id: int, value: str) -> bool:
+        """Override the book's ``title_sort`` (``books.sort``) verbatim.
+
+        The passthrough for mangled sort keys; unlike
+        :meth:`update_title`, which recomputes the sort through
+        ``title_sort()``, this stores exactly what you pass. Returns True
+        when stored state changed. A later ``update_title`` recomputes
+        over the override."""
+        return self._set_book_text_column(book_id, "sort", value)
+
+    def set_timestamp(self, book_id: int, value: str | date | datetime | None) -> bool:
+        """Set the book's ``timestamp`` (its addition date).
+
+        Normalized exactly like :meth:`set_pubdate` (ISO text in UTC,
+        ``None`` writes the undefined-date sentinel, an equal instant is
+        an honest no-op). Note the search grammar's bare ``timestamp``
+        location reads this column; Calibre sorts "recently added" by it.
+        """
+        new = _normalize_pubdate(value)
+        self._begin()
+        try:
+            self._require_book(book_id)
+            row = self.conn.execute(
+                "SELECT timestamp FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            if _same_instant(row["timestamp"] if row else None, new):
+                self._commit()
+                return False
+            self.conn.execute(
+                "UPDATE books SET timestamp = ? WHERE id = ?", (new, book_id)
+            )
+            self._touch_book(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def _set_book_text_column(self, book_id: int, column: str, value: str) -> bool:
+        new = value.strip() if isinstance(value, str) else ""
+        if not new:
+            raise ValueError(f"{column} must not be empty")
+        self._begin()
+        try:
+            self._require_book(book_id)
+            row = self.conn.execute(
+                f"SELECT {column} AS cur FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            if row is not None and row["cur"] == new:
+                self._rollback()
+                return False
+            self.conn.execute(
+                f"UPDATE books SET {column} = ?, last_modified = ? WHERE id = ?",
+                (new, self._now(), book_id),
+            )
+            self._mark_dirty(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
     # -- Custom-column writers --
 
     def _custom_column_meta(self, label: str) -> dict[str, Any]:
-        """One custom_columns row by label (case-insensitive), or ValueError."""
-        row = self.conn.execute(
-            "SELECT id, label, name, datatype, is_multiple, editable, display "
-            "FROM custom_columns WHERE label = ? COLLATE NOCASE",
-            (label.lstrip("#"),),
-        ).fetchone()
+        """One custom_columns row by label (case-insensitive), or ValueError.
+
+        Schemas predating the editable/display columns raise the house
+        ValueError too (the read side degrades with documented defaults; a
+        writer cannot -- it would guess the column's contract)."""
+        try:
+            row = self.conn.execute(
+                "SELECT id, label, name, datatype, is_multiple, editable, display "
+                "FROM custom_columns WHERE label = ? COLLATE NOCASE",
+                (label.lstrip("#"),),
+            ).fetchone()
+        except sqlite3.OperationalError as e:
+            raise ValueError(
+                f"Custom column #{label} is unreadable: the custom_columns "
+                f"table predates the modern schema ({e})"
+            ) from e
         if row is None:
             raise ValueError(f"Custom column #{label} not found")
         meta = dict(row)
@@ -1222,7 +2010,9 @@ class WritableCalibreDB:
         meta = self._custom_column_meta(label)
         if not meta["editable"]:
             raise ValueError(f"Custom column #{label} is not editable")
-        cid = meta["id"]
+        # int() before any f-string SQL: a corrupt store's TEXT id must hit
+        # the table names as a number, never as raw SQL text.
+        cid = int(meta["id"])
         datatype = str(meta["datatype"]).lower()
         if datatype == "composite":
             raise ValueError(
@@ -1359,18 +2149,13 @@ class WritableCalibreDB:
             stored = None
         elif datatype == "bool":
             if isinstance(value, str):
+                # The engine's own tristate vocabulary (cquarry.search
+                # BOOL_TRUE_WORDS/BOOL_FALSE_WORDS): a word search reads as
+                # true/false must not raise here.
                 low = value.strip().lower()
-                if low in ("true", "yes", "checked", "_true", "_yes"):
+                if low in BOOL_TRUE_WORDS:
                     stored = 1
-                elif low in (
-                    "false",
-                    "no",
-                    "unchecked",
-                    "blank",
-                    "empty",
-                    "_false",
-                    "_no",
-                ):
+                elif low in BOOL_FALSE_WORDS:
                     stored = 0
                 else:
                     raise ValueError(f"{value!r} is not a boolean for #{meta['label']}")
@@ -1470,7 +2255,7 @@ class WritableCalibreDB:
                 self._validate_enum(meta, s)
             if s not in items:
                 items.append(s)
-        cid = meta["id"]
+        cid = int(meta["id"])  # f-string SQL below; never interpolate raw ids
         link_table = f"books_custom_column_{cid}_link"
         value_table = f"custom_column_{cid}"
         if not self.conn.execute(
@@ -1525,8 +2310,11 @@ class WritableCalibreDB:
         """Attach the library's full-text-search.db for writing, once.
 
         Returns True when ``fts_db`` is attached and the dirty-queue writes
-        can run. The attach must happen BEFORE a transaction opens (SQLite
-        forbids ATTACH inside one), so format setters call this before
+        can run. The attach happens BEFORE a transaction opens so the queue
+        is guaranteed available once writes begin (SQLite builds before
+        3.21.0 forbid ATTACH inside a transaction; resolving the state up
+        front keeps the queue working on those and keeps the queue-vs-
+        transaction coupling uniform). Format setters call this before
         ``_begin()``; a missing sidecar or a failed attach (locked,
         unreadable) marks this connection FTS-unavailable -- dirtying is
         best-effort and degrades to a no-op, never blocks a format write.
@@ -1584,6 +2372,122 @@ class WritableCalibreDB:
             "DELETE FROM fts_db.dirtied_formats WHERE book = ? AND format = ?",
             (book_id, fmt.upper()),
         )
+
+    # -- FTS queue management (1.24; the Phase 15 ring) --
+    #
+    # The queue is the only FTS surface a stdlib process can write: the
+    # index rows themselves (books_text + the FTS5 tables behind them)
+    # delete through triggers that tokenize with Calibre's custom tokenizer,
+    # which does not exist here, so removing indexed text stays Calibre's
+    # job. These verbs manage the queue only.
+
+    def fts_reindex_book(self, book_id: int, fmts: list[str] | None = None) -> int:
+        """Queue a book's formats for FTS re-extraction and a pages rescan
+        (upstream ``reindex_fts_book`` / ``dirty_book``). Returns how many
+        queue rows were inserted; an already-queued pair is not duplicated,
+        and 0 means "nothing new queued" -- including the missing-sidecar
+        case, where there is no queue to write to. ``fmts=None`` queues
+        every catalogued format the book carries; explicit formats queue
+        verbatim (extraction of a file that turns out to be missing is the
+        worker's finding, not this verb's). Extraction itself stays
+        Calibre's job."""
+        if not self._ensure_fts_attached():
+            return 0
+        self._begin()
+        try:
+            self._require_book(book_id)
+            if fmts is None:
+                rows = self.conn.execute(
+                    "SELECT format FROM data WHERE book = ?", (book_id,)
+                ).fetchall()
+                fmts = [r[0] for r in rows if r[0]]
+            added = 0
+            for fmt in fmts:
+                fmt = str(fmt).strip().upper()
+                if not fmt:
+                    continue
+                before = self.conn.total_changes
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO fts_db.dirtied_formats(book, format) "
+                    "VALUES (?, ?)",
+                    (book_id, fmt),
+                )
+                added += self.conn.total_changes - before
+            if added:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    self.conn.execute(
+                        "UPDATE books_pages_link SET needs_scan = 1 WHERE book = ?",
+                        (book_id,),
+                    )
+            self._commit()
+            return added
+        except BaseException:
+            self._rollback()
+            raise
+
+    def fts_reindex_all(self) -> int:
+        """Queue every catalogued format for FTS re-extraction (upstream's
+        ``dirty_existing`` sweep, the shape ``enable_fts(True)`` uses when
+        nothing is indexed yet). Returns the inserted-row count; 0 when the
+        sidecar is absent. The closer cousin of upstream's
+        delete-the-sidecar ``reindex_fts``: this keeps the index tables
+        untouched and lets Calibre's extraction pool re-write every row
+        through its own triggers at its own pace."""
+        if not self._ensure_fts_attached():
+            return 0
+        self._begin()
+        try:
+            before = self.conn.total_changes
+            self.conn.execute(
+                "INSERT OR IGNORE INTO fts_db.dirtied_formats(book, format) "
+                "SELECT book, format FROM main.data"
+            )
+            added = self.conn.total_changes - before
+            if added:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    self.conn.execute("UPDATE books_pages_link SET needs_scan = 1")
+            self._commit()
+            return added
+        except BaseException:
+            self._rollback()
+            raise
+
+    def fts_queue_clear(
+        self, book_id: int | None = None, fmt: str | None = None
+    ) -> int:
+        """Remove entries from the FTS extraction queue. Returns the number
+        of queue rows removed: everything (no arguments), one book's
+        entries (``book_id``), or one pair (``book_id`` + ``fmt``).
+
+        This is the queue half of upstream's ``fts_unindex`` /
+        ``remove_dirty`` / ``clear_all_dirty``. The index rows themselves
+        are process-bound (see the section note above), so "unindex" in the
+        full upstream sense stays Calibre's job. A ``fmt`` without a
+        ``book_id`` raises: the queue is keyed by pairs."""
+        if book_id is None and fmt is not None:
+            raise ValueError("fmt without book_id is not a queue address")
+        if not self._ensure_fts_attached():
+            return 0
+        self._begin()
+        try:
+            before = self.conn.total_changes
+            if book_id is None:
+                self.conn.execute("DELETE FROM fts_db.dirtied_formats")
+            elif fmt is None:
+                self.conn.execute(
+                    "DELETE FROM fts_db.dirtied_formats WHERE book = ?", (book_id,)
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM fts_db.dirtied_formats WHERE book = ? AND format = ?",
+                    (book_id, str(fmt).strip().upper()),
+                )
+            removed = self.conn.total_changes - before
+            self._commit()
+            return removed
+        except BaseException:
+            self._rollback()
+            raise
 
     def add_format(self, book_id: int, fmt: str, name: str, size: int) -> bool:
         """Register a format row in ``data``. Returns True when inserted.
@@ -1668,6 +2572,7 @@ class WritableCalibreDB:
             raise ValueError("Format and name must not be empty")
         if size < 0:
             raise ValueError(f"Format size must not be negative, got {size}")
+        size = int(size)  # uncompressed_size stores integers, like add_format
         # ATTACH must precede the transaction (see _ensure_fts_attached).
         self._ensure_fts_attached()
         self._begin()
@@ -1700,6 +2605,244 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    def set_pages(
+        self,
+        book_id: int,
+        pages: int,
+        *,
+        algorithm: int = 0,
+        format: str = "",
+        format_size: int = 0,
+    ) -> bool:
+        """Set the page-count row (upstream ``set_pages``): a frontend that
+        computes page counts itself records the value and clears
+        ``needs_scan``.
+
+        One ``books_pages_link`` row per book (the column is the table's
+        PRIMARY KEY): an existing row is replaced, ``needs_scan`` lands as 0
+        -- a real value is exactly what the pending rescan was waiting for
+        -- and the book is touched and queued for OPF resync like every
+        setter. ``algorithm`` is the producing profile (Calibre's CountPages
+        ids), ``format``/``format_size`` the provenance of the file the
+        count came from. Returns True when a row was written, False when an
+        identical row with ``needs_scan`` already 0 exists. Raises
+        ValueError for a negative ``pages``, an unknown book, or a schema
+        predating the native table.
+        """
+        if pages is None or int(pages) < 0:
+            raise ValueError(f"pages must be a non-negative integer, got {pages!r}")
+        self._begin()
+        try:
+            self._require_book(book_id)
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='books_pages_link'"
+            ).fetchone()
+            if exists is None:
+                raise ValueError("Schema predates books_pages_link")
+            old = self.conn.execute(
+                "SELECT pages, algorithm, format, format_size, needs_scan "
+                "FROM books_pages_link WHERE book = ?",
+                (book_id,),
+            ).fetchone()
+            new = (
+                int(pages),
+                int(algorithm),
+                (format or "").upper(),
+                int(format_size),
+            )
+            if (
+                old is not None
+                and not old["needs_scan"]
+                and (
+                    int(old["pages"]),
+                    int(old["algorithm"]),
+                    old["format"] or "",
+                    int(old["format_size"]),
+                )
+                == new
+            ):
+                self._rollback()
+                return False
+            self.conn.execute("DELETE FROM books_pages_link WHERE book = ?", (book_id,))
+            self.conn.execute(
+                "INSERT INTO books_pages_link (book, pages, algorithm, format, "
+                "format_size, timestamp, needs_scan) VALUES (?,?,?,?,?,?,0)",
+                (book_id, new[0], new[1], new[2], new[3], self._now()),
+            )
+            self._touch_book(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    # -- Opaque-blob passthrough writers (1.25, Phase 17 item 18) --
+    # None of these queue OPF resync or touch the book: the payloads are
+    # sidecar-shaped state (plugin metrics, conversion recipes, viewer
+    # storage) that metadata sync never carries, exactly as upstream's
+    # writers leave them.
+
+    def set_plugin_data(self, book_id: int, name: str, val: Any | None) -> bool:
+        """Upsert one ``books_plugin_data`` row (upstream
+        ``add_custom_book_data``, per book); ``None`` deletes the row.
+
+        The row is the (book, name, val) UNIQUE pair the read side's
+        :meth:`CalibreDB.get_plugin_data` surfaces. Serialization: a ``str``
+        stores verbatim; any other JSON-serializable payload goes through
+        ``json.dumps`` (upstream's own serialization, so Calibre-side
+        readers see the shape they expect). Returns True when a row was
+        written or deleted, False when a delete found nothing. Raises
+        ValueError for an empty name, an unknown book, or a schema
+        predating the table.
+        """
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Plugin-data name must not be empty")
+        self._begin()
+        try:
+            self._require_book(book_id)
+            self._require_table("books_plugin_data")
+            if val is None:
+                before = self.conn.total_changes
+                self.conn.execute(
+                    "DELETE FROM books_plugin_data WHERE book = ? AND name = ?",
+                    (book_id, name),
+                )
+                changed = self.conn.total_changes > before
+                self._commit()
+                return changed
+            payload = val if isinstance(val, str) else json.dumps(val, default=str)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO books_plugin_data (book, name, val) "
+                "VALUES (?, ?, ?)",
+                (book_id, name, payload),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def set_conversion_options(
+        self,
+        book_id: int,
+        data: str | bytes | None,
+        *,
+        fmt: str = "PIPE",
+    ) -> bool:
+        """Upsert one ``conversion_options`` blob (upstream
+        ``set_conversion_options``); ``None`` deletes the row.
+
+        The ``(format, book)`` UNIQUE pair behind the read side's
+        :meth:`CalibreDB.get_conversion_profiles`; ``fmt`` defaults to
+        Calibre's ``PIPE`` profile. Passthrough by recorded scope: bytes
+        store verbatim, ``str`` encodes UTF-8 -- upstream pickles its
+        recipe payloads in-process, and reproducing that serialization for
+        callers is this blob's boundary (hand it the bytes you want
+        stored). Returns True when a row was written or deleted, False
+        when a delete found nothing; unknown books and schemas predating
+        the table raise ValueError.
+        """
+        self._begin()
+        try:
+            self._require_book(book_id)
+            self._require_table("conversion_options")
+            fmt = (fmt or "").strip().upper()
+            if not fmt:
+                raise ValueError("Conversion-option format must not be empty")
+            if data is None:
+                before = self.conn.total_changes
+                self.conn.execute(
+                    "DELETE FROM conversion_options WHERE book = ? AND format = ?",
+                    (book_id, fmt),
+                )
+                changed = self.conn.total_changes > before
+                self._commit()
+                return changed
+            payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO conversion_options (book, format, data) "
+                "VALUES (?, ?, ?)",
+                (book_id, fmt, payload),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def set_book_storage(
+        self,
+        book_id: int,
+        fmt: str,
+        data: dict[str, Any] | None,
+        *,
+        user_type: str = "local",
+        user: str = "viewer",
+    ) -> bool:
+        """Upsert one ``book_storage`` entry (upstream
+        ``update_book_storage_for_book``, the viewers' per-book
+        localStorage); ``None`` deletes the row.
+
+        The payload dict stores as the JSON object upstream's shape carries
+        (``{'timestamp': <now epoch>, 'data': <payload>}``; the timestamp is
+        stamped here like upstream's update). ``fmt`` uppercases (the
+        column is NOCASE but the stored spelling follows the formats row);
+        the (book, format, user_type, user) key is UNIQUE. Returns True
+        when a row was written or deleted, False when a delete found
+        nothing; unknown books and schemas predating the (newer-Calibre)
+        table raise ValueError.
+        """
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Book-storage format must not be empty")
+        self._begin()
+        try:
+            self._require_book(book_id)
+            self._require_table("book_storage")
+            if data is not None and not isinstance(data, dict):
+                raise ValueError("Book-storage payload must be a dict or None")
+            if data is None:
+                before = self.conn.total_changes
+                self.conn.execute(
+                    "DELETE FROM book_storage WHERE book = ? AND format = ? "
+                    "AND user_type = ? AND user = ?",
+                    (book_id, fmt, user_type, user),
+                )
+                changed = self.conn.total_changes > before
+                self._commit()
+                return changed
+            entry = {"timestamp": time.time(), "data": data}
+            self.conn.execute(
+                "INSERT OR REPLACE INTO book_storage "
+                "(book, format, user_type, user, timestamp, data) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    book_id,
+                    fmt,
+                    user_type,
+                    user,
+                    entry["timestamp"],
+                    json.dumps(entry),
+                ),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def _require_table(self, name: str) -> None:
+        """Raise the house ValueError when a table the verb targets predates
+        this schema."""
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Schema predates the {name} table")
+
     def set_has_cover(self, book_id: int, has_cover: bool) -> bool:
         """Toggle the catalogued ``has_cover`` flag (the cover FILE itself is
         the caller's responsibility). Returns True when the flag flipped."""
@@ -1723,6 +2866,745 @@ class WritableCalibreDB:
         except BaseException:
             self._rollback()
             raise
+
+    # -- Cover management (1.19; the approved C.3) --
+
+    def set_cover(self, book_id: int, data: bytes | str | os.PathLike) -> bool:
+        """Write the book's cover file and set ``has_cover``.
+
+        ``data`` is the image bytes, or a path to read them from. The
+        sniff-or-raise rule is ``add_book``'s: a JPEG lands as
+        ``cover.jpg``, a PNG as ``cover.png``, and anything unparseable
+        raises rather than being catalogued with ``has_cover=1``; a stale
+        cover under the OTHER extension is removed so
+        :meth:`cquarry.db.CalibreDB.get_cover_path` can never prefer it.
+        The file lands only after the commit (deferred inside a
+        :meth:`batch`), so a failed pass never catalogues a cover it did
+        not keep. Returns True; use :meth:`remove_cover` to clear.
+        """
+        if data is None:
+            raise TypeError(
+                "set_cover(book_id, None) is not supported; use remove_cover()"
+            )
+        if isinstance(data, (str, os.PathLike)):
+            with open(os.fspath(data), "rb") as f:
+                data = f.read()
+        data = bytes(data)
+        ext = sniff_image_format(data)
+        if ext is None:
+            raise ValueError(
+                "Cover is neither JPEG nor PNG (sniff-or-raise: an "
+                "unparseable cover must not be catalogued with has_cover=1)"
+            )
+        with self.batch():
+            self._require_book(book_id)
+            book_dir = self._book_dir_path(book_id)
+            if book_dir is None:
+                raise ValueError(f"Book {book_id} has no path to place a cover in")
+            self.conn.execute(
+                "UPDATE books SET has_cover = 1, last_modified = ? WHERE id = ?",
+                (self._now(), book_id),
+            )
+            self._mark_dirty(book_id)
+            new_name = f"cover.{ext}"
+            other = "cover.png" if ext == "jpg" else "cover.jpg"
+
+            def _place(book_dir=book_dir, new_name=new_name, other=other, data=data):
+                os.makedirs(book_dir, exist_ok=True)
+                _place_bytes(data, os.path.join(book_dir, new_name))
+                with contextlib.suppress(OSError):
+                    os.unlink(os.path.join(book_dir, other))
+
+            self._pending_fs_ops.append(_place)
+        return True
+
+    def remove_cover(self, book_id: int) -> bool:
+        """Clear the cover: ``has_cover`` goes to 0 and both cover files
+        (``cover.jpg``/``cover.png``) are removed after the commit.
+        Returns True when the catalogued flag actually changed."""
+        with self.batch():
+            self._require_book(book_id)
+            current = self.conn.execute(
+                "SELECT has_cover FROM books WHERE id = ?", (book_id,)
+            ).fetchone()["has_cover"]
+            changed = bool(current)
+            book_dir = self._book_dir_path(book_id)
+            if changed:
+                self.conn.execute(
+                    "UPDATE books SET has_cover = 0, last_modified = ? WHERE id = ?",
+                    (self._now(), book_id),
+                )
+                self._mark_dirty(book_id)
+
+            def _remove(book_dir=book_dir):
+                if book_dir is None:
+                    return
+                for name in ("cover.jpg", "cover.png"):
+                    with contextlib.suppress(OSError):
+                        os.unlink(os.path.join(book_dir, name))
+
+            self._pending_fs_ops.append(_remove)
+        return changed
+
+    # -- Trash lifecycle (1.20; the approved C.5) --
+
+    # Upstream's trash categories: 'b' holds trashed book directories,
+    # 'f' trashed formats. remove_book(delete_files="trash") writes 'b'.
+    _TRASH_CATEGORIES = ("b", "f")
+    _TRASH_DEFAULT_EXPIRY_SECONDS = 14 * 86400  # upstream defs.py default
+
+    # -- Extra files: the book's data/ directory (1.25, Phase 17 item 16) --
+
+    def add_data_file(
+        self,
+        book_id: int,
+        relpath: str,
+        data: bytes | str | os.PathLike,
+        *,
+        replace: bool = False,
+        auto_rename: bool = False,
+    ) -> str | None:
+        """Write one extra file into the book's ``data/`` directory (upstream
+        ``add_extra_files``), returning the relpath actually written.
+
+        ``relpath`` is the forward-slash path under ``data/``; parent
+        directories are created as needed. ``data`` is bytes or a source
+        path (copied). Pure filesystem like the trash verbs -- no database
+        rows exist for extra files and none are written, so no queues, no
+        touching, and no batch interaction. When the target exists:
+        ``replace`` overwrites, ``auto_rename`` writes beside it under
+        ``merge conflict[N]/`` (upstream's layout), and neither set answers
+        None. Unsafe relpaths (absolute, ``..``, empty components) raise
+        ValueError -- the same guard the read side applies -- and a book
+        with no on-disk directory raises too.
+        """
+        parts = self._safe_data_relpath(relpath)
+        if parts is None:
+            raise ValueError(f"Unsafe data-file path: {relpath!r}")
+        data_dir = self._book_data_dir(book_id)
+        if data_dir is None:
+            # The book exists (or _book_data_dir raised); its data/ dir is
+            # created on first write.
+            brow = self.conn.execute(
+                "SELECT path FROM books WHERE id = ?", (book_id,)
+            ).fetchone()
+            if brow is None:
+                raise ValueError(f"Book {book_id} not found")
+            if not brow["path"]:
+                raise ValueError(f"Book {book_id} has no on-disk directory")
+            data_dir = os.path.join(os.path.dirname(self.db_path), brow["path"], "data")
+        dest = os.path.join(data_dir, *parts)
+        if os.path.lexists(dest) and not replace:
+            if not auto_rename:
+                return None
+            dirname, basename = os.path.split(dest)
+            num = 0
+            while True:
+                conflict = "merge conflict" if num == 0 else f"merge conflict {num}"
+                candidate = os.path.join(dirname, conflict, basename)
+                if not os.path.lexists(candidate):
+                    dest = candidate
+                    break
+                num += 1
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if isinstance(data, (str, os.PathLike)):
+            shutil.copy2(os.fspath(data), dest)
+        else:
+            with open(dest, "wb") as f:
+                f.write(data)
+        return os.path.relpath(dest, data_dir).replace(os.sep, "/")
+
+    def _book_data_dir(self, book_id: int) -> str | None:
+        """The book's ``data/`` directory, or None when there is no directory yet."""
+        brow = self.conn.execute(
+            "SELECT path FROM books WHERE id = ?", (book_id,)
+        ).fetchone()
+        if brow is None:
+            raise ValueError(f"Book {book_id} not found")
+        if not brow["path"]:
+            return None
+        data_dir = os.path.join(os.path.dirname(self.db_path), brow["path"], "data")
+        return data_dir if os.path.isdir(data_dir) else None
+
+    @staticmethod
+    def _safe_data_relpath(relpath: str) -> list[str] | None:
+        """Split a ``data/`` relpath into components, None when unsafe.
+
+        The write-side twin of the read-side guard (CalibreDB's
+        ``_safe_data_relpath``): absolute spellings, empty components,
+        ``.``, and ``..`` all refuse. Duplicated rather than imported so
+        this module keeps its zero-imports-from-the-read-module property.
+        """
+        if not isinstance(relpath, str) or not relpath.strip():
+            return None
+        normalized = relpath.replace("\\", "/")
+        if normalized.startswith("/"):
+            return None
+        parts = list(normalized.split("/"))
+        if any(p in ("", ".", "..") for p in parts):
+            return None
+        return parts
+
+    def rename_data_file(
+        self, book_id: int, relpath: str, new_relpath: str, *, replace: bool = False
+    ) -> bool:
+        """Move one extra file within the book's ``data/`` directory
+        (upstream ``rename_extra_file``). False when the source is absent or
+        the target exists without ``replace``; unsafe paths raise ValueError
+        (the shared guard).
+        """
+        src_parts = self._safe_data_relpath(relpath)
+        dst_parts = self._safe_data_relpath(new_relpath)
+        if src_parts is None:
+            raise ValueError(f"Unsafe data-file path: {relpath!r}")
+        if dst_parts is None:
+            raise ValueError(f"Unsafe data-file path: {new_relpath!r}")
+        data_dir = self._book_data_dir(book_id)
+        if data_dir is None:
+            return False
+        src = os.path.join(data_dir, *src_parts)
+        dest = os.path.join(data_dir, *dst_parts)
+        if not os.path.isfile(src):
+            return False
+        if os.path.lexists(dest) and not replace:
+            return False
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.move(src, dest)
+        return True
+
+    def remove_data_files(
+        self, book_id: int, relpaths: list[str]
+    ) -> dict[str, Exception | None]:
+        """Delete extra files from the book's ``data/`` directory (upstream
+        ``remove_extra_files``; permanently -- the recycle-bin mode is a GUI
+        concept with no library-side form). Returns
+        ``{relpath: None | the OSError}`` per requested path; unsafe paths
+        raise ValueError before anything is removed.
+        """
+        results: dict[str, Exception | None] = {}
+        parts_map: dict[str, list[str]] = {}
+        data_dir = self._book_data_dir(book_id)
+        for relpath in relpaths:
+            parts = self._safe_data_relpath(relpath)
+            if parts is None:
+                raise ValueError(f"Unsafe data-file path: {relpath!r}")
+            parts_map[relpath] = parts
+            if data_dir is None:
+                results[relpath] = FileNotFoundError(relpath)
+        if data_dir is None:
+            return results
+        for relpath, parts in parts_map.items():
+            path = os.path.join(data_dir, *parts)
+            try:
+                os.remove(path)
+                results[relpath] = None
+            except OSError as e:
+                results[relpath] = e
+        return results
+
+    def _trash_root(self) -> str:
+        return os.path.join(os.path.dirname(self.db_path), self._TRASH_DIR_NAME)
+
+    def _trash_entries(self, category: str) -> list[tuple[str, float]]:
+        """The ``<book_id>, mtime`` entries of one trash category."""
+        base = os.path.join(self._trash_root(), category)
+        out: list[tuple[str, float]] = []
+        if not os.path.isdir(base):
+            return out
+        for name in sorted(os.listdir(base)):
+            path = os.path.join(base, name)
+            if os.path.isdir(path):
+                try:
+                    mtime = os.stat(path).st_mtime
+                except OSError:
+                    mtime = 0.0
+                out.append((name, mtime))
+        return out
+
+    def list_trash(self) -> list[dict[str, Any]]:
+        """Inventory the library's trash: one dict per entry.
+
+        ``{category: "book" | "format", book_id, mtime, files}`` sorted by
+        category then id -- the read that makes
+        :meth:`expire_trash`/:meth:`empty_trash` reviewable before they
+        run. Upstream's trash layout (``.caltrash/b/<id>/`` for books,
+        ``.caltrash/f/<id>/`` for formats); a missing trash dir is an
+        empty list."""
+        out: list[dict[str, Any]] = []
+        for category, label in zip(self._TRASH_CATEGORIES, ("book", "format")):
+            base = os.path.join(self._trash_root(), category)
+            for name, mtime in self._trash_entries(category):
+                files: list[str] = []
+                path = os.path.join(base, name)
+                for root, _dirs, names in os.walk(path):
+                    files.extend(names)
+                out.append(
+                    {
+                        "category": label,
+                        "book_id": int(name) if name.isdigit() else name,
+                        "mtime": mtime,
+                        "files": sorted(files),
+                    }
+                )
+        return out
+
+    def empty_trash(self) -> int:
+        """Permanently delete everything in the library's trash.
+
+        Upstream's ``clear_trash_dir``: the ``.caltrash`` directory is
+        removed whole and recreated empty (``b/`` and ``f/``). This is the
+        irreversible half of ``remove_book(delete_files="trash")`` --
+        call :meth:`list_trash` first if review is wanted. Returns the
+        number of trash entries removed."""
+        root = self._trash_root()
+        count = len(self._trash_entries("b")) + len(self._trash_entries("f"))
+        existed = os.path.isdir(root)
+        if existed:
+            shutil.rmtree(root, ignore_errors=False)
+            for category in self._TRASH_CATEGORIES:
+                os.makedirs(os.path.join(root, category), exist_ok=True)
+        return count
+
+    def expire_trash(self, older_than: float | timedelta | None = None) -> int:
+        """Delete trash entries older than ``older_than`` seconds.
+
+        Mirrors upstream's ``expire_old_trash`` mtime rule: an entry goes
+        when its modification time plus the age is past. The default is
+        upstream's 14 days; a :class:`timedelta` is accepted; a value
+        ``<= 0`` expires everything (that is :meth:`empty_trash`'s job,
+        but honored here for parity). Returns the number of entries
+        removed."""
+        if older_than is None:
+            age = float(self._TRASH_DEFAULT_EXPIRY_SECONDS)
+        elif isinstance(older_than, timedelta):
+            age = older_than.total_seconds()
+        else:
+            age = float(older_than)
+        now = datetime.now(UTC).timestamp()
+        removed = 0
+        root = self._trash_root()
+        for category in self._TRASH_CATEGORIES:
+            base = os.path.join(root, category)
+            for name, mtime in self._trash_entries(category):
+                if age <= 0 or mtime + age <= now:
+                    try:
+                        shutil.rmtree(os.path.join(base, name))
+                    except OSError:
+                        continue  # a failed removal is not a removal
+                    removed += 1
+        if removed:
+            # Recreate the emptied categories only when something actually
+            # expired: expiring an empty trash must not materialize a
+            # .caltrash tree in a library that never trashed anything.
+            for category in self._TRASH_CATEGORIES:
+                os.makedirs(os.path.join(root, category), exist_ok=True)
+        return removed
+
+    # -- Restore from trash (1.24; the Phase 14 opener) --
+
+    # Upstream's reserved names inside a trashed book directory: every other
+    # extension-bearing file is a format to re-register (backend.py
+    # get_metadata_for_trash_book).
+    _TRASH_RESERVED_NAMES = frozenset({"cover.jpg", "cover.png", "metadata.opf"})
+
+    def _trash_entry_path(self, category: str, book_id: int) -> str:
+        if category not in self._TRASH_CATEGORIES:
+            raise ValueError(
+                f"category must be 'b' (books) or 'f' (formats), got {category!r}"
+            )
+        return os.path.join(self._trash_root(), category, str(book_id))
+
+    def copy_format_from_trash(self, book_id: int, fmt: str, dest: str) -> str:
+        """Copy a trashed format file out of the trash to ``dest``.
+
+        The rescue half of the format trash (upstream
+        ``copy_format_from_trash``): no database involvement, the file just
+        lands at ``dest`` (created, an existing file replaced) and its
+        absolute path is returned. The trash entry stores files under their
+        bare extension (``.caltrash/f/<book_id>/<fmt>``), so ``fmt`` is
+        case-insensitive. Raises ValueError when the entry or the format
+        file is missing."""
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Format must not be empty")
+        src = os.path.join(self._trash_entry_path("f", book_id), fmt.lower())
+        if not os.path.isfile(src):
+            raise ValueError(f"No {fmt} format in the trash for book {book_id}")
+        dest = os.path.abspath(os.path.expanduser(dest))
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.copyfile(src, dest)
+        return dest
+
+    def copy_book_from_trash(self, book_id: int, dest: str) -> str:
+        """Copy a trashed book directory out of the trash to ``dest``.
+
+        The rescue half of the book trash (upstream
+        ``copy_book_from_trash``): no database involvement, the whole entry
+        (OPF sidecar, covers, format files) is copied to ``dest`` (created
+        when missing, merged over an existing directory) and returned as an
+        absolute path. Raises ValueError when the trash entry is missing."""
+        src = self._trash_entry_path("b", book_id)
+        if not os.path.isdir(src):
+            raise ValueError(f"Book {book_id} is not in the trash")
+        dest = os.path.abspath(os.path.expanduser(dest))
+        os.makedirs(dest, exist_ok=True)
+        shutil.copytree(src, dest, dirs_exist_ok=True)
+        return dest
+
+    def delete_trash_entry(self, book_id: int, category: str) -> bool:
+        """Delete one trash entry outright. Returns True when removed.
+
+        ``category`` is ``'b'`` for books, ``'f'`` for formats (upstream
+        ``delete_trash_entry``). Irreversible -- call :meth:`list_trash`
+        first if review is wanted. A missing entry is an honest False, and a
+        library with no trash at all stays untouched (no tree is
+        materialized)."""
+        path = self._trash_entry_path(category, book_id)
+        if not os.path.isdir(path):
+            return False
+        shutil.rmtree(path)
+        return True
+
+    def move_format_from_trash(self, book_id: int, fmt: str) -> bool:
+        """Undelete one format from the trash into its book (upstream
+        ``move_format_from_trash``). Returns True.
+
+        The book must exist and have a path; the trashed file (stored under
+        its bare extension) is re-registered in ``data`` under the book's
+        shared filename stem -- the stem of its surviving formats, or the
+        freshly computed ``Title - Author`` stem when none are left -- and
+        the file is placed into the book directory only after the commit
+        (deferred inside a :meth:`batch`). The restored format is queued for
+        FTS re-extraction and a pages rescan (the :meth:`set_format`
+        machinery), and the trash entry directory is removed once only its
+        ``metadata.json`` bookkeeping file remains. Raises ValueError when
+        the book, its path, or the trashed file is missing."""
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Format must not be empty")
+        # ATTACH must precede the transaction (see _ensure_fts_attached):
+        # set_format's queue write joins it.
+        self._ensure_fts_attached()
+        with self.batch():
+            self._require_book(book_id)
+            trash_dir = self._trash_entry_path("f", book_id)
+            src = os.path.join(trash_dir, fmt.lower())
+            if not os.path.isfile(src):
+                raise ValueError(f"No {fmt} format in the trash for book {book_id}")
+            with open(src, "rb") as f:
+                data = f.read()
+            # All of a book's formats share one filename stem (data.name);
+            # a book with no formats left gets the add_book stem.
+            row = self.conn.execute(
+                "SELECT name FROM data WHERE book = ? AND name IS NOT NULL "
+                "AND name != '' LIMIT 1",
+                (book_id,),
+            ).fetchone()
+            if row is not None:
+                stem = row["name"]
+            else:
+                brow = self.conn.execute(
+                    "SELECT title FROM books WHERE id = ?", (book_id,)
+                ).fetchone()
+                stem = _construct_file_name(
+                    brow["title"] or "",
+                    self._first_author_name(book_id),
+                    len(fmt) + 1,
+                )
+            book_dir = self._book_dir_path(book_id)
+            if book_dir is None:
+                raise ValueError(f"Book {book_id} has no path to place a format in")
+            dest = os.path.join(book_dir, f"{stem}.{fmt.lower()}")
+            self.set_format(book_id, fmt, stem, len(data))
+
+            def _place(dest=dest, data=data):
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                _place_bytes(data, dest)
+
+            self._pending_fs_ops.append(_place)
+
+            def _clean_entry(trash_dir=trash_dir, consumed=src):
+                # The trashed file was copied, not moved (the placement is
+                # commit-deferred), so the restore consumes it here; the
+                # entry goes once only metadata.json (or nothing) remains,
+                # upstream's remove_trash_formats_dir_if_empty rule.
+                with contextlib.suppress(OSError):
+                    os.unlink(consumed)
+                with contextlib.suppress(OSError):
+                    if len(os.listdir(trash_dir)) <= 1:
+                        shutil.rmtree(trash_dir)
+
+            self._pending_fs_ops.append(_clean_entry)
+        return True
+
+    def move_book_from_trash(self, book_id: int) -> None:
+        """Undelete a whole book from the trash (upstream
+        ``move_book_from_trash``).
+
+        The book id must NOT exist in the database; the trash entry's
+        sidecar ``metadata.opf`` (Calibre's own backup, written into the
+        directory before the trash move) is parsed to rebuild the row:
+        title and title sort, authors (the OPF's ``author_sort`` stored
+        verbatim over the recomputed one), tags, identifiers (the uuid
+        scheme becomes the preserved per-book ``uuid``), comments,
+        publisher, languages, pubdate, timestamp, series + index, and
+        rating. Every other extension-bearing file in the entry is
+        re-registered in ``data`` under its stored stem and queued for FTS
+        re-extraction; a cover file sets ``has_cover``. The directory moves
+        back to its ``Author/Title (id)`` place only after the rows COMMIT
+        (deferred inside a :meth:`batch`), and the OPF-resync queue entry
+        has Calibre regenerate a fresh sidecar on next start.
+
+        Custom-column values, annotations, and plugin data are NOT restored:
+        the sidecar OPF carries only the core metadata (annotation writes
+        are a recorded decline). Raises ValueError when the id is live, the
+        trash entry is missing, or the entry carries no ``metadata.opf``.
+        """
+        # ATTACH must precede the transaction (see _ensure_fts_attached).
+        self._ensure_fts_attached()
+        with self.batch():
+            if (
+                self.conn.execute(
+                    "SELECT 1 FROM books WHERE id = ?", (book_id,)
+                ).fetchone()
+                is not None
+            ):
+                raise ValueError(f"A book with the id {book_id} already exists")
+            trash_dir = self._trash_entry_path("b", book_id)
+            if not os.path.isdir(trash_dir):
+                raise ValueError(f"Book {book_id} is not in the trash")
+            opf_path = os.path.join(trash_dir, "metadata.opf")
+            if not os.path.isfile(opf_path):
+                raise ValueError(
+                    f"Book {book_id}'s trash entry has no metadata.opf; the row "
+                    "cannot be rebuilt (Calibre writes the sidecar OPF into "
+                    "directories it manages; a book trashed before Calibre "
+                    "ever saw it has none)"
+                )
+            meta = _read_trash_opf(opf_path)
+            title = meta["title"] or "Unknown"
+            authors: list[str] = meta["authors"]
+            first_author = authors[0] if authors else ""
+            # The entry dir carries the original id, so the recomputed
+            # layout is the layout it left with.
+            rel_path = _construct_path_name(book_id, title, first_author)
+            self.conn.execute(
+                "INSERT INTO books (id, title, author_sort, series_index, "
+                "pubdate, timestamp, path, last_modified) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    book_id,
+                    title,
+                    meta["author_sort"] or "",
+                    meta["series_index"] if meta["series_index"] is not None else 1.0,
+                    _normalize_pubdate(meta["pubdate"]),
+                    _normalize_pubdate(meta["timestamp"]),
+                    rel_path,
+                    self._now(),
+                ),
+            )
+            # books_insert_trg filled sort/uuid from the title; the OPF's
+            # stored values are the trash-time truth and win.
+            self.conn.execute(
+                "UPDATE books SET sort = ? WHERE id = ?",
+                (meta["title_sort"] or title_sort(title), book_id),
+            )
+            if meta["uuid"]:
+                self.conn.execute(
+                    "UPDATE books SET uuid = ? WHERE id = ?", (meta["uuid"], book_id)
+                )
+            if authors:
+                self.set_authors(book_id, authors)
+                if meta["author_sort"]:
+                    # set_authors recomputes from the authors' sort columns;
+                    # a fresh author row defaults to the display name, so the
+                    # OPF's stored sort is applied verbatim over it.
+                    self.conn.execute(
+                        "UPDATE books SET author_sort = ? WHERE id = ?",
+                        (meta["author_sort"], book_id),
+                    )
+            for tag in meta["tags"]:
+                self.add_tag(book_id, tag)
+            if meta["publisher"]:
+                self.set_publisher(book_id, meta["publisher"])
+            if meta["languages"]:
+                self.set_languages(book_id, meta["languages"])
+            if meta["identifiers"]:
+                self.set_identifiers(book_id, meta["identifiers"])
+            if meta["comments"]:
+                self.set_comments(book_id, meta["comments"])
+            if meta["series"]:
+                self.set_series(book_id, meta["series"], meta["series_index"])
+            if meta["rating"]:
+                # The OPF carries the internal 0-10 value; set_rating takes
+                # stars and stores it back verbatim.
+                self.set_rating(book_id, meta["rating"] / 2)
+            for name in sorted(os.listdir(trash_dir)):
+                path = os.path.join(trash_dir, name)
+                if name in self._TRASH_RESERVED_NAMES or not os.path.isfile(path):
+                    continue
+                stem, dot_ext = os.path.splitext(name)
+                ext = dot_ext[1:]
+                if not ext:
+                    continue
+                self.conn.execute(
+                    "INSERT INTO data (book, format, uncompressed_size, name) "
+                    "VALUES (?, ?, ?, ?)",
+                    (book_id, ext.upper(), os.path.getsize(path), stem),
+                )
+                self._mark_fts_dirty(book_id, ext.upper())
+            if any(
+                os.path.isfile(os.path.join(trash_dir, cover))
+                for cover in ("cover.jpg", "cover.png")
+            ):
+                self.conn.execute(
+                    "UPDATE books SET has_cover = 1 WHERE id = ?", (book_id,)
+                )
+            self._touch_book(book_id)
+            book_dir = os.path.join(os.path.dirname(self.db_path), rel_path)
+
+            def _move_back(trash_dir=trash_dir, book_dir=book_dir):
+                os.makedirs(os.path.dirname(book_dir), exist_ok=True)
+                if os.path.exists(book_dir):
+                    # ids are unique in paths, so a live book cannot own
+                    # this directory; it is a stale orphan, same rule as
+                    # _apply_relayout.
+                    shutil.rmtree(book_dir)
+                shutil.move(trash_dir, book_dir)
+
+            self._pending_fs_ops.append(_move_back)
+
+    # -- Original-format save/restore (1.19; the approved C.8) --
+
+    def save_original_format(self, book_id: int, fmt: str) -> bool:
+        """Save a copy of the format as ``ORIGINAL_<FMT>`` (upstream
+        cache.py:1581), overwriting any previously saved original.
+
+        The undo-able repair primitive: call before swapping a repaired
+        file into place, and :meth:`restore_original_format` can put the
+        bytes back. The copy is a real ``data`` row plus a
+        ``<stem>.original_<ext>`` file beside the original, so Calibre sees
+        it exactly as it sees one of its own. Returns True when saved,
+        False when the book has no such format (or its file is missing on
+        disk). Raises ValueError when ``fmt`` is itself an ORIGINAL
+        format."""
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Format must not be empty")
+        if "ORIGINAL" in fmt:
+            raise ValueError("Cannot save an original of an original format")
+        # Attach before the batch opens so the nested add_format/set_format
+        # can always queue (see _ensure_fts_attached).
+        self._ensure_fts_attached()
+        with self.batch():
+            self._require_book(book_id)
+            src = self.conn.execute(
+                "SELECT id, name, uncompressed_size FROM data "
+                "WHERE book = ? AND upper(format) = ?",
+                (book_id, fmt),
+            ).fetchone()
+            if src is None:
+                return False
+            book_dir = self._book_dir_path(book_id)
+            if book_dir is None:
+                return False
+            src_path = os.path.join(book_dir, f"{src['name']}.{fmt.lower()}")
+            if not os.path.isfile(src_path):
+                return False
+            with open(src_path, "rb") as f:
+                data = f.read()
+            nfmt = "ORIGINAL_" + fmt
+            orig = self.conn.execute(
+                "SELECT id, name FROM data WHERE book = ? AND upper(format) = ?",
+                (book_id, nfmt),
+            ).fetchone()
+            if orig is None:
+                self.add_format(book_id, nfmt, src["name"], len(data))
+            else:
+                self.set_format(book_id, nfmt, src["name"], len(data))
+                old_stem = orig["name"]
+                old_name = src["name"]
+
+                def _sweep_old_stem(
+                    book_dir=book_dir, old_stem=old_stem, old_name=old_name, nfmt=nfmt
+                ):
+                    if old_stem != old_name:
+                        with contextlib.suppress(OSError):
+                            os.unlink(
+                                os.path.join(book_dir, f"{old_stem}.{nfmt.lower()}")
+                            )
+
+                self._pending_fs_ops.append(_sweep_old_stem)
+            dest = os.path.join(book_dir, f"{src['name']}.{nfmt.lower()}")
+
+            def _place_copy(dest=dest, data=data):
+                _place_bytes(data, dest)
+
+            self._pending_fs_ops.append(_place_copy)
+        return True
+
+    def restore_original_format(self, book_id: int, original_fmt: str) -> bool:
+        """Restore the format from a previously saved ``ORIGINAL_<FMT>``,
+        removing the original afterwards (upstream cache.py:1595).
+
+        The ORIGINAL file's bytes become the target format's file (its
+        ``data`` row keeps the target's filename stem), and the ORIGINAL
+        row and file are removed. Returns True on success, False when no
+        accessible ORIGINAL row/file exists. The restored format is queued
+        for FTS re-extraction and a pages rescan (the same machinery a
+        :meth:`set_format` repair uses)."""
+        nfmt = (original_fmt or "").strip().upper()
+        if not nfmt.startswith("ORIGINAL_") or len(nfmt) <= len("ORIGINAL_"):
+            raise ValueError(f"Expected an ORIGINAL_<FMT> format, got {original_fmt!r}")
+        fmt = nfmt[len("ORIGINAL_") :]
+        # Attach before the batch opens so the restored format can always
+        # be queued (see _ensure_fts_attached).
+        self._ensure_fts_attached()
+        with self.batch():
+            self._require_book(book_id)
+            orig = self.conn.execute(
+                "SELECT id, name FROM data WHERE book = ? AND upper(format) = ?",
+                (book_id, nfmt),
+            ).fetchone()
+            if orig is None:
+                return False
+            book_dir = self._book_dir_path(book_id)
+            if book_dir is None:
+                return False
+            orig_path = os.path.join(book_dir, f"{orig['name']}.{nfmt.lower()}")
+            if not os.path.isfile(orig_path):
+                return False
+            with open(orig_path, "rb") as f:
+                data = f.read()
+            target = self.conn.execute(
+                "SELECT id, name FROM data WHERE book = ? AND upper(format) = ?",
+                (book_id, fmt),
+            ).fetchone()
+            if target is None:
+                self.add_format(book_id, fmt, orig["name"], len(data))
+                dest_stem = orig["name"]
+            else:
+                self.set_format(book_id, fmt, target["name"], len(data))
+                dest_stem = target["name"]
+            # The bytes on disk changed even when the row was already
+            # correct (an honest set_format no-op): queue re-extraction
+            # unconditionally -- INSERT OR IGNORE dedupes when the row
+            # change already queued it.
+            self._mark_fts_dirty(book_id, fmt)
+            dest = os.path.join(book_dir, f"{dest_stem}.{fmt.lower()}")
+
+            def _swap(dest=dest, data=data, orig_path=orig_path):
+                _place_bytes(data, dest)
+                with contextlib.suppress(OSError):
+                    os.unlink(orig_path)
+
+            self._pending_fs_ops.append(_swap)
+            # The ORIGINAL row and its FTS queue entry do not survive a
+            # restore (remove_format clears the queue entry).
+            self.remove_format(book_id, nfmt)
+        return True
 
     # -- Book creation (Phase 10) --
 
@@ -1861,6 +3743,9 @@ class WritableCalibreDB:
             )
 
         book_dir: str | None = None
+        # Attach before the batch opens so the seeded formats can be queued
+        # for extraction (see _ensure_fts_attached).
+        self._ensure_fts_attached()
         try:
             with self.batch():
                 # Insert FIRST, id from lastrowid (books_insert_trg fills
@@ -1886,10 +3771,11 @@ class WritableCalibreDB:
                 # attempt fails).
                 book_dir = os.path.join(os.path.dirname(self.db_path), rel_path)
                 os.makedirs(book_dir, exist_ok=True)
-                if self._batch_depth:
-                    # Batch-scoped compensation: the outermost batch's failed
-                    # exit removes every directory created inside the pass.
-                    self._batch_dirs.append(book_dir)
+                # Batch-scoped compensation: the outermost batch's failed
+                # exit removes every directory created inside the pass
+                # (always registered: add_book only ever runs inside its
+                # own batch()).
+                self._batch_dirs.append(book_dir)
                 for fmt, src, ext, _size in fmt_entries:
                     stem = _construct_file_name(title, first_author, len(ext) + 1)
                     placed = _place_stream(
@@ -1900,6 +3786,12 @@ class WritableCalibreDB:
                         "VALUES (?, ?, ?, ?)",
                         (book_id, fmt, placed, stem),
                     )
+                    # Upstream's own add path queues every data INSERT for
+                    # extraction (the TEMP triggers); so does ours -- a new
+                    # book's formats are indexed and page-counted like any
+                    # repaired format. The queue write joins the batch, so
+                    # a rollback undoes it.
+                    self._mark_fts_dirty(book_id, fmt)
                 if cover_data is not None and cover_ext is not None:
                     _place_bytes(
                         cover_data, os.path.join(book_dir, f"cover.{cover_ext}")
@@ -1958,6 +3850,97 @@ class WritableCalibreDB:
                         f"catalogued as book {row['book']}'s {fmt} "
                         "(byte-identical re-import)"
                     )
+
+    def copy_book_from_library(
+        self,
+        src_db: "CalibreDB",
+        book_id: int,
+        *,
+        preserve_timestamp: bool = True,
+    ) -> int:
+        """Copy one book from another library into this one (upstream
+        ``copy_one_book``, copy_to_library.py:77, the blessed composition of
+        sanctioned reads and writes).
+
+        Carried over: title (and its stored sort), authors (with each
+        author's stored per-author sort key, then the book-level
+        ``author_sort`` verbatim), the format FILES (verified source paths
+        copied through :meth:`add_book`'s seed path, so ``data`` rows and
+        the FTS/pages queues fill in), the cover bytes, tags, series +
+        index, publisher, rating, languages, identifiers, comments,
+        ``pubdate``, and -- ``preserve_timestamp`` (upstream
+        ``preserve_date``) -- the addition timestamp. NOT carried, each for
+        a recorded reason: annotations (the postprocess decline), ``data/``
+        extras (outside the copy's scope), plugin data and conversion
+        options (the conversion overrides DO ride along through
+        :meth:`set_conversion_options`; plugin data stays put, exactly like
+        upstream's copy), custom columns (the source OPF carries none of them;
+        ``move_book_from_trash``'s rule), and the uuid (always fresh, like
+        upstream's ``preserve_uuid=False`` default).
+
+        The whole copy is ONE ``batch()`` on this library: any failure --
+        including a missing source format file -- rolls everything back and
+        leaves zero rows and no directory. Duplicate policy stays with the
+        frontend (upstream's ``duplicate_action``): this is the plain add
+        path, and a byte-identical re-import raises through
+        :meth:`add_book`'s invariant. Returns the new book id; unknown
+        source books raise ValueError.
+        """
+        row = src_db.get_book(book_id, include_comments=True)
+        if row is None:
+            raise ValueError(f"Book {book_id} not found in the source library")
+        formats = [
+            src_db.get_format_path(book_id, fmt) for fmt in src_db.get_formats(book_id)
+        ]
+        cover = src_db.get_cover_bytes(book_id)
+        authors: list[str] = row["authors"] or []
+        author_sorts: list[str] = row.get("author_sorts") or []
+        with self.batch():
+            new_id = self.add_book(
+                row["title"],
+                authors,
+                formats=formats,
+                cover=cover,
+                identifiers=dict(row["identifiers"] or {}),
+                publisher=row["publisher"] or None,
+                pubdate=row["pubdate"] or None,
+            )
+            for tag in row["tags"] or []:
+                self.add_tag(new_id, tag)
+            if row["series"]:
+                self.set_series(new_id, row["series"], row["series_index"] or 1.0)
+            if row["rating"]:
+                self.set_rating(new_id, row["rating"] / 2.0)
+            if row["languages"]:
+                self.set_languages(new_id, list(row["languages"]))
+            if row.get("comments"):
+                self.set_comments(new_id, row["comments"])
+            # Per-author sort keys first (they feed the recomputation), then
+            # the book-level sort verbatim, so a hand-tuned override
+            # survives the copy exactly as it reads in the source.
+            for name, stored in zip(authors, author_sorts):
+                if stored and stored != name:
+                    self.set_author_sort_name(name, stored)
+            if row["author_sort"]:
+                self.set_author_sort(new_id, row["author_sort"])
+            if row["title_sort"] and row["title_sort"] != row["title"]:
+                self.set_title_sort(new_id, row["title_sort"])
+            # Upstream stamps now() when not preserving; an empty source
+            # timestamp gets the same treatment either way.
+            if preserve_timestamp and row["timestamp"]:
+                self.set_timestamp(new_id, row["timestamp"])
+            else:
+                self.set_timestamp(new_id, datetime.now(UTC))
+            # The postprocess half of copy_one_book: conversion overrides
+            # ride the blob writer verbatim (upstream copies them the same
+            # way; plugin data it does not copy, and neither do we).
+            for profile in src_db.get_conversion_profiles(book_id):
+                blob = profile.get("data")
+                if isinstance(blob, (bytes, bytearray)) and blob:
+                    self.set_conversion_options(
+                        new_id, bytes(blob), fmt=profile.get("format") or "PIPE"
+                    )
+        return new_id
 
     def _author_sort_keys(self, names: list[str]) -> list[tuple[str, str, bool]]:
         """Resolve author names to (name, sort, is_new) without writing.
@@ -2031,6 +4014,597 @@ class WritableCalibreDB:
             "author_sort_computed": author_sort,
         }
 
+    # -- Custom-column schema management (1.20; the approved C.7) --
+
+    # Upstream library/custom_columns.py CUSTOM_DATA_TYPES; the storage
+    # mapping is create_custom_column's (backend.py:1384).
+    _CUSTOM_DATA_TYPES = frozenset(
+        {
+            "rating",
+            "text",
+            "comments",
+            "datetime",
+            "int",
+            "float",
+            "bool",
+            "series",
+            "composite",
+            "enumeration",
+        }
+    )
+    # Datatypes stored directly (Pattern B); the rest are normalized
+    # (Pattern A: value table + link table).
+    _CUSTOM_DIRECT_TYPES = frozenset(
+        {"datetime", "comments", "int", "bool", "float", "composite"}
+    )
+    _CUSTOM_DDL_TYPES = {
+        "rating": "INT",
+        "int": "INT",
+        "text": "TEXT",
+        "comments": "TEXT",
+        "series": "TEXT",
+        "composite": "TEXT",
+        "enumeration": "TEXT",
+        "float": "REAL",
+        "datetime": "timestamp",
+        "bool": "BOOL",
+    }
+
+    def create_custom_column(
+        self,
+        label: str,
+        name: str,
+        datatype: str,
+        *,
+        is_multiple: bool = False,
+        editable: bool = True,
+        display: dict[str, Any] | None = None,
+    ) -> int:
+        """Create a custom column and return its column number.
+
+        Mirrors upstream's ``create_custom_column`` (backend.py:1384)
+        DDL-for-DDL: the ``custom_columns`` row, the storage tables (value
+        table + link table for the normalized datatypes
+        text/enumeration/series/rating; a direct table for
+        int/float/bool/datetime/comments/composite), the fkc guard
+        triggers, the series ``extra`` index column, and the
+        ``tag_browser_*`` views (including the ``filtered_`` one, whose
+        ``books_list_filter()`` only evaluates inside Calibre -- views are
+        lazy, so creating it is safe and keeps the schema faithful).
+        Label rules are upstream's: lowercase letters/digits/underscores,
+        starting with a letter. ``is_multiple`` only applies to text (and
+        composite). Also sets Calibre's
+        ``update_all_last_mod_dates_on_start`` pref, exactly like upstream,
+        so the next Calibre start refreshes every book's metadata. Once
+        created, the standard write/read surface
+        (:meth:`set_custom_column`, :meth:`load_custom_column
+        <cquarry.db.CalibreDB.load_custom_column>`, the ``#label`` search
+        locations) picks the column up automatically; a long-lived
+        :class:`cquarry.db.CalibreDB` reader must ``refresh()`` to see it.
+        """
+        label = (label or "").strip()
+        if not label:
+            raise ValueError("No label was provided")
+        if (
+            re.match(r"^\w*$", label) is None
+            or not label[0].isalpha()
+            or label.lower() != label
+        ):
+            raise ValueError(
+                "The label must contain only lower case letters, digits "
+                "and underscores, and start with a letter"
+            )
+        datatype = (datatype or "").strip().lower()
+        if datatype not in self._CUSTOM_DATA_TYPES:
+            raise ValueError(f"{datatype!r} is not a supported data type")
+        display = display if display is not None else {}
+        if self.conn.execute(
+            "SELECT 1 FROM custom_columns WHERE label = ?", (label,)
+        ).fetchone():
+            raise ValueError(f"A custom column with label {label!r} already exists")
+        required = {"editable", "display", "normalized"}
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(custom_columns)")}
+        if not required.issubset(cols):
+            raise ValueError(
+                "The custom_columns table predates the editable/display/"
+                "normalized columns; column creation needs a modern schema"
+            )
+        normalized = datatype not in self._CUSTOM_DIRECT_TYPES
+        is_multiple = bool(is_multiple) and datatype in ("text", "composite")
+        with self.batch():
+            # The column number must not collide with storage tables that
+            # still exist for a flag-deleted column (Calibre purges those
+            # tables at its next startup, so a fresh id can otherwise land
+            # on a live table). One past the highest row id AND table
+            # number is always free -- a deliberate, documented deviation
+            # from upstream's bare lastrowid.
+            num = self.conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM custom_columns"
+            ).fetchone()[0]
+            for (tbl,) in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND "
+                "(name LIKE 'custom_column_%' OR name LIKE 'books_custom_column_%')"
+            ):
+                m = re.search(r"(\d+)$", tbl)
+                if m:
+                    num = max(num, int(m.group(1)))
+            num += 1
+            self.conn.execute(
+                "INSERT INTO custom_columns"
+                "(id,label,name,datatype,is_multiple,editable,display,normalized)"
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    num,
+                    label,
+                    name,
+                    datatype,
+                    int(is_multiple),
+                    int(editable),
+                    json.dumps(display),
+                    int(normalized),
+                ),
+            )
+            table, lt = f"custom_column_{num}", f"books_custom_column_{num}_link"
+            dt = self._CUSTOM_DDL_TYPES[datatype]
+            collate = "COLLATE NOCASE" if dt == "TEXT" else ""
+            # One statement per execute(): executescript() would COMMIT
+            # the open batch transaction (Python's legacy transaction
+            # control), breaking the pass's atomicity.
+            stmts: list[str] = []
+            if normalized:
+                extra = "extra REAL," if datatype == "series" else ""
+                stmts.append(f"""
+                    CREATE TABLE {table}(
+                        id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                        value {dt} NOT NULL {collate},
+                        link TEXT NOT NULL DEFAULT "",
+                        UNIQUE(value));""")
+                stmts.append(f"CREATE INDEX {table}_idx ON {table} (value {collate});")
+                stmts.append(f"""
+                    CREATE TABLE {lt}(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        book INTEGER NOT NULL,
+                        value INTEGER NOT NULL,
+                        {extra}
+                        UNIQUE(book, value));""")
+                stmts.append(f"CREATE INDEX {lt}_aidx ON {lt} (value);")
+                stmts.append(f"CREATE INDEX {lt}_bidx ON {lt} (book);")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_update_{lt}_a
+                            BEFORE UPDATE OF book ON {lt}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from books WHERE id=NEW.book) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+                                END;
+                            END;""")
+                # Upstream writes `BEFORE UPDATE OF author` here -- a column
+                # this link table does not have -- so that guard can never
+                # fire; the value column is what is actually being guarded.
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_update_{lt}_b
+                            BEFORE UPDATE OF value ON {lt}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from {table} WHERE id=NEW.value) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: value not in {table}')
+                                END;
+                            END;""")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_insert_{lt}
+                            BEFORE INSERT ON {lt}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from books WHERE id=NEW.book) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+                                    WHEN (SELECT id from {table} WHERE id=NEW.value) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: value not in {table}')
+                                END;
+                            END;""")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_delete_{lt}
+                            AFTER DELETE ON {table}
+                            BEGIN
+                                DELETE FROM {lt} WHERE value=OLD.id;
+                            END;""")
+                stmts.append(f"""
+                    CREATE VIEW tag_browser_{table} AS SELECT
+                        id,
+                        value,
+                        (SELECT COUNT(id) FROM {lt} WHERE value={table}.id) count,
+                        (SELECT AVG(r.rating)
+                         FROM {lt},
+                              books_ratings_link as bl,
+                              ratings as r
+                         WHERE {lt}.value={table}.id and bl.book={lt}.book and
+                               r.id = bl.rating and r.rating <> 0) avg_rating,
+                        value AS sort
+                    FROM {table};""")
+                stmts.append(f"""
+                    CREATE VIEW tag_browser_filtered_{table} AS SELECT
+                        id,
+                        value,
+                        (SELECT COUNT({lt}.id) FROM {lt} WHERE value={table}.id AND
+                        books_list_filter(book)) count,
+                        (SELECT AVG(r.rating)
+                         FROM {lt},
+                              books_ratings_link as bl,
+                              ratings as r
+                         WHERE {lt}.value={table}.id AND bl.book={lt}.book AND
+                               r.id = bl.rating and r.rating <> 0 AND
+                               books_list_filter(bl.book)) avg_rating,
+                        value AS sort
+                    FROM {table};""")
+            else:
+                stmts.append(f"""
+                    CREATE TABLE {table}(
+                        id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                        book  INTEGER,
+                        value {dt} NOT NULL {collate},
+                        UNIQUE(book));""")
+                stmts.append(f"CREATE INDEX {table}_idx ON {table} (book);")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_insert_{table}
+                            BEFORE INSERT ON {table}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from books WHERE id=NEW.book) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+                                END;
+                            END;""")
+                stmts.append(f"""
+                    CREATE TRIGGER fkc_update_{table}
+                            BEFORE UPDATE OF book ON {table}
+                            BEGIN
+                                SELECT CASE
+                                    WHEN (SELECT id from books WHERE id=NEW.book) IS NULL
+                                    THEN RAISE(ABORT, 'Foreign key violation: book not in books')
+                                END;
+                            END;""")
+            for statement in stmts:
+                self.conn.execute(statement)
+            # Upstream sets this pref so the next Calibre start refreshes
+            # every book's last_modified (new column = new metadata shape).
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("update_all_last_mod_dates_on_start", "true"),
+            )
+        return num
+
+    def delete_custom_column(self, label: str) -> bool:
+        """Flag a custom column for deletion (returns True when flagged).
+
+        Upstream's ``delete_custom_column`` does NOT drop the storage: it
+        sets ``mark_for_delete=1`` on the ``custom_columns`` row, and the
+        physical purge (value tables, link tables, the row itself) happens
+        at Calibre's next startup. cquarry keeps that contract -- nothing
+        is dropped here -- and, faithful to the reader, the flagged column
+        stays listed and functional until Calibre's purge. Raises
+        ValueError for an unknown label, and on schemas predating the
+        ``mark_for_delete`` column (deletion needs a modern schema).
+        """
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(custom_columns)")}
+        if "mark_for_delete" not in cols:
+            # Checked first: resolving the column on such a schema would
+            # fail confusingly on its missing modern columns anyway.
+            raise ValueError(
+                "The custom_columns table predates mark_for_delete; "
+                "column deletion needs a modern schema"
+            )
+        row = self._custom_column_meta(label)
+        self._begin()
+        try:
+            self.conn.execute(
+                "UPDATE custom_columns SET mark_for_delete = 1 WHERE id = ?",
+                (row["id"],),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def set_custom_column_metadata(
+        self,
+        label: str,
+        *,
+        name: str | None = None,
+        editable: bool | None = None,
+        display: dict[str, Any] | None = None,
+    ) -> bool:
+        """Modify an existing custom column's name, editable flag, or
+        display JSON (upstream ``set_custom_column_metadata``,
+        backend.py:1407). Returns True when stored state changed.
+
+        This is the verb that populates an enumeration's value list without
+        Calibre open: ``display={"enum_values": ["A", "B"]}`` and
+        :meth:`set_custom_column` accepts those values from here on. The
+        display dict REPLACES the stored payload wholesale, exactly like
+        upstream; ``None`` leaves a field untouched, and an honest no-op
+        (all-None or equal values) returns False without touching the
+        database.
+
+        There is deliberately no datatype parameter: a column's type is
+        baked into its storage layout, and changing it would strand every
+        stored value, so type changes are refused by omission (schema
+        compatibility is a hard rule; Calibre's own UI refuses them too).
+        Label changes are not offered either: the label IS the ``#label``
+        search token, and upstream pairs a rename with its notes system,
+        which this library does not read.
+
+        A change also sets Calibre's
+        ``update_all_last_mod_dates_on_start`` preference, exactly like
+        upstream's wrapper, so the next Calibre start refreshes every book's
+        ``last_modified`` for the new metadata shape. Column metadata is not
+        book state, so nothing is queued in ``metadata_dirtied``.
+        """
+        meta = self._custom_column_meta(label)
+        if name is None and editable is None and display is None:
+            return False
+        updates: dict[str, Any] = {}
+        if name is not None:
+            clean = name.strip()
+            if not clean:
+                raise ValueError("Custom column name must not be empty")
+            if clean != meta["name"]:
+                updates["name"] = clean
+        if editable is not None:
+            flag = 1 if editable else 0
+            if flag != int(bool(meta["editable"])):
+                updates["editable"] = flag
+        if display is not None:
+            if not isinstance(display, dict):
+                raise TypeError(
+                    "display must be a dict (the decoded display payload), "
+                    f"got {type(display).__name__}"
+                )
+            if display != meta["display"]:
+                updates["display"] = json.dumps(display)
+        if not updates:
+            return False
+        self._begin()
+        try:
+            sets = ", ".join(f"{column} = ?" for column in updates)
+            self.conn.execute(
+                f"UPDATE custom_columns SET {sets} WHERE id = ?",
+                (*updates.values(), meta["id"]),
+            )
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("update_all_last_mod_dates_on_start", "true"),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    # -- Typed preferences (1.24; the Phase 15 ring, the 2026-09-29
+    # automation-set reversal) --
+
+    # The GUI-state rows cquarry reads and now writes: search-grammar state
+    # the ecosystem composes from. Anything else stays out: the preferences
+    # table is full of GUI internals a stdlib writer has no business
+    # guessing at.
+    _TYPED_PREFERENCE_KEYS = frozenset(
+        {
+            "saved_searches",
+            "virtual_libraries",
+            "user_categories",
+            "grouped_search_terms",
+            "fts_enabled",
+        }
+    )
+
+    def _validate_preference(self, key: str, value: Any) -> str:
+        """Type-check one writable preference payload; returns the JSON."""
+        if key == "fts_enabled":
+            if not isinstance(value, bool):
+                raise ValueError("fts_enabled takes a bool")
+        elif key in ("saved_searches", "virtual_libraries"):
+            if not isinstance(value, dict):
+                raise ValueError(f"{key} is a dict of name -> search expression")
+            for name, expr in value.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError(f"{key}: every name must be a non-empty string")
+                if not isinstance(expr, str) or not expr.strip():
+                    raise ValueError(
+                        f"{key}: {name!r} needs a non-empty search expression"
+                    )
+        elif key == "grouped_search_terms":
+            if not isinstance(value, dict):
+                raise ValueError("grouped_search_terms is a dict of name -> locations")
+            for name, members in value.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError("grouped_search_terms: names must be non-empty")
+                if (
+                    not isinstance(members, list)
+                    or not members
+                    or not all(isinstance(m, str) and m.strip() for m in members)
+                ):
+                    raise ValueError(
+                        f"grouped_search_terms: {name!r} needs a non-empty list "
+                        "of member locations"
+                    )
+        elif key == "user_categories":
+            if not isinstance(value, dict):
+                raise ValueError("user_categories is a dict of name -> member lists")
+            for name, members in value.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError("user_categories: names must be non-empty")
+                if not isinstance(members, list):
+                    raise TypeError(
+                        f"user_categories: {name!r} needs a list of members"
+                    )
+                for member in members:
+                    if (
+                        not isinstance(member, (list, tuple))
+                        or len(member) < 2
+                        or not str(member[0]).strip()
+                    ):
+                        raise ValueError(
+                            f"user_categories: {name!r} has a malformed member "
+                            "(each is [value, location, ...])"
+                        )
+        else:
+            raise ValueError(
+                f"{key!r} is not a writable preference. Writable: "
+                + ", ".join(sorted(self._TYPED_PREFERENCE_KEYS))
+            )
+        return json.dumps(value)
+
+    def set_preference(self, key: str, value: Any) -> bool:
+        """Typed upsert of one search-grammar preference row (1.24).
+
+        The keys are the GUI-state rows cquarry already reads and the
+        ecosystem composes from: ``saved_searches`` (name -> expression),
+        ``virtual_libraries`` (name -> expression), ``user_categories``
+        (name -> ``[value, location, ...]`` member lists),
+        ``grouped_search_terms`` (name -> member locations), and
+        ``fts_enabled`` (bool; Calibre builds the sidecar and drains the
+        queue on its next start). Each payload is validated by key BEFORE
+        anything is written -- a typo'd dict must not become GUI-visible
+        state -- and the whole payload is stored as one JSON row, exactly
+        the shape Calibre reads. Returns True when the stored JSON changed;
+        the callers that mutate one entry inside a map are
+        :meth:`saved_search_add` / :meth:`saved_search_delete` /
+        :meth:`saved_search_rename`.
+        """
+        if key not in self._TYPED_PREFERENCE_KEYS:
+            raise ValueError(
+                f"{key!r} is not a writable preference. Writable: "
+                + ", ".join(sorted(self._TYPED_PREFERENCE_KEYS))
+            )
+        payload = self._validate_preference(key, value)
+        self._begin()
+        try:
+            row = self.conn.execute(
+                "SELECT val FROM preferences WHERE key = ?", (key,)
+            ).fetchone()
+            if row is not None and row["val"] == payload:
+                self._rollback()
+                return False
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                (key, payload),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def _read_pref_map(self, key: str) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT val FROM preferences WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None or not isinstance(row["val"], str) or not row["val"].strip():
+            return {}
+        try:
+            decoded = json.loads(row["val"])
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    def saved_search_add(self, name: str, expression: str) -> bool:
+        """Add (or replace) one saved search. Returns True when changed.
+
+        The calibredb ``saved_searches`` parity verb over the typed
+        preference writer: an upsert on the name, the expression stored
+        stripped like upstream. An identical re-add is an honest False."""
+        name = (name or "").strip()
+        expression = (expression or "").strip()
+        if not name:
+            raise ValueError("Saved search name must not be empty")
+        if not expression:
+            raise ValueError("Saved search expression must not be empty")
+        self._begin()
+        try:
+            searches = self._read_pref_map("saved_searches")
+            if searches.get(name) == expression:
+                self._rollback()
+                return False
+            searches[name] = expression
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("saved_searches", json.dumps(searches)),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def saved_search_delete(self, name: str) -> bool:
+        """Delete one saved search by its stored spelling. Returns True
+        when a row was removed; an unknown name is an honest False
+        (upstream's exact-key pop, not a case-folding lookup)."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Saved search name must not be empty")
+        self._begin()
+        try:
+            searches = self._read_pref_map("saved_searches")
+            if name not in searches:
+                self._rollback()
+                return False
+            del searches[name]
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("saved_searches", json.dumps(searches)),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def saved_search_rename(self, old_name: str, new_name: str) -> bool:
+        """Rename one saved search, keeping its expression. Returns True
+        when changed.
+
+        The old name resolves against the stored spellings first exactly,
+        then case-insensitively (the house entity-resolution rule).
+        Renaming onto another EXISTING saved search raises instead of
+        upstream's silent overwrite -- losing a saved search to a typo'd
+        rename is not recoverable here. An equal-spelling rename is an
+        honest False."""
+        old_name = (old_name or "").strip()
+        new_name = (new_name or "").strip()
+        if not old_name or not new_name:
+            raise ValueError("Saved search names must not be empty")
+        self._begin()
+        try:
+            searches = self._read_pref_map("saved_searches")
+            if old_name in searches:
+                stored = old_name
+            else:
+                stored = next(
+                    (n for n in searches if n.lower() == old_name.lower()),
+                    None,
+                )
+                if stored is None:
+                    raise ValueError(f"No saved search named {old_name!r}")
+            if stored == new_name:
+                self._rollback()
+                return False
+            if new_name in searches:
+                raise ValueError(
+                    f"A saved search named {new_name!r} already exists; "
+                    "renaming would overwrite it (upstream does overwrite; "
+                    "this deliberately refuses)"
+                )
+            searches[new_name] = searches.pop(stored)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("saved_searches", json.dumps(searches)),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
     # -- Book lifecycle --
 
     # Upstream's library-local trash directory (constants.py TRASH_DIR_NAME);
@@ -2074,6 +4648,10 @@ class WritableCalibreDB:
             ]
         except sqlite3.OperationalError:
             formats = []  # schema predates the data table
+        # No formats means no renames, but keep the ORIGINAL_ prefix budget
+        # (len("ORIGINAL_") = 9, +1 for the dot) so the stem width matches a
+        # book that has formats; _construct_file_name's own floor (14) rules
+        # either way today.
         extlen = max((len(f) for f in formats), default=9) + 1
         new_stem = _construct_file_name(title, first_author, extlen)
         try:
@@ -2100,10 +4678,20 @@ class WritableCalibreDB:
                 (new_stem, book_id, fmt),
             )
         op = (book_id, old_rel, new_rel, renames, new_stem)
-        if self._batch_depth:
-            self._pending_relayouts.append(op)
-        else:
-            self._apply_relayout(op)
+        # Always queued: the fs half lands only after the rows COMMIT.
+        # Inside a batch that is the outermost exit's flush; a bare setter
+        # flushes right after its own commit (a failed commit then leaves
+        # rows and files in agreement: both old).
+        self._pending_relayouts.append(op)
+
+    def _flush_pending_fs_ops(self) -> None:
+        """Run the file placements/removals deferred by set_cover,
+        remove_cover, and the original-format verbs, only after the outermost
+        COMMIT: a rollback that resurrected old rows must not leave new cover
+        or format files on disk, so the queued ops are dropped instead."""
+        for op in self._pending_fs_ops:
+            op()
+        self._pending_fs_ops.clear()
 
     def _flush_pending_relayouts(self) -> None:
         """Perform path re-lays deferred by setters inside a batch.
@@ -2173,6 +4761,11 @@ class WritableCalibreDB:
         self._pending_removals.clear()
 
     def _remove_book_dir(self, book_id: int, book_dir: str, mode: str) -> None:
+        if not os.path.isdir(book_dir):
+            # Idempotent: a retried flush (an earlier pass's flush failure
+            # leaves its queue populated) must not move or rmtree a
+            # directory that is already gone.
+            return
         if mode == "trash":
             trash_b = os.path.join(
                 os.path.dirname(self.db_path), self._TRASH_DIR_NAME, "b"
@@ -2197,8 +4790,10 @@ class WritableCalibreDB:
         annotations, comments, conversion options and plugin data when the
         books row goes. What the trigger does NOT cover is cleaned here:
         custom-column rows (both storage patterns, every column), the dirtied
-        queues, and now-orphaned entity rows (pruned AFTER the cascade so the
-        fkc_delete_on_* guards pass). Irreversible - callers own confirmation.
+        queues (metadata, annotations, and the FTS sidecar's
+        ``dirtied_formats`` when the sidecar exists), and now-orphaned entity
+        rows (pruned AFTER the cascade so the fkc_delete_on_* guards pass).
+        Irreversible - callers own confirmation.
 
         ``delete_files`` extends the removal to the book's on-disk directory
         (``Author/Title (id)/``), matching upstream's remove flow:
@@ -2214,6 +4809,9 @@ class WritableCalibreDB:
                 f"delete_files must be None, 'permanent', or 'trash', "
                 f"got {delete_files!r}"
             )
+        # ATTACH must precede the transaction (see _ensure_fts_attached):
+        # the dirtied_formats clears below join it.
+        self._ensure_fts_attached()
         self._begin()
         try:
             self._require_book(book_id)
@@ -2221,9 +4819,22 @@ class WritableCalibreDB:
             # path) must exist to resolve it, and the fs step only runs
             # after a commit anyway.
             book_dir = self._book_dir_path(book_id) if delete_files else None
+            # The book's formats, captured before the cascade drops the data
+            # rows: each format's FTS queue entry must not outlive the book.
+            book_fmts: list[str] = []
+            with contextlib.suppress(sqlite3.OperationalError):
+                book_fmts = [
+                    r[0]
+                    for r in self.conn.execute(
+                        "SELECT DISTINCT format FROM data WHERE book = ?",
+                        (book_id,),
+                    ).fetchall()
+                    if r[0]
+                ]
             # Custom columns: both patterns, for every defined column.
+            # int() before the f-string table names (corrupt-store defense).
             col_ids = [
-                r[0]
+                int(r[0])
                 for r in self.conn.execute("SELECT id FROM custom_columns").fetchall()
             ]
             for cid in col_ids:
@@ -2252,6 +4863,11 @@ class WritableCalibreDB:
                 with contextlib.suppress(sqlite3.OperationalError):
                     # schema predating the queue skips the delete
                     self.conn.execute(f"DELETE FROM {queue} WHERE book = ?", (book_id,))
+            # The FTS sidecar's queue too (the attach above preceded this
+            # transaction, so the clears run; a missing sidecar degrades
+            # to a no-op inside _clear_fts_dirty).
+            for fmt in book_fmts:
+                self._clear_fts_dirty(book_id, fmt)
             # The cascade trigger does the rest.
             self.conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
             # Orphan pruning AFTER the cascade: links are gone, so the

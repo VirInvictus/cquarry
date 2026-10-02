@@ -1,22 +1,32 @@
 <div align="center">
-  <img src="logo.svg" width="96" height="96" alt="cquarry logo"/>
+  <img src="https://raw.githubusercontent.com/VirInvictus/cquarry/main/logo.svg" width="96" height="96" alt="cquarry logo"/>
   <h1>cquarry</h1>
   <p>Canonical Calibre database layer and search grammar engine for Calibre libraries.</p>
+  <p><a href="https://pypi.org/project/cquarry/"><img alt="PyPI" src="https://img.shields.io/pypi/v/cquarry"></a>
+     <a href="https://pypi.org/project/cquarry/"><img alt="Python" src="https://img.shields.io/pypi/pyversions/cquarry"></a>
+     <a href="https://github.com/VirInvictus/cquarry/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/VirInvictus/cquarry/actions/workflows/ci.yml/badge.svg"></a>
+     <a href="https://github.com/VirInvictus/cquarry/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/pypi/l/cquarry"></a>
+     <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-zero-39ace0"></p>
 </div>
 
-This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry) (CLI/TUI), [Hermitage](https://github.com/VirInvictus/Hermitage) (GTK4 gallery), [Carrel-calibre-web](https://github.com/VirInvictus/Carrel-calibre-web) (web reader), and [Bindery](https://github.com/VirInvictus/Bindery) (EPUB repair & audit). By centralizing the search grammar parser and metadata access, cquarry evaluates virtual library definitions and search queries consistently across frontends.
+This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry) (CLI/TUI), [Hermitage](https://github.com/VirInvictus/Hermitage) (GTK4 gallery), [Carrel-calibre-web](https://github.com/VirInvictus/Carrel-calibre-web) (web reader), and [bindery-cli](https://github.com/VirInvictus/bindery-cli) (EPUB repair & audit). By centralizing the search grammar parser and metadata access, cquarry evaluates virtual library definitions and search queries consistently across frontends.
 
 ## Features
 
 - **Direct SQLite access.** No `calibredb` binary required, no Calibre Python initialization overhead.
-- **Coherence on demand.** Caches are lazy and cheap, and `CalibreDB.refresh()` clears them all in one call, so a connection held open across an external Calibre write never contradicts itself.
-- **Lock-safe snapshots.** Automatically detects if Calibre holds an exclusive write lock on `metadata.db` and routes queries through a temporary WAL-consistent copy.
+- **Coherence on demand.** Caches are lazy and cheap, and `CalibreDB.refresh()` clears them all in one call, so a connection held open across an external Calibre write never contradicts itself. One boundary: when the connection rides a locked-database snapshot copy, the snapshot is not retaken; reopen for truly current data.
+- **Lock-safe snapshots.** Automatically detects if Calibre holds an exclusive write lock on `metadata.db` and routes queries through a temporary consistent snapshot (sqlite's backup API; `backup_to()` gives the same consistency to consumer backups). `external_changes_detected()` tells a long-lived holder when its caches have gone stale.
 - **Full search grammar parity.** A recursive-descent parser implementing Calibre's native search capabilities: boolean logic, field prefixes, date math (hyphen *and* slash separators), hierarchical tags with `.`/`..` component modifiers on every text field, custom columns, identifiers, saved-search interpolation (`search:"Name"`), multi-valued count operators (`tags:#>3`), language canonicalization (`languages:English` → `eng`), and nested virtual library cross-references. Adversarial grammar-valid queries surface as `ParseException`, never a raw `RecursionError`; an empty query after any location matches nothing; invalid boolean keywords raise; two-letter language codes canonicalize (`languages:ja` matches `jpn`); super-quotes `"""..."""` shield quote- and paren-heavy queries from the lexer; and the vocabulary is upstream-strict (dates and numerics take exactly `true`/`false` as presence words), all verified against upstream.
 - **Native page counts.** The `pages:` location reads Calibre's own `books_pages_link` table first (maintained by upstream's CountPages integration) and falls back to an int custom column labelled `pages`; counts also ride along in every book row.
 - **Entity secondary columns & display config.** Book rows carry `author_sorts`/`author_links` parallel to `authors`; `get_entities(kind)` exposes `{id, name, sort, link, count}` for authors/series/publishers/tags/languages; custom columns report `editable`, `normalized` and their decoded `display` JSON (`enum_values`, `enum_colors`, …); and a typed preferences accessor covers everything else (`get_preference`, `get_field_metadata`, `get_user_categories`, `get_tag_browser_state`).
 - **Metadata portability.** Read e-reader annotations, per-device reading progress, third-party plugin data, and conversion profiles; sanitize comments HTML for display.
 - **Book-content search.** Calibre's `full-text-search.db` sidecar is a sanctioned read: `get_book_text()` returns a format's extracted plain text, `search_book_text()` runs a folded content search over it, and `get_text_extractions()` feeds integrity audits (`find_failed_text_extraction` reports the formats whose extraction failed: scans, DRM, corrupt files). No FTS5 machinery required.
-- **Opt-in write path.** `cquarry.write.WritableCalibreDB` offers trigger-safe mutations in a separate module the read-only API can never touch: title, authors (with `author_sort` recomputation), series (+index), publisher, rating (UNIQUE-deduped, with `clear_rating`), languages (canonicalized to ISO codes), tags (`add`/`remove`/`clear_tags` for all at once), identifiers, comments, generic custom-column writes (layout auto-detected, enumerations validated against `display.enum_values`, non-editable columns refused, plus `add_custom_column_values` append semantics for multi-valued columns), format registration/removal, `has_cover`, full book removal with orphan pruning, and the creation path (`add_book`: Calibre-parity row insert with trigger-filled sort/uuid, `Author/Title (id)` layout, atomic format/cover placement with truthful `data` rows, dry-run plan, copy-only); every mutation queued in `metadata_dirtied` for OPF resync. Renames keep the on-disk layout truthful (`update_title`/`set_authors` move the book directory and rename format files to the new stems), format writes keep Calibre's FTS index and page counts honest (re-extraction queued in the sidecar, pages rescans flagged), and `add_book` creates books complete with trigger-filled sort/uuid, atomic format/cover placement, and a dry-run plan.
+- **Opt-in write path.** `cquarry.write.WritableCalibreDB` offers trigger-safe mutations in a separate module the read-only API can never touch:
+  - **Field setters.** Title, authors (with `author_sort` recomputation), series (+index), publisher, rating (UNIQUE-deduped, with `clear_rating`), languages (canonicalized to ISO codes), tags (`add`/`remove`/`clear_tags` for all at once), identifiers, comments, and `has_cover`.
+  - **Custom columns.** Generic writes with storage layout auto-detected, enumerations validated against `display.enum_values`, non-editable columns refused, plus `add_custom_column_values` append semantics for multi-valued columns; schema management (`create_custom_column`/`delete_custom_column`, flag-only delete like upstream).
+  - **Books and formats.** The creation path (`add_book`: trigger-filled sort/uuid, `Author/Title (id)` layout, atomic format/cover placement with truthful `data` rows, a dry-run plan, copy-only), format registration/replacement/removal, full book removal with orphan pruning, and undo-able format repair (`save_original_format`/`restore_original_format`).
+  - **Whole-library verbs.** Entity-wide renames (`rename_entity` fixes a misspelled author everywhere, merging case variants), verbatim sort corrections, cover replacement (`set_cover`/`remove_cover`), and trash management (`list_trash`/`empty_trash`/`expire_trash`).
+  - **Calibre stays truthful.** Every row-level mutation queues OPF resync in `metadata_dirtied`; renames re-lay the on-disk layout (the book directory and format stems move with the rows); format writes queue FTS re-extraction and pages rescans in the sidecar.
 - **Context manager.** `CalibreDB` supports `with` statements for automatic cleanup of snapshot files.
 - **Zero dependencies.** Pure Python 3.14+ stdlib (`sqlite3`, `re`, `json`, `unicodedata`).
 
@@ -96,12 +106,12 @@ The full per-method reference lives in [API.md](API.md). One line per module:
 
 | Module | What it is |
 |--------|------------|
-| `cquarry.db` | The read-only database layer (`CalibreDB`): hydrated rows, single-entity fetches, format/cover path resolution, custom columns, preferences, annotations and progress extractors, VL/saved-search resolution, and the composed `get_book_dossier()` deep fetch. |
+| `cquarry.db` | The read-only database layer (`CalibreDB`): hydrated rows, single-entity fetches, format/cover resolution, custom columns, preferences, annotations and progress extractors, VL/saved-search resolution, the restricted tag browser (`get_categories`), and the composed `get_book_dossier()` deep fetch. |
 | `cquarry.search` | The lexer/parser/evaluator porting Calibre's search grammar; usable standalone behind the `MetadataProvider` protocol. |
-| `cquarry.helpers` | Domain utilities: rating conversion, comment sanitization, author display, series gaps, image dimension sniffing, the ISBN family (`isbn_normalize`, `isbn_check_digit_is_valid`, `to_isbn13`), and `tag_rollup`. |
-| `cquarry.integrity` | The shared library-integrity predicates: untagged, unrated, authorless, formatless, coverless, missing cover files, deprecated formats, low-res covers, duplicates, failed text extractions, series gaps. |
+| `cquarry.helpers` | Domain utilities: rating conversion, comment sanitization, author display (including the unpiped-author and identifier-link helpers), series gaps, image dimension sniffing, the ISBN family (`isbn_normalize`, `isbn_check_digit_is_valid`, `to_isbn13`), and `tag_rollup`. |
+| `cquarry.integrity` | The shared library-integrity predicates: untagged, unrated, authorless, formatless, coverless, missing cover files, deprecated formats, low-res covers, duplicates, failed text extractions, series gaps, plus the metadata-quality trio (invalid UUIDs, sentinel pubdates, bad language codes) and the extra-side disk walk (`check_library_disk`). |
 | `cquarry.analytics` | Shared derivations: addition timeline, per-author stats, rating distribution, genre distribution (hierarchical tag shares), virtual library (wing) overlap. |
-| `cquarry.write` | The opt-in mutation path (`WritableCalibreDB`): trigger-safe setters, `batch()` transactions, `remove_book`, and the `add_book` creation path. Every mutation queues OPF resync. |
+| `cquarry.write` | The opt-in mutation path (`WritableCalibreDB`): trigger-safe setters, `batch()` transactions, `remove_book` and the restore-from-trash family, the `add_book` creation path, typed preference writes (saved searches, virtual libraries, user categories), and the FTS queue/maintenance verbs. Every row mutation queues OPF resync. |
 | `cquarry.config` | Saved database-path configuration (`~/.config/cquarry/config.json`). |
 
 ## Development
@@ -113,7 +123,7 @@ python -m pytest tests/ -v        # verbose
 
 Run with `PYTHONPATH=src` to exercise this checkout rather than any installed copy.
 
-Six test modules: `test_db.py` (CalibreDB against fixture databases), `test_helpers.py` (utility functions), `test_search.py` (parser, matcher, and integration tests), `test_write.py` (opt-in write module with trigger-hazard fixtures), `test_integrity.py` (library integrity predicates), and `test_analytics.py` (analytics derivations).
+Nine test modules: `test_db.py` (CalibreDB against fixture databases), `test_helpers.py` (utility functions), `test_search.py` (parser, matcher, and integration tests), `test_write.py` (opt-in write module with trigger-hazard fixtures), `test_integrity.py` (library integrity predicates), `test_analytics.py` (analytics derivations), `test_config.py`, `test_coverage_fills.py`, and `test_version_sync.py` (the eight-carrier version guard).
 
 See [spec.md](spec.md) for the full contract and [roadmap.md](roadmap.md) for planned work.
 
@@ -121,7 +131,7 @@ See [spec.md](spec.md) for the full contract and [roadmap.md](roadmap.md) for pl
 
 [Carrel-calibre-web](https://github.com/VirInvictus/Carrel-calibre-web) is a fork of
 [calibre-web](https://github.com/janeczku/calibre-web) that uses cquarry as its search and
-virtual-library engine. Features proven there flow back into cquarry's roadmap (see Phase 7);
+virtual-library engine. Features proven there flow back into cquarry (the data-layer extraction closed with the fork on 2026-09-04);
 calibre-web's original authors deserve the credit for the web experience that fork builds on.
 
 ## Support

@@ -5,14 +5,30 @@ on:
     tags:
       - "v-disabled-*"  # compat branch: never publishes (PyPI stays 3.14-only)
 
+# The publish job escalates to id-token: write for OIDC; everything else
+# stays read-only, and the create-release job scopes its contents: write to
+# minting the Release from the tag's verbatim message.
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
+
+      - name: Lint (the same gates CI runs on main)
+        run: |
+          pip install ruff==0.16.8
+          ruff check .
+          ruff format --check .
 
       - name: Run test suite
         run: |
@@ -29,16 +45,52 @@ jobs:
       id-token: write # Required for OIDC authentication with PyPI
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
 
       - name: Install build
-        run: python -m pip install --upgrade build
+        run: python -m pip install --upgrade build twine
 
       - name: Build sdist and wheel
         run: python -m build
 
+      - name: Check the distribution metadata
+        run: twine check --strict dist/*
+
+      - name: Smoke-install the wheel
+        run: |
+          python -m venv .smoke
+          .smoke/bin/pip install dist/*.whl
+          .smoke/bin/python -c "import cquarry; print('smoke ok')"
+
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  create-release:
+    name: Create the GitHub Release from the tag
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # --notes-from-tag reads the tag's local git object, so this job needs
+      # the clone (and --repo is rejected alongside --notes-from-tag).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Mint the Release from the tag's verbatim message
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Idempotent: a tag pushed twice (followTags riding a branch push
+        # plus an explicit tag push) fires two runs, and the second's create
+        # would 422 "tag_name already exists" against the first's Release.
+        # The tag message is immutable, so an existing Release already has
+        # the verbatim body this step exists to publish.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json id --jq .id; then
+            echo "Release for $GITHUB_REF_NAME already exists; nothing to mint."
+          else
+            gh release create "$GITHUB_REF_NAME" --notes-from-tag --verify-tag
+          fi

@@ -1,13 +1,33 @@
+"""The read-only Calibre database layer.
+
+:class:`CalibreDB` is the primary public interface: it opens Calibre's
+``metadata.db`` strictly read-only (``?mode=ro``, with a lock-escape snapshot
+copy when Calibre holds the lock), hydrates book rows over a 6-JOIN cache,
+and implements the :class:`cquarry.search.MetadataProvider` protocol so the
+search engine evaluates against it directly. This module owns the read-only
+contract: it never writes to the database, and the only sanctioned mutation
+path lives in the separate, opt-in :mod:`cquarry.write` module (never
+imported from here).
+
+Everything the module surfaces rides the lazy caches initialized in
+:meth:`CalibreDB._init_caches` (``refresh()`` clears them all); reads degrade
+to empty results rather than errors on schemas that predate a table.
+"""
+
 import contextlib
 import functools
+import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any, Self
 
 from cquarry.helpers import (
@@ -25,12 +45,53 @@ from cquarry.search import (
     DT_RATING,
     DT_TEXT,
     DT_TEXT_MULTI,
+    ParseException,
     SearchEngine,
     _fold,
 )
 
 # Sentinel distinguishing "cache not populated" from a cached None result.
 _UNSET = object()
+
+
+def _snapshot_copy(src_path: str, tmp: str, leash: float = 10.0) -> None:
+    """Snapshot a live database into ``tmp`` through sqlite3's backup API.
+
+    The backup API takes one consistent page image (WAL content folded
+    in), where the earlier hand-rolled main+``-wal``+``-shm`` copy2 could
+    tear when Calibre checkpointed mid-copy -- the same defect shape Wave
+    14 flagged in CalibreQuarry's own backup. Python's backup retries a
+    busy source forever, so the copy runs on a leash: a writer holding the
+    lock past ``leash`` seconds trips the fallback to the raw file trio,
+    trading the tear risk back for that pathological case rather than
+    hanging the reader.
+    """
+    deadline = time.monotonic() + leash
+
+    def _leash(_status: int, _remaining: int, _total: int) -> None:
+        # Invoked per backup step, busy steps included; raising is how a
+        # caller aborts Python's internal busy-retry loop.
+        if time.monotonic() > deadline:
+            raise TimeoutError("snapshot backup leash tripped")
+
+    src = sqlite3.connect(db_uri_ro(src_path), uri=True)
+    dst = sqlite3.connect(tmp)
+    consistent = False
+    try:
+        try:
+            src.backup(dst, progress=_leash)
+            consistent = True
+        except (TimeoutError, sqlite3.Error):
+            pass  # leashed or failed: the fallback below takes over
+    finally:
+        dst.close()
+        src.close()
+    if not consistent:
+        shutil.copy2(src_path, tmp)
+        for suffix in ("-wal", "-shm"):
+            side = src_path + suffix
+            if os.path.exists(side):
+                shutil.copy2(side, tmp + suffix)
 
 
 _DUPLICATE_ARTICLE_RE = re.compile(r"^(the|a|an)\s+", re.IGNORECASE)
@@ -92,6 +153,11 @@ class CalibreDB:
     engine can resolve expressions against this library.
     """
 
+    #: Seconds a held write lock may delay the lock-escape snapshot before
+    #: it degrades to the raw file copy (see :func:`_snapshot_copy`). Class
+    #: attribute so embedders and tests can tune it.
+    SNAPSHOT_LEASH = 10.0
+
     def __init__(self, db_path: str):
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Database not found: {db_path}")
@@ -105,8 +171,10 @@ class CalibreDB:
     def _init_caches(self) -> None:
         """(Re)initialize every lazy cache; __init__ and refresh() share it."""
         self._vl_cache: dict[str, str] | None = None
+        self._vl_for_books_cache: dict[int, tuple[str, ...]] | None = None
         self._books_cache: list[dict[str, Any]] | None = None
         self._all_ids_cache: set[int] | None = None
+        self._all_formats_cache: dict[int, list[str]] | None = None
 
         # Search-engine state (lazily built).
         self._search_engine: SearchEngine | None = None
@@ -122,6 +190,8 @@ class CalibreDB:
         self._prefs_cache: dict[str, Any] | None = None
         self._cc_schema_cache: dict[str, bool] | None = None
         self._annotations_text_cache: dict[int, str] | None = None
+        # PRAGMA data_version at last observation (external_changes_detected).
+        self._data_version: int | None = None
         # FTS sidecar (full-text-search.db) connection state; refresh()
         # drops it so sidecar reads re-open against current data.
         self._fts_conn: sqlite3.Connection | None = None
@@ -138,6 +208,11 @@ class CalibreDB:
         ``search`` from another. One ``refresh()`` call clears everything,
         the built search engine and the FTS-sidecar connection included; the
         next read repopulates from current database state.
+
+        One boundary: when the connection itself rides a locked-database
+        snapshot copy (see ``_open``), the snapshot is NOT retaken -- the
+        next read still answers from the copy taken at open time. Reopen
+        the ``CalibreDB`` for truly current data in that situation.
         """
         if self._fts_conn is not None:
             self._fts_conn.close()
@@ -160,7 +235,8 @@ class CalibreDB:
             conn.close()
             if "locked" not in str(e).lower():
                 raise
-        # Calibre has the DB locked — copy to a temp file and read from there
+        # Calibre has the DB locked — snapshot through the backup API and
+        # read from the copy.
         print(
             "NOTE: Database is locked (Calibre is running). "
             "Reading from a snapshot copy.",
@@ -168,12 +244,7 @@ class CalibreDB:
         )
         fd, tmp = tempfile.mkstemp(suffix=".db", prefix="cquarry_")
         os.close(fd)
-        shutil.copy2(db_path, tmp)
-        # Also copy the WAL and SHM files if they exist so the snapshot is consistent
-        for suffix in ("-wal", "-shm"):
-            src = db_path + suffix
-            if os.path.exists(src):
-                shutil.copy2(src, tmp + suffix)
+        _snapshot_copy(db_path, tmp, self.SNAPSHOT_LEASH)
         self._tmp_path = tmp
         return sqlite3.connect(db_uri_ro(tmp), uri=True)
 
@@ -192,6 +263,52 @@ class CalibreDB:
                 for suffix in ("", "-wal", "-shm"):
                     os.unlink(self._fts_tmp_path + suffix)
             self._fts_tmp_path = None
+
+    def backup_to(self, dest: str) -> str:
+        """Copy the library's ``metadata.db`` to ``dest`` as one consistent
+        snapshot, via sqlite3's backup API (1.23).
+
+        A plain file copy of main+``-wal``+``-shm`` can tear when Calibre
+        checkpointed mid-copy; the backup API cannot. ``dest`` is created
+        (an existing file is replaced wholesale) and returned as the
+        absolute path. When this connection rides a locked-database
+        snapshot copy, the snapshot is what gets copied -- reopen for a
+        copy of the live file. Consumers backing up a library
+        (CalibreQuarry's ``--backup`` shape) belong here instead of
+        re-deriving the copy.
+        """
+        dest = os.path.abspath(os.path.expanduser(dest))
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        dst = sqlite3.connect(dest)
+        try:
+            self.conn.backup(dst)
+        finally:
+            dst.close()
+        return dest
+
+    def external_changes_detected(self) -> bool:
+        """True when another connection has committed writes to this
+        database file since this connection last looked (1.23), via
+        ``PRAGMA data_version``.
+
+        The cheap staleness token: long-lived holders (Hermitage, Carrel)
+        poll this between user actions and call :meth:`refresh()` only when
+        it answers True, instead of clearing every cache defensively. The
+        answer stays True until a :meth:`refresh()` re-primes the baseline,
+        so a polling loop cannot miss a change by reading twice. This
+        connection's own reads never move the value; on a locked-database
+        snapshot connection it can never answer True at all (the copy is
+        isolated from the live file), which is exactly the reopen boundary
+        :meth:`refresh` documents.
+        """
+        row = self.conn.execute("PRAGMA data_version").fetchone()
+        version = row[0]
+        if self._data_version is None:
+            self._data_version = version  # first observation primes only
+            return False
+        return version != self._data_version
 
     def __enter__(self) -> Self:
         return self
@@ -480,6 +597,24 @@ class CalibreDB:
             b["comments"] = self.field(book_id, "comments")
         return b
 
+    def get_book_by_uuid(self, uuid: str) -> dict[str, Any] | None:
+        """Fetch one hydrated book by its per-book ``uuid`` (1.24).
+
+        The Calibre-Companion endpoint dependency (upstream
+        ``lookup_by_uuid``): mobile clients cache libraries by book uuid and
+        come back asking for the row. Matching is case-insensitive (uuids
+        are stored lowercase, but hand-built rows may not be); an unknown
+        uuid is None, never an error. The row is the standard
+        :meth:`get_book` shape."""
+        if not uuid or not str(uuid).strip():
+            return None
+        row = self.conn.execute(
+            "SELECT id FROM books WHERE uuid = ? COLLATE NOCASE", (str(uuid).strip(),)
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_book(row["id"])
+
     def get_comments(self, book_id: int | None = None) -> dict[int, str]:
         """Raw comments HTML keyed by book id.
 
@@ -507,6 +642,261 @@ class CalibreDB:
         """Search with Calibre grammar and return the hydrated matching books."""
         ids = self.search(query)
         return [b for b in self.get_all_books() if b["id"] in ids]
+
+    # The default facet set: the browse-bar fields a result set is narrowed
+    # by. Custom columns join by explicit "#label" location.
+    _FACET_LOCATIONS = (
+        "authors",
+        "tags",
+        "series",
+        "publisher",
+        "languages",
+        "formats",
+        "rating",
+    )
+
+    def facet_counts(
+        self, query: str, *, locations: Sequence[str] | None = None
+    ) -> dict[str, list[tuple[Any, int]]]:
+        """Browse facets over a restricted search result (1.24).
+
+        Per-value counts of every field the RESULT SET carries: search
+        first, then count, so the facets answer "what is in here" and not
+        "what is in the library" (the distinction
+        :meth:`get_tag_browser_counts` cannot make; its views are
+        whole-library). The default facet set is the browse-bar fields
+        (:data:`_FACET_LOCATIONS`); custom columns join by explicit
+        ``#label`` location, values exactly as :meth:`field` yields them
+        (ratings in stars). Returns ``{location: [(value, count), ...]}``
+        per location, count-descending then value-ascending; empty and
+        None values produce no facet entry. Unknown locations raise
+        ValueError. The restriction plumbing is
+        :meth:`facet_counts_for_ids`, which this composes with
+        :meth:`search`.
+        """
+        return self.facet_counts_for_ids(self.search(query), locations=locations)
+
+    def facet_counts_for_ids(
+        self, ids: set[int] | None, locations: Sequence[str] | None = None
+    ) -> dict[str, list[tuple[Any, int]]]:
+        """Per-value counts over a caller-restricted book-id set (1.24).
+
+        The Phase 18 seam: any id set works (a search result, a virtual
+        library, a hand-picked shelf); ``None`` means the whole library.
+        See :meth:`facet_counts` for the counting rules.
+        """
+        if locations is None:
+            locations = self._FACET_LOCATIONS
+        custom_labels = self._custom_by_label()
+        for location in locations:
+            if location in self._FACET_LOCATIONS:
+                continue
+            if location.startswith("#") and location[1:].lower() in custom_labels:
+                continue
+            raise ValueError(
+                f"Unknown facet location {location!r}. Builtins: "
+                + ", ".join(self._FACET_LOCATIONS)
+                + "; custom columns by #label"
+            )
+        wanted = ids
+        out: dict[str, list[tuple[Any, int]]] = {}
+        for location in locations:
+            counts: dict[Any, int] = {}
+            for b in self.get_all_books():
+                if wanted is not None and b["id"] not in wanted:
+                    continue
+                if location.startswith("#"):
+                    value: Any = self._custom_value(b["id"], location)
+                elif location == "rating":
+                    # Stars, exactly as the engine's field() yields them;
+                    # the hydrated row stores the internal 0-10 value.
+                    value = calibre_rating_to_stars(b.get("rating"))
+                else:
+                    value = b.get(location)
+                if value is None or value == "":
+                    continue
+                values = value if isinstance(value, (list, tuple)) else [value]
+                for one in values:
+                    if one is None or (isinstance(one, str) and not one.strip()):
+                        continue
+                    counts[one] = counts.get(one, 0) + 1
+            out[location] = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        return out
+
+    def _date_field_values(
+        self, field: str, ids: Sequence[int] | None
+    ) -> dict[int, Any]:
+        """Per-book raw date values for ``books_by_year``/``books_by_month``.
+
+        ``field`` is a builtin date location (``pubdate``, ``timestamp``,
+        ``last_modified``) or a date-typed custom column by ``#label``, bare
+        label, or display name; anything else raises ValueError. Custom
+        columns read through :meth:`load_custom_column` (cached like every
+        read); builtin fields off the hydrated rows.
+        """
+        if field in ("pubdate", "timestamp", "last_modified"):
+            rows = self.get_all_books()
+            values = {b["id"]: b[field] for b in rows}
+        else:
+            col = self.find_custom_column(field)
+            if col is None:
+                raise ValueError(f"Unknown date field: {field!r}")
+            if col["datatype"] != "datetime":
+                raise ValueError(
+                    f"{field!r} is a {col['datatype']} column, not a date field"
+                )
+            values = self.load_custom_column(col["name"])
+        if ids is not None:
+            wanted = set(ids)
+            values = {k: v for k, v in values.items() if k in wanted}
+        return values
+
+    @staticmethod
+    def _date_bucket(value: Any, width: int) -> tuple[int, ...] | None:
+        """(year[, month]) integers from a stored date, None when undated.
+
+        Accepts the stored ISO text (``YYYY-MM-DD ...``, the schema's shape)
+        and real ``datetime`` objects. The 0101/0100 undefined-date sentinels
+        and blank values land here as None -- cquarry treats them as no-date
+        everywhere (the search engine's rule), and hunting them is
+        :func:`cquarry.integrity.find_sentinel_pubdates`' job, not a bucket's.
+        """
+        if isinstance(value, datetime):
+            return (value.year, value.month)[:width]
+        if not isinstance(value, str) or not value.strip():
+            return None
+        head = value.strip()[: width * 3 + 1]  # 'YYYY' or 'YYYY-MM'
+        parts = head.split("-")
+        if len(parts) < width:
+            return None
+        try:
+            bucket = tuple(int(p) for p in parts[:width])
+        except ValueError:
+            return None
+        if bucket[0] in (100, 101):  # the undefined-date sentinels
+            return None
+        return bucket
+
+    def books_by_year(
+        self, field: str = "pubdate", ids: Sequence[int] | None = None
+    ) -> dict[int, set[int]]:
+        """Books bucketed by year over any date field (upstream
+        ``Cache.books_by_year``): ``{year: {book_ids}}``.
+
+        ``field`` is a builtin date location or a date-typed custom column
+        (see :meth:`_date_field_values`); ``ids`` restricts the books
+        counted (the browse-over-a-search-result shape). Books with no
+        value -- including the 0101/0100 sentinel dates -- appear nowhere.
+        Years key as plain ints, ascending order not guaranteed (dict over
+        insertion; sort keys before display).
+        """
+        out: dict[int, set[int]] = {}
+        for book_id, value in self._date_field_values(field, ids).items():
+            bucket = self._date_bucket(value, 1)
+            if bucket is not None:
+                out.setdefault(bucket[0], set()).add(book_id)
+        return out
+
+    def books_by_month(
+        self, field: str = "pubdate", ids: Sequence[int] | None = None
+    ) -> dict[tuple[int, int], set[int]]:
+        """Books bucketed by (year, month) over any date field (upstream
+        ``Cache.books_by_month``): ``{(year, month): {book_ids}}``.
+
+        Same contract as :meth:`books_by_year`, one level finer; the key is
+        the ``(year, month)`` tuple.
+        """
+        out: dict[tuple[int, int], set[int]] = {}
+        for book_id, value in self._date_field_values(field, ids).items():
+            bucket = self._date_bucket(value, 2)
+            if bucket is not None:
+                out.setdefault(bucket, set()).add(book_id)
+        return out
+
+    def get_next_series_num_for(
+        self, series: str, field: str = "series", current_indices: bool = False
+    ) -> float | dict[int, float]:
+        """The preference-aware next series number (upstream
+        ``Cache.get_next_series_num_for``): what Calibre's own "next in
+        series" would assign to a new book in ``series``.
+
+        ``field`` is the builtin ``series`` location (default) or a
+        series-typed custom column by ``#label``, bare label, or display
+        name. The behavior follows the ``series_index_auto_increment``
+        setting: a number is returned verbatim (and also for a series with
+        no books), ``"next"`` is the highest index plus one,
+        ``"first_free"``/``"next_free"``/``"last_free"`` fill the
+        smallest/lowest-anchored/largest-anchored gap, and an unknown value
+        degrades to 1.0 (upstream's fallback). One boundary named: upstream
+        reads this from its tweaks files (``default_tweaks.py`` plus the
+        user's ``tweaks.py``), which are process-side state metadata.db
+        never carries -- this reads the library's ``preferences`` table
+        instead (a consumer can write the row there) and falls back to
+        upstream's shipped default ``"next"``; a local tweaks.py override is
+        invisible to any database-side reader. Indices are compared as
+        floats; ``current_indices=True`` returns the members'
+        ``{book_id: index}`` map instead of the next number.
+        """
+        pref = self.get_preference("series_index_auto_increment", "next")
+
+        def _next_from(indices: list[float]) -> float:
+            if isinstance(pref, (int, float)) and not isinstance(pref, bool):
+                return float(pref)
+            ordered = sorted(indices, key=lambda s: s or 0)
+            if not ordered:
+                return 1.0
+            if pref == "next":
+                return float(math.floor(ordered[-1])) + 1
+            if pref == "first_free":
+                return float(next(i for i in range(1, 10000) if i not in ordered))
+            if pref == "next_free":
+                return float(
+                    next(
+                        i
+                        for i in range(math.ceil(ordered[0]), 10000)
+                        if i not in ordered
+                    )
+                )
+            if pref == "last_free":
+                for i in range(math.ceil(ordered[-1]), 0, -1):
+                    if i not in ordered:
+                        return float(i)
+                return float(ordered[-1]) + 1
+            return 1.0
+
+        if field == "series":
+            index_map = {
+                b["id"]: b["series_index"]
+                for b in self.get_all_books()
+                if b["series"]
+                and b["series"].lower() == (series or "").lower()
+                and isinstance(b["series_index"], (int, float))
+            }
+        else:
+            col = self.find_custom_column(field)
+            if col is None:
+                raise ValueError(f"Unknown series field: {field!r}")
+            if col["datatype"] != "series":
+                raise ValueError(
+                    f"{field!r} is a {col['datatype']} column, not a series field"
+                )
+            name = col["name"]
+            values = self.load_custom_column(name)
+            token = "#" + col["label"]
+            if token not in self._custom_val_cache:
+                self._custom_val_cache[token] = values
+            index_map = {
+                book_id: extra
+                for book_id, extra in self._custom_val_cache.get(
+                    token + "_index", {}
+                ).items()
+                if values.get(book_id)
+                and values[book_id].lower() == (series or "").lower()
+                and isinstance(extra, (int, float))
+            }
+        if current_indices:
+            return index_map
+        return _next_from(list(index_map.values()))
 
     def get_format_path(self, book_id: int, fmt: str, verify: bool = True) -> str:
         """Resolve the absolute filesystem path of a book's format file.
@@ -610,6 +1000,277 @@ class CalibreDB:
         if os.path.exists(png):
             return png
         return None
+
+    def get_cover_bytes(self, book_id: int) -> bytes | None:
+        """A book's raw cover image bytes (``cover.jpg``, falling back to
+        ``cover.png``), or None when no cover file exists on disk.
+
+        The bytes half of :meth:`get_cover_path` (upstream ``Cache.cover()``,
+        the bytestring mode web frontends serve and thumbnailers consume);
+        resolution and the unknown-book ValueError are exactly
+        :meth:`get_cover_path`'s. The catalogued ``has_cover`` flag is not
+        consulted: the file's presence is the answer, so a catalogued-but-
+        missing cover reads as None the same way the verified path read does.
+        """
+        path = self.get_cover_path(book_id)
+        if path is None:
+            return None
+        with open(path, "rb") as f:
+            return f.read()
+
+    def get_cover_last_modified(self, book_id: int) -> datetime | None:
+        """The cover file's mtime as a UTC datetime, or None without a file.
+
+        The conditional-GET half (upstream ``cover_last_modified``): a web
+        frontend compares this against its cached copy's timestamp instead of
+        re-serving bytes that have not changed. Resolution follows
+        :meth:`get_cover_path`; the datetime is timezone-aware UTC (upstream
+        surfaces a naive UTC stamp).
+        """
+        path = self.get_cover_path(book_id)
+        if path is None:
+            return None
+        return datetime.fromtimestamp(os.stat(path).st_mtime, tz=UTC)
+
+    def format_hash(self, book_id: int, fmt: str) -> str:
+        """A format file's SHA-256 hex digest (upstream ``Cache.format_hash``).
+
+        This is the file-changed detector: the FTS sidecar's
+        ``format_hash``/``text_hash`` columns are compared against it to
+        decide whether Calibre's extracted text is stale, and frontends use
+        it the same way to detect on-disk edits. Resolution rides
+        :meth:`get_format_path` (verified against disk), so its errors are
+        this API's: ``ValueError`` for an unknown book or format,
+        ``FileNotFoundError`` when the catalogued file is absent.
+        """
+        path = self.get_format_path(book_id, fmt)
+        sha = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                sha.update(chunk)
+        return sha.hexdigest()
+
+    def format_metadata(self, book_id: int, fmt: str) -> dict[str, Any]:
+        """A format file's on-disk facts (upstream ``Cache.format_metadata``):
+        ``{"path", "size", "mtime"}``.
+
+        ``path`` is the verified resolution (:meth:`get_format_path`'s
+        errors apply), ``size`` the file's real byte count -- which can
+        drift from the catalogued ``uncompressed_size`` until Calibre
+        rescans -- and ``mtime`` a timezone-aware UTC ``datetime``. Empty
+        dict is never returned: an unresolvable pair raises.
+        """
+        path = self.get_format_path(book_id, fmt)
+        st = os.stat(path)
+        return {
+            "path": path,
+            "size": st.st_size,
+            "mtime": datetime.fromtimestamp(st.st_mtime, tz=UTC),
+        }
+
+    def read_backup(self, book_id: int) -> bytes | None:
+        """Calibre's stored sidecar ``metadata.opf`` for a book, as bytes.
+
+        Upstream ``Cache.read_backup``: the backup Calibre's own thread
+        writes after every metadata change, readable so a caller can diff
+        Calibre's last write against the rows (a sync auditor's ground
+        truth). This READS what Calibre wrote and never generates an OPF;
+        the generation family stays declined. None when the book has no
+        directory or no backup file yet (upstream's missing-file answer);
+        ``ValueError`` for an unknown book, like every path-riding read.
+        """
+        cur = self.conn.cursor()
+        brow = cur.execute("SELECT path FROM books WHERE id = ?", (book_id,)).fetchone()
+        if brow is None:
+            raise ValueError(f"Book {book_id} not found")
+        if not brow["path"]:
+            return None  # nowhere to look, the empty-path rule
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(self.db_path)),
+            brow["path"],
+            "metadata.opf",
+        )
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def get_size_stats(self) -> dict[str, int]:
+        """The library's file sizes in bytes (upstream ``Cache.size_stats``):
+        ``{"main", "fts", "notes"}``.
+
+        ``main`` is metadata.db itself, ``fts`` the full-text-search.db
+        sidecar (0 when absent), ``notes`` always 0 here -- the notes DB is
+        a recorded decline (``.calnotes/`` is never read), kept in the shape
+        so consumers can render the same three columns.
+        """
+        main_size = 0
+        with contextlib.suppress(OSError):
+            main_size = os.path.getsize(self.db_path)
+        fts_size = 0
+        fts_path = os.path.join(
+            os.path.dirname(os.path.abspath(self.db_path)), "full-text-search.db"
+        )
+        with contextlib.suppress(OSError):
+            fts_size = os.path.getsize(fts_path)
+        return {"main": main_size, "fts": fts_size, "notes": 0}
+
+    def is_fts_enabled(self) -> bool:
+        """Whether Calibre's FTS indexing is switched on for this library
+        (upstream ``Cache.is_fts_enabled``, database-side).
+
+        Reads the ``fts_enabled`` preference (upstream's default False);
+        the in-process extraction-pool state the property form answers is
+        GUI/process state metadata.db cannot carry. The sidecar's presence
+        is a separate question: the sidecar reads degrade to empty when
+        ``full-text-search.db`` is missing regardless of this flag.
+        """
+        return bool(self.get_preference("fts_enabled", False))
+
+    def get_all_link_maps_for_book(self, book_id: int) -> dict[str, dict[str, str]]:
+        """All of one book's entity links in one map (upstream
+        ``Cache.get_all_link_maps_for_book``):
+        ``{field: {value: link_url}}``.
+
+        Builtin fields first -- authors, publisher, series, tags, the four
+        upstream maps -- then every custom column that carries a link for
+        this book through cquarry's ``custom_column_links`` seam, keyed by
+        ``#label``. Empty fields are omitted, so an unlinked book answers
+        ``{}``; unknown books answer ``{}`` too (upstream's ``_has_id``
+        rule). Schemas whose entity tables predate the ``link`` column
+        degrade field by field.
+        """
+        out: dict[str, dict[str, str]] = {}
+        for field, etable, ltable, fk in (
+            ("authors", "authors", "books_authors_link", "author"),
+            ("publisher", "publishers", "books_publishers_link", "publisher"),
+            ("series", "series", "books_series_link", "series"),
+            ("tags", "tags", "books_tags_link", "tag"),
+        ):
+            try:
+                rows = self.conn.execute(
+                    f"SELECT e.name AS name, e.link AS link FROM {ltable} l "
+                    f"JOIN {etable} e ON e.id = l.{fk} WHERE l.book = ?",
+                    (book_id,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue  # table or link column predates this schema
+            links = {r["name"]: r["link"] for r in rows if r["link"]}
+            if links:
+                out[field] = links
+        for col in self.get_custom_columns().values():
+            # custom_column_links fills as a side effect of load_custom_column:
+            # load first, then look the book's url up.
+            value = self.load_custom_column(col["name"]).get(book_id)
+            url = self.custom_column_links(col["name"]).get(book_id)
+            if not url:
+                continue
+            names = value if isinstance(value, (list, tuple)) else [value]
+            out["#" + col["label"]] = {str(v): url for v in names if v is not None}
+        return out
+
+    def list_data_files(self, book_id: int) -> list[dict[str, Any]]:
+        """Every file under the book's ``data/`` directory (upstream's
+        extra-files family, the ``DATA_FILE_PATTERN`` half the content
+        server serves): ``[{relpath, path, size, mtime}]``.
+
+        ``relpath`` is the forward-slash path under ``data/`` (the portable
+        spelling every other verb takes); ``path`` the absolute location;
+        ``size``/``mtime`` from ``os.stat``. Calibre's own book-directory
+        residents (formats, covers, ``metadata.opf``) live outside ``data/``
+        and never appear here. Sorted by ``relpath``; empty list when the
+        book has no ``data/`` directory; ``ValueError`` for unknown books.
+        """
+        data_dir = self._book_data_dir(book_id)
+        if data_dir is None:
+            return []
+        out: list[dict[str, Any]] = []
+        for dirpath, _dirnames, filenames in os.walk(data_dir):
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                relpath = os.path.relpath(path, data_dir).replace(os.sep, "/")
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                out.append(
+                    {
+                        "relpath": relpath,
+                        "path": path,
+                        "size": st.st_size,
+                        "mtime": st.st_mtime,
+                    }
+                )
+        out.sort(key=lambda entry: entry["relpath"])
+        return out
+
+    def get_data_file(self, book_id: int, relpath: str) -> bytes | None:
+        """One extra file's bytes from the book's ``data/`` directory, or
+        None when absent.
+
+        ``relpath`` is the forward-slash path under ``data/``; traversal
+        guards reject absolute spellings and any ``..`` component (a
+        ``ValueError``, not a read outside the book). The bytes sibling of
+        :meth:`read_backup`, for the files upstream's content server
+        serves under ``data/``.
+        """
+        path = self._resolve_data_file(book_id, relpath)
+        if path is None:
+            return None
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def _book_data_dir(self, book_id: int) -> str | None:
+        """The book's ``data/`` directory, or None when the book/dir is absent."""
+        cur = self.conn.cursor()
+        brow = cur.execute("SELECT path FROM books WHERE id = ?", (book_id,)).fetchone()
+        if brow is None:
+            raise ValueError(f"Book {book_id} not found")
+        if not brow["path"]:
+            return None
+        book_dir = os.path.join(
+            os.path.dirname(os.path.abspath(self.db_path)), brow["path"]
+        )
+        data_dir = os.path.join(book_dir, "data")
+        return data_dir if os.path.isdir(data_dir) else None
+
+    @staticmethod
+    def _safe_data_relpath(relpath: str) -> list[str] | None:
+        """Split a ``data/`` relpath into components, None when unsafe.
+
+        Absolute spellings, empty components, ``.``, and ``..`` all refuse:
+        the guard both the read and the write side share.
+        """
+        if not isinstance(relpath, str) or not relpath.strip():
+            return None
+        normalized = relpath.replace("\\", "/")
+        if normalized.startswith("/"):
+            return None
+        parts = list(normalized.split("/"))
+        if any(p in ("", ".", "..") for p in parts):
+            return None
+        return parts
+
+    def _resolve_data_file(self, book_id: int, relpath: str) -> str | None:
+        """Resolve one data-file relpath to an absolute path, safely.
+
+        None when the book has no data dir or the file does not exist;
+        ``ValueError`` for an unsafe relpath (the guard both sides share).
+        """
+        parts = self._safe_data_relpath(relpath)
+        if parts is None:
+            raise ValueError(f"Unsafe data-file path: {relpath!r}")
+        data_dir = self._book_data_dir(book_id)
+        if data_dir is None:
+            return None
+        path = os.path.join(data_dir, *parts)
+        if not os.path.isfile(path):
+            return None
+        return path
 
     def format_path_index(self) -> dict[str, int]:
         """Map every catalogued format file path to its book id.
@@ -806,6 +1467,7 @@ class CalibreDB:
         }
 
     def get_all_tags(self) -> list[str]:
+        """Every distinct tag name, sorted alphabetically."""
         cur = self.conn.cursor()
         cur.execute("SELECT DISTINCT name FROM tags ORDER BY name")
         return [row["name"] for row in cur.fetchall()]
@@ -822,6 +1484,59 @@ class CalibreDB:
         """)
         return [(row["name"], row["count"]) for row in cur.fetchall()]
 
+    def tag_rollup_ids(
+        self, ids: Sequence[int] | None = None
+    ) -> dict[str, frozenset[int]]:
+        """The id-set sibling of :func:`cquarry.helpers.tag_rollup` (1.25):
+        ``{tag_path: frozenset(book_ids)}`` for every node including implied
+        ones.
+
+        Only leaf tags may be assigned in a library; intermediate dot-path
+        levels are implied by the name, so every prefix of every tag becomes
+        a browsable node and accumulates its descendants' books -- the same
+        rule the engine applies for ``tags:Fic.Fantasy``, so a browser built
+        on these sets agrees with search by construction. Counts come from
+        ``len()`` of each set, which is where the counts-only
+        :func:`helpers.tag_rollup` lands when fed ``get_tag_counts()``.
+        ``ids`` restricts the books counted (the browse-over-a-subset shape;
+        None means the whole library). Promoted from Carrel's private
+        ``_rollup`` with that waiver: the private copy stays until a
+        consumer wave.
+        """
+        out: dict[str, set[int]] = {}
+        for b in self.get_all_books():
+            if ids is not None and b["id"] not in ids:
+                continue
+            for tag in b["tags"] or []:
+                parts = [p for p in str(tag).split(".") if p]
+                for i in range(1, len(parts) + 1):
+                    out.setdefault(".".join(parts[:i]), set()).add(b["id"])
+        return {k: frozenset(v) for k, v in out.items()}
+
+    def precedent_tags(self, authors: list[str], limit: int = 12) -> list[str]:
+        """Tag-by-precedent: distinct tags across the named authors' books.
+
+        The curation prompt's suggestion source (a fresh import carries no
+        tags; the same author's catalogued books do). Authors match
+        case-insensitively; the result is capped at ``limit`` names,
+        alphabetically ordered for stability. Promoted from
+        CalibreQuarry's run.py (1.22): a four-table JOIN is an engine
+        read, not frontend logic.
+        """
+        if not authors:
+            return []
+        marks = ",".join("?" * len(authors))
+        rows = self.conn.execute(
+            f"SELECT DISTINCT t.name FROM books_tags_link l "
+            f"JOIN tags t ON t.id = l.tag "
+            f"JOIN books_authors_link al ON al.book = l.book "
+            f"JOIN authors a ON a.id = al.author "
+            f"WHERE a.name COLLATE NOCASE IN ({marks}) "
+            f"ORDER BY t.name LIMIT ?",
+            (*authors, limit),
+        ).fetchall()
+        return [row[0] for row in rows]
+
     _LIST_BOOKS_SORT_KEYS = (
         "sort",
         "title",
@@ -832,6 +1547,7 @@ class CalibreDB:
         "author_sort",
         "series",
         "id",
+        "ids",
     )
 
     # Public API key -> hydrated-row field, where the two differ.
@@ -853,14 +1569,20 @@ class CalibreDB:
         it. Pure over get_all_books()'s cache — no SQL of its own.
 
         ``ids`` restricts the listing (None = whole library; the listing's
-        order comes from ``sort``, never from the id order). ``sort`` is one
-        key or a sequence of keys (primary first, one direction for all —
-        author sort tie-breaks on series name then series index); each is
-        one of ``sort`` (Calibre's title-sort), ``title``, ``timestamp``,
-        ``pubdate``, ``rating``, ``series_index``, ``author_sort``,
-        ``series``, ``id``; None values sort last regardless of direction.
-        ``offset``/``limit`` slice after sorting; ``limit=None`` runs to the
-        end. Unknown keys raise ValueError.
+        order comes from ``sort``). ``sort`` is one key or a sequence of
+        keys (primary first, one direction for all — author sort tie-breaks
+        on series name then series index); each is one of ``sort``
+        (Calibre's title-sort), ``title``, ``timestamp``, ``pubdate``,
+        ``rating``, ``series_index``, ``author_sort``, ``series``, ``id``;
+        None values sort last regardless of direction. The special key
+        ``ids`` (since 1.21.0, requires ``ids``) replaces the sort instead
+        of naming one: the rows come back in the caller's id sequence, so
+        a frontend that carries its own ordering (relevance rank, shelf
+        order, download counts) keeps it; a duplicated id keeps its first
+        slot, ids absent from the library are skipped, ``descending``
+        reverses the sequence, and ``offset``/``limit`` slice after the
+        ordering (``limit=None`` runs to the end). Unknown keys raise
+        ValueError.
         """
         keys = (sort,) if isinstance(sort, str) else tuple(sort)
         if not keys:
@@ -875,6 +1597,20 @@ class CalibreDB:
             raise ValueError("offset must be >= 0")
         if limit is not None and limit < 0:
             raise ValueError("limit must be >= 0")
+
+        end = offset + limit if limit is not None else None
+        if "ids" in keys:
+            if len(keys) > 1:
+                raise ValueError("sort='ids' must stand alone")
+            if ids is None:
+                raise ValueError("sort='ids' requires ids (the caller's id order)")
+            rank: dict[int, int] = {}
+            for n, bid in enumerate(ids):
+                if bid not in rank:  # a duplicated id keeps its first slot
+                    rank[bid] = n
+            rows = [r for r in self.get_all_books() if r["id"] in rank]
+            rows.sort(key=lambda r: rank[r["id"]], reverse=descending)
+            return rows[offset:end]
 
         wanted = set(ids) if ids is not None else None
         rows = [r for r in self.get_all_books() if wanted is None or r["id"] in wanted]
@@ -918,7 +1654,6 @@ class CalibreDB:
 
         rows.sort(key=functools.cmp_to_key(_cmp))
 
-        end = offset + limit if limit is not None else None
         return rows[offset:end]
 
     def get_all_series(self) -> list[dict[str, Any]]:
@@ -1022,6 +1757,20 @@ class CalibreDB:
             out[rec["name"]] = rec
         return out
 
+    def get_all_formats(self) -> dict[int, list[str]]:
+        """Every book's format list in one map: ``{book_id: [FMT, ...]}`` (1.24).
+
+        The bulk shape of :meth:`get_formats`'s keys (Carrel's residue trio):
+        a web frontend rendering a whole shelf of format badges takes one
+        cache pass instead of one call per book. Values are the same native
+        uppercase lists the hydrated rows carry; the map is cached like
+        them (a long-lived holder's ``refresh()`` covers it)."""
+        if self._all_formats_cache is None:
+            self._all_formats_cache = {
+                b["id"]: list(b["formats"]) for b in self.get_all_books()
+            }
+        return self._all_formats_cache
+
     def get_entities(self, kind: str) -> list[dict[str, Any]]:
         """Entity rows with secondary columns and book counts.
 
@@ -1071,6 +1820,45 @@ class CalibreDB:
             return []
         return [dict(row) for row in rows]
 
+    def get_entity_book_ids(self, kind: str, name: str) -> set[int]:
+        """The book ids carrying one entity value: the id-set half of
+        :meth:`get_entities` (1.24, Carrel's residue trio).
+
+        ``kind`` is one of ``authors``, ``series``, ``publishers``,
+        ``tags``, ``languages`` (the named entities; ratings have no name
+        to resolve, a rating slice is ``search("rating:...")`'s job).
+        Names match case-insensitively and exactly. Tags are the engine's
+        anchored rule (see spec §3.2): ``Foo`` resolves Foo AND its
+        ``Foo.*`` subtree, so a browse tree node's id set covers its
+        children -- the shape Carrel's category pages build privately
+        today. Pure over the cached rows; unknown names are an empty set,
+        like the search engine's unknown-location rule."""
+        named = {"authors", "series", "publishers", "tags", "languages"}
+        kind = (kind or "").strip().lower()
+        if kind not in named:
+            raise ValueError(
+                f"Unknown entity kind {kind!r}. Available: {', '.join(sorted(named))}"
+            )
+        name = (name or "").strip()
+        if not name:
+            return set()
+        low = name.lower()
+        out: set[int] = set()
+        for b in self.get_all_books():
+            # authors/tags/languages are native lists; series/publisher are
+            # scalar strings on the hydrated rows.
+            values = b.get(kind) or []
+            if isinstance(values, str):
+                values = [values]
+            if kind == "tags":
+                if any(
+                    v.lower() == low or v.lower().startswith(low + ".") for v in values
+                ):
+                    out.add(b["id"])
+            elif any(v.lower() == low for v in values):
+                out.add(b["id"])
+        return out
+
     def find_custom_column(self, key: str) -> dict[str, Any] | None:
         """One custom-columns record by ``#label``, bare label, or display name.
 
@@ -1103,8 +1891,15 @@ class CalibreDB:
                 f"Custom column '{col_name}' not found. Available (name → #label): "
                 + ", ".join(f"{c['name']} (#{c['label']})" for c in cols.values())
             )
+        if col["datatype"] == "composite":
+            # The documented answer instead of a stderr warning from a
+            # failed value-table probe: composite columns are computed by
+            # Calibre's template engine and have no storage to read.
+            return {}
 
-        cid = col["id"]
+        # int() before any f-string SQL: a corrupt store's TEXT id must hit
+        # the table names as a number, never as raw SQL text.
+        cid = int(col["id"])
         cur = self.conn.cursor()
 
         # Calibre normalizes text/enumeration/series columns into a value table
@@ -1155,6 +1950,12 @@ class CalibreDB:
                         index_map[row["book"]] = row["extra"]
                     if row["clink"]:
                         link_map[row["book"]] = row["clink"]
+                # Every normalized column's link map is stashed, not just
+                # series: custom_column_links() promises text/enumeration/
+                # series/rating, and the value-table `link` column exists on
+                # all of them (the stash used to be series-only, answering
+                # empty for the other three).
+                self._custom_link_cache["#" + col["label"]] = link_map
                 if col["datatype"] == "series":
                     # Serve the registered-but-previously-unresolvable
                     # `#label_index` float location. An exact label that
@@ -1164,7 +1965,6 @@ class CalibreDB:
                     token = "#" + col["label"] + "_index"
                     if token not in self._custom_by_label():
                         self._custom_val_cache[token] = index_map
-                    self._custom_link_cache["#" + col["label"]] = link_map
                 if col["is_multiple"]:
                     # Native lists, never a comma-joined string: a stored
                     # value like "Doe, John" is ONE value, and re-splitting
@@ -1265,7 +2065,40 @@ class CalibreDB:
             out["order"] = {str(name): i for i, name in enumerate(order)}
         return out
 
+    def ordered_virtual_library_names(
+        self, *, include_hidden: bool = False
+    ) -> list[str]:
+        """Virtual library names in Calibre's own sidebar order.
+
+        The promoted helper (1.25; near-identical copies lived in Carrel's
+        wings resolver and Hermitage's sidebar): the stored tab position
+        from :meth:`get_vl_ui_state` orders first, unknown names follow
+        alphabetically, and a position that will not parse as a float ranks
+        with the unknowns rather than crashing the sort (both consumers'
+        defensive branch, now in one place). Libraries hidden in the GUI
+        are dropped unless ``include_hidden`` is set.
+        """
+        ui = self.get_vl_ui_state()
+        hidden = {str(h).lower() for h in ui.get("hidden", [])}
+        order = ui.get("order") or {}
+
+        def _sort_key(name: str) -> tuple[int, float, str]:
+            for key, pos in order.items():
+                if str(key).lower() == name.lower():
+                    try:
+                        return (0, float(pos), name.lower())
+                    except (TypeError, ValueError):
+                        break
+            return (1, 0.0, name.lower())
+
+        names = self.get_virtual_libraries()
+        return sorted(
+            (n for n in names if include_hidden or n.lower() not in hidden),
+            key=_sort_key,
+        )
+
     def count_books(self) -> int:
+        """Total book count; the caches when populated, else a COUNT(*)."""
         if self._all_ids_cache is not None:
             return len(self._all_ids_cache)
         if self._books_cache is not None:
@@ -1311,7 +2144,13 @@ class CalibreDB:
         return out
 
     def get_last_read_positions(
-        self, book_id: int | None = None
+        self,
+        book_id: int | None = None,
+        *,
+        fmt: str | None = None,
+        user: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Map reading progress per device from ``last_read_positions``.
 
@@ -1319,20 +2158,39 @@ class CalibreDB:
         ``epoch`` (unix seconds — sort key for "most recent") and
         ``pos_frac`` (0.0-1.0 progress fraction). Columns follow Calibre's
         real schema exactly (there is no ``user_type`` and the time column is
-        ``epoch``, not ``epoch_time``).
+        ``epoch``, not ``epoch_time``). The 1.25 filters mirror upstream's:
+        ``fmt``/``user`` narrow the rows (format case-insensitive),
+        ``order_by`` accepts ``"pos_frac"`` or ``"epoch"`` (descending, the
+        most-progressed / most-recent first) and ``limit`` caps the count
+        -- the "where was I in THIS book" read. Rows default to
+        ``ORDER BY book, device``.
         """
         cur = self.conn.cursor()
         sql = (
             "SELECT id, book, format, user, device, cfi, epoch, pos_frac "
             "FROM last_read_positions"
         )
-        params: tuple = ()
+        conds: list[str] = []
+        params: list[Any] = []
         if book_id is not None:
-            sql += " WHERE book = ?"
-            params = (book_id,)
-        sql += " ORDER BY book, device"
+            conds.append("book = ?")
+            params.append(book_id)
+        if fmt:
+            conds.append("format = ?")
+            params.append(fmt.upper())
+        if user:
+            conds.append("user = ?")
+            params.append(user)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        if order_by in ("pos_frac", "epoch"):
+            sql += f" ORDER BY {order_by} DESC"
+        else:
+            sql += " ORDER BY book, device"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
         try:
-            cur.execute(sql, params)
+            cur.execute(sql, tuple(params))
         except sqlite3.OperationalError:
             return []
         return [dict(row) for row in cur.fetchall()]
@@ -1425,6 +2283,29 @@ class CalibreDB:
             return []
         return [row["book"] for row in cur.fetchall()]
 
+    def get_dirtied_formats(self) -> list[tuple[int, str]]:
+        """The FTS sidecar's extraction queue: ``(book_id, format)`` pairs.
+
+        The formats sibling of :meth:`get_dirtied_books` (1.24): every pair
+        the sidecar's ``dirtied_formats`` table holds for (re-)extraction and
+        a pages rescan -- Calibre's extraction pool consumes it at startup
+        and while running. Formats come back uppercase as stored; the list
+        is sorted by book then format. Read-only observation: Calibre clears
+        an entry when its extraction commits, and cquarry's own format verbs
+        manage the pairs they are responsible for. Empty list when the
+        sidecar is absent, unreadable, or predates the table.
+        """
+        conn = self._fts_connect()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT book, format FROM dirtied_formats ORDER BY book, format"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []  # sidecar lost its table mid-session: degrade
+        return [(row["book"], (row["format"] or "").upper()) for row in rows]
+
     def get_feeds(self) -> list[dict[str, Any]]:
         """Registered news feeds: ``[{id, title, script}]``.
 
@@ -1484,11 +2365,7 @@ class CalibreDB:
         )
         fd, tmp = tempfile.mkstemp(suffix=".db", prefix="cquarry_fts_")
         os.close(fd)
-        shutil.copy2(path, tmp)
-        for suffix in ("-wal", "-shm"):
-            src = path + suffix
-            if os.path.exists(src):
-                shutil.copy2(src, tmp + suffix)
+        _snapshot_copy(path, tmp, self.SNAPSHOT_LEASH)
         self._fts_tmp_path = tmp
         self._fts_conn = sqlite3.connect(db_uri_ro(tmp), uri=True)
         self._fts_conn.row_factory = sqlite3.Row
@@ -1626,7 +2503,7 @@ class CalibreDB:
         except sqlite3.OperationalError:
             return {}
         label_by_id: dict[int, str] = {}
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(sqlite3.Error):
             label_by_id = {
                 col["id"]: col["label"] for col in self.get_custom_columns().values()
             }
@@ -1645,10 +2522,13 @@ class CalibreDB:
                 if m:
                     key = "#" + label_by_id.get(int(m.group(1)), key)
                 rows = None
+                # Defense-in-depth: the name comes from sqlite_master, but
+                # it still enters SQL only as a quoted identifier.
+                quoted = '"' + name.replace('"', '""') + '"'
                 for select in (
-                    f"SELECT id, name, count, avg_rating, sort FROM {name} ",
-                    f"SELECT id, value AS name, count, avg_rating, sort FROM {name} ",
-                    f"SELECT id, CAST(rating AS TEXT) AS name, count, avg_rating, sort FROM {name} ",
+                    f"SELECT id, name, count, avg_rating, sort FROM {quoted} ",
+                    f"SELECT id, value AS name, count, avg_rating, sort FROM {quoted} ",
+                    f"SELECT id, CAST(rating AS TEXT) AS name, count, avg_rating, sort FROM {quoted} ",
                 ):
                     try:
                         # ORDER BY lives outside the attempted SQL so a
@@ -1665,6 +2545,180 @@ class CalibreDB:
                 out[key] = [dict(r) for r in rows]
         finally:
             self.conn.create_function("title_sort", 1, None)
+        return out
+
+    # --- Restricted tag browser (1.25, Phase 18) ---
+
+    def get_categories(
+        self, book_ids: Sequence[int] | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The tag browser over a restricted result set (upstream
+        ``Cache.get_categories`` -> ``categories.get_categories``, the
+        portable subset the roadmap scoped): ``{category: [node, ...]}``
+        where every node carries its book-id set and a reproducing search
+        expression.
+
+        Node shape: ``{id, name, sort, count, avg_rating, id_set,
+        search_expression}`` -- ``count`` is ``len(id_set)`` (only books
+        from the restriction land in a node, so a value no restricted book
+        holds appears nowhere, upstream's zero-count rule),
+        ``avg_rating`` is the mean over the node's rated books in stars
+        (None with no rated books, the ``tag_browser_*`` views' AVG-over-
+        nonzero rule), and ``search_expression`` is the exact-match query
+        reproducing the node against the engine.
+
+        Categories: the builtin browse fields (authors, series, publisher,
+        tags, languages, formats, rating) plus every storage-backed custom
+        column keyed ``#label``. Composite columns stay gated by the §7 GPM
+        boundary; comments columns have no category values; user
+        categories, ``search``, and ``news`` are upstream GUI
+        synthesizations outside the portable subset. Where results overlap
+        :meth:`get_tag_browser_counts`, counts and average ratings agree
+        (same data, same rule); two documented naming differences remain:
+        rating nodes surface STARS -- ``"4.0"``, matching ``field()`` and
+        ``facet_counts`` -- where the views name the internal 0-10 text,
+        and unlinked entity rows (the views' zero-count entries) appear
+        here only when a book actually holds them, upstream's
+        ``get_categories`` behavior. ``book_ids=None`` means the whole
+        library; an empty restriction answers empty categories, like
+        upstream. Nodes sort name-ascending (case-insensitive), rating
+        descending -- Calibre's default browse order.
+        """
+        rows = self.get_all_books()
+        if book_ids is None:
+            restricted = rows
+        else:
+            wanted = set(book_ids)
+            restricted = [b for b in rows if b["id"] in wanted]
+        rating_map = {b["id"]: b["rating"] for b in restricted if b["rating"]}
+
+        def _avg(ids: set[int]) -> float | None:
+            vals = [rating_map[b] for b in ids if b in rating_map]
+            return (sum(vals) / len(vals)) / 2.0 if vals else None
+
+        def _node(
+            node_id: int | None,
+            name: str,
+            sort: str,
+            ids: set[int],
+            expression: str,
+        ) -> dict[str, Any]:
+            return {
+                "id": node_id,
+                "name": name,
+                "sort": sort,
+                "count": len(ids),
+                "avg_rating": _avg(ids),
+                "id_set": frozenset(ids),
+                "search_expression": expression,
+            }
+
+        def _from_rows(
+            field: str, location: str, entity_kind: str | None = None
+        ) -> list[dict[str, Any]]:
+            meta: dict[str, dict[str, Any]] = {}
+            if entity_kind is not None:
+                meta = {e["name"]: e for e in self.get_entities(entity_kind)}
+            buckets: dict[str, set[int]] = {}
+            for b in restricted:
+                value = b[field]
+                # List fields bucket per element; scalar fields (series,
+                # publisher) are one value, never iterated as a string.
+                for one in value if isinstance(value, (list, tuple)) else [value]:
+                    if one:
+                        buckets.setdefault(str(one), set()).add(b["id"])
+            nodes = [
+                _node(
+                    meta.get(name, {}).get("id"),
+                    name,
+                    (meta.get(name, {}) or {}).get("sort") or name,
+                    ids,
+                    f'{location}:="{name}"',
+                )
+                for name, ids in buckets.items()
+            ]
+            nodes.sort(key=lambda n: n["sort"].lower())
+            return nodes
+
+        out: dict[str, list[dict[str, Any]]] = {
+            "authors": _from_rows("authors", "authors", "authors"),
+            "series": _from_rows("series", "series", "series"),
+            "publisher": _from_rows("publisher", "publisher", "publishers"),
+            "tags": _from_rows("tags", "tags", "tags"),
+            "languages": _from_rows("languages", "languages", "languages"),
+            "formats": _from_rows("formats", "formats"),
+        }
+
+        # Rating: star nodes merged across legacy duplicate rating rows
+        # (upstream merges same-star tags too), descending.
+        star_buckets: dict[float, set[int]] = {}
+        for b in restricted:
+            stars = calibre_rating_to_stars(b["rating"])
+            if stars is not None:
+                star_buckets.setdefault(stars, set()).add(b["id"])
+        out["rating"] = [
+            _node(None, f"{stars:g}", f"{stars:g}", ids, f"rating:={stars:g}")
+            for stars, ids in sorted(star_buckets.items(), reverse=True)
+        ]
+
+        # Storage-backed custom columns, keyed #label. Normalized columns
+        # carry entity ids from their value tables; direct-storage columns
+        # name their nodes (id None, like formats).
+        for col in self.get_custom_columns().values():
+            datatype = col["datatype"]
+            if datatype in ("composite", "comments"):
+                continue
+            location = "#" + col["label"]
+            try:
+                values = self.load_custom_column(col["name"])
+            except (ValueError, sqlite3.OperationalError):
+                continue
+            value_ids: dict[Any, int] = {}
+            if col["normalized"]:
+                cid = int(col["id"])
+                try:
+                    value_ids = {
+                        r["value"]: r["id"]
+                        for r in self.conn.execute(
+                            f"SELECT id, value FROM custom_column_{cid}"
+                        )
+                    }
+                except sqlite3.OperationalError:
+                    value_ids = {}
+            buckets = {}
+            for b in restricted:
+                value = values.get(b["id"])
+                if value is None:
+                    continue
+                for one in value if isinstance(value, (list, tuple)) else [value]:
+                    if one is None or (isinstance(one, str) and not one.strip()):
+                        continue
+                    buckets.setdefault(one, set()).add(b["id"])
+            if datatype == "rating":
+                converted: dict[float, set[int]] = {}
+                for value, ids in buckets.items():
+                    stars = calibre_rating_to_stars(int(value))
+                    if stars is not None:
+                        converted.setdefault(stars, set()).update(ids)
+                nodes = [
+                    _node(
+                        None, f"{stars:g}", f"{stars:g}", ids, f"{location}:={stars:g}"
+                    )
+                    for stars, ids in sorted(converted.items(), reverse=True)
+                ]
+            else:
+                nodes = [
+                    _node(
+                        value_ids.get(value),
+                        str(value),
+                        str(value),
+                        ids,
+                        f'{location}:="{value}"',
+                    )
+                    for value, ids in buckets.items()
+                ]
+                nodes.sort(key=lambda n: n["sort"].lower())
+            out[location] = nodes
         return out
 
     # --- Preferences (generic accessor) ---
@@ -1764,25 +2818,191 @@ class CalibreDB:
         book has no annotations or the schema predates the table. Within a
         stored ``searchable_text``, an annotation's notes follow its
         highlighted text joined by ``\n\x1f\n`` (LF, ASCII unit separator,
-        LF; upstream ``annot_db_data``).
+        LF; upstream ``annot_db_data``). The map loads in ONE query for the
+        whole library (the per-book query was an N+1: one annotations:
+        token swept the library one probe per book).
         """
         if self._annotations_text_cache is None:
-            self._annotations_text_cache = {}
-        if book_id not in self._annotations_text_cache:
-            parts: list[str] = []
+            rows: dict[int, list[str]] = {}
             try:
                 cur = self.conn.cursor()
                 cur.execute(
-                    "SELECT searchable_text FROM annotations "
-                    "WHERE book = ? AND searchable_text IS NOT NULL "
-                    "ORDER BY id",
-                    (book_id,),
+                    "SELECT book, searchable_text FROM annotations "
+                    "WHERE searchable_text IS NOT NULL ORDER BY id"
                 )
-                parts = [r[0] for r in cur.fetchall() if r[0]]
+                for r in cur.fetchall():
+                    if r[1]:
+                        rows.setdefault(r[0], []).append(r[1])
             except sqlite3.OperationalError:
-                pass
-            self._annotations_text_cache[book_id] = "\n".join(parts)
-        return self._annotations_text_cache[book_id]
+                pass  # schema predates the table
+            self._annotations_text_cache = {
+                book: "\n".join(parts) for book, parts in rows.items()
+            }
+        return self._annotations_text_cache.get(book_id, "")
+
+    def get_annotations_decoded(
+        self, book_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """The renderer-facing annotation view (1.23): Calibre's raw
+        annotations rows projected onto the fields a detail pane shows.
+
+        One dict per annotation carrying ``book``, ``format``, ``kind``
+        (the raw ``annot_type``), ``annot_id``, ``timestamp``, and the
+        decoded payload's ``text`` (the highlighted passage), ``notes``,
+        and ``title`` (bookmarks), each None when the payload lacks it.
+        Renders the same content :meth:`get_annotations` returns without
+        every consumer re-learning ``annot_data``'s shape. Empty list on
+        schemas predating the table.
+        """
+        out: list[dict[str, Any]] = []
+        for row in self.get_annotations(book_id):
+            data = row.get("annot_data")
+            if not isinstance(data, dict):
+                data = {}
+
+            def _str(value: Any) -> str | None:
+                return value if isinstance(value, str) else None
+
+            out.append(
+                {
+                    "book": row.get("book"),
+                    "format": row.get("format"),
+                    "kind": row.get("annot_type"),
+                    "annot_id": row.get("annot_id"),
+                    "timestamp": row.get("timestamp"),
+                    "text": _str(data.get("text")),
+                    "notes": _str(data.get("notes")),
+                    "title": _str(data.get("title")),
+                }
+            )
+        return out
+
+    def get_annotations_filtered(
+        self,
+        *,
+        book_id: int | None = None,
+        user_type: str | None = None,
+        user: str | None = None,
+        kind: str | None = None,
+        style: dict[str, str] | None = None,
+        include_removed: bool = False,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """The annotation conveniences in one read (upstream
+        ``Cache.all_annotations``): :meth:`get_annotations_decoded`'s rows
+        plus ``user_type``/``user``/``removed``, filtered.
+
+        ``user_type``/``user`` scope to one device account (both must match
+        when given), ``kind`` filters the annotation type (``highlight``,
+        ``bookmark``, ...), and ``style`` keeps only highlights whose stored
+        style carries every given key/value (upstream's exact-dict-match
+        rule, e.g. ``{"kind": "color", "which": "yellow"}``). Removed
+        annotations are tombstones -- Calibre's own deletes rewrite the
+        payload to a ``removed: True`` skeleton and blank the searchable
+        text -- and are hidden unless ``include_removed`` is set (upstream's
+        ``ignore_removed`` default keeps them; the renderer-facing read
+        hides them and opts in). Rows order by book, then timestamp, then
+        id -- :meth:`get_annotations`' order -- and ``limit`` takes the
+        first N of that ordering. Empty list on schemas predating the
+        table, like every annotations read.
+        """
+        rows = self.get_annotations(book_id)
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if user_type is not None and row.get("user_type") != user_type:
+                continue
+            if user is not None and row.get("user") != user:
+                continue
+            if kind is not None and row.get("annot_type") != kind:
+                continue
+            data = row.get("annot_data")
+            if not isinstance(data, dict):
+                data = {}
+
+            def _str(value: Any) -> str | None:
+                return value if isinstance(value, str) else None
+
+            removed = bool(data.get("removed"))
+            if removed and not include_removed:
+                continue
+            if style is not None:
+                stored = data.get("style")
+                if not isinstance(stored, dict) or not all(
+                    stored.get(k) == v for k, v in style.items()
+                ):
+                    continue
+            out.append(
+                {
+                    "book": row.get("book"),
+                    "format": row.get("format"),
+                    "kind": row.get("annot_type"),
+                    "annot_id": row.get("annot_id"),
+                    "timestamp": row.get("timestamp"),
+                    "text": _str(data.get("text")),
+                    "notes": _str(data.get("notes")),
+                    "title": _str(data.get("title")),
+                    "user_type": row.get("user_type"),
+                    "user": row.get("user"),
+                    "removed": removed,
+                }
+            )
+            if limit is not None and len(out) >= limit:
+                break
+        return out
+
+    def get_annotation_users(self) -> list[tuple[str, str]]:
+        """Every ``(user_type, user)`` account holding annotations, sorted.
+
+        The discovery half of the filtered read (upstream
+        ``all_annotation_users``): what a frontend offers as the
+        "whose highlights" picker. Empty list on schemas predating the
+        table.
+        """
+        try:
+            rows = self.conn.execute(
+                "SELECT DISTINCT user_type, user FROM annotations "
+                "ORDER BY user_type, user"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [(r["user_type"], r["user"]) for r in rows]
+
+    def get_annotation_types(self) -> list[str]:
+        """Every annotation type present (upstream
+        ``all_annotation_types``): ``highlight``, ``bookmark``, ... sorted.
+        Empty list on schemas predating the table.
+        """
+        try:
+            rows = self.conn.execute(
+                "SELECT DISTINCT annot_type FROM annotations "
+                "WHERE annot_type IS NOT NULL ORDER BY annot_type"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [r["annot_type"] for r in rows]
+
+    def get_annotation_styles(self) -> list[dict[str, str]]:
+        """The highlight styles this library actually holds (the DB half of
+        upstream ``all_annotation_styles``).
+
+        Each highlight payload can carry a ``style`` dict (``kind`` =
+        color/decoration, ``which`` = the viewer's name); the distinct
+        values come back sorted, so a frontend can build a legend from
+        what is really in the library. Upstream also folds in its viewer's
+        builtin style catalog, which is GUI constants, not data -- the
+        styles nobody used appear in Calibre's picker and not here.
+        """
+        styles: set[tuple[str, str]] = set()
+        for row in self.get_annotations():
+            data = row.get("annot_data")
+            if isinstance(data, dict):
+                style = data.get("style")
+                if isinstance(style, dict):
+                    which = style.get("which")
+                    kind = style.get("kind")
+                    if isinstance(kind, str) and isinstance(which, str):
+                        styles.add((kind, which))
+        return [{"kind": k, "which": w} for k, w in sorted(styles)]
 
     # --- Search & virtual library resolution ---
 
@@ -1829,9 +3049,94 @@ class CalibreDB:
             )
         return self._engine()._match_saved_search(canonical, self.all_ids(), set())
 
+    def virtual_libraries_for_books(
+        self, book_ids: Sequence[int] | None = None
+    ) -> dict[int, tuple[str, ...]]:
+        """The inverse virtual-library map (upstream ``Cache.
+        virtual_libraries_for_books``): every requested book id -> the sorted
+        names of the virtual libraries containing it.
+
+        Each library resolves through the same engine path
+        :meth:`resolve_vl` uses, so the answers agree by construction. A
+        library whose expression fails to evaluate (a ``vl:`` target renamed
+        or deleted in Calibre, a corrupt preference) is skipped with a
+        warning rather than failing the map -- upstream splices an error
+        string into the name tuple there, which would pollute every set
+        algebra a consumer does with the values. ``book_ids=None`` means
+        every book; ids absent from the library come back as empty tuples
+        exactly like members of no library.
+        """
+        if self._vl_for_books_cache is None:
+            owners: dict[int, list[str]] = {}
+            for name in self.get_virtual_libraries():
+                try:
+                    members = self.resolve_vl(name)
+                except ParseException as e:
+                    print(
+                        f"Warning: virtual library {name!r} failed to evaluate, "
+                        f"skipped in the inverse map: {e}",
+                        file=sys.stderr,
+                    )
+                    continue
+                for book_id in members:
+                    owners.setdefault(book_id, []).append(name)
+            self._vl_for_books_cache = {
+                book: tuple(sorted(names)) for book, names in owners.items()
+            }
+        cache = self._vl_for_books_cache
+        ids = self._get_all_book_ids() if book_ids is None else book_ids
+        return {book_id: cache.get(book_id, ()) for book_id in ids}
+
+    def user_categories_for_books(
+        self, book_ids: Sequence[int] | None = None
+    ) -> dict[int, dict[str, list[list[str]]]]:
+        """The inverse user-category map (upstream
+        ``Cache.user_categories_for_books``): every requested book id ->
+        ``{category: [[value, location], ...]}`` naming only the members the
+        book actually holds.
+
+        Members are probed exactly like the ``@Name`` search location
+        (upstream's rule): an exact match of the stored member value on the
+        member's own location, via the same :meth:`field` path the engine
+        uses, so the answers agree with ``@Name:Category`` by construction.
+        Members whose location cannot be evaluated match nothing rather than
+        erroring: composite columns (the §7 GPM boundary -- upstream
+        evaluates them through its template engine) and unknown locations
+        both fall out of ``field()`` as no match, the same way unknown
+        ``@Names`` match nothing in search. Scalar members compare with
+        ``==`` and list members with membership, mirroring upstream; a
+        rating member written as the string ``"4"`` therefore does not match
+        the 4.0-star float ``field()`` yields, which is upstream's own
+        string-vs-number behavior. ``book_ids=None`` means every book.
+        """
+        user_cats = self.get_user_categories()
+        ids = self._get_all_book_ids() if book_ids is None else book_ids
+        out: dict[int, dict[str, list[list[str]]]] = {}
+        for book_id in ids:
+            per_book: dict[str, list[list[str]]] = {}
+            for ucat, members in user_cats.items():
+                held: list[list[str]] = []
+                for member in members:
+                    if not isinstance(member, (list, tuple)) or len(member) < 2:
+                        continue  # corrupt member entry: degrade like the prefs do
+                    name, location = member[0], member[1]
+                    try:
+                        value = self.field(book_id, location)
+                    except (sqlite3.OperationalError, ValueError):
+                        value = None
+                    if isinstance(value, (list, tuple)):
+                        if name in value:
+                            held.append([name, location])
+                    elif name == value:
+                        held.append([name, location])
+                per_book[ucat] = held
+            out[book_id] = per_book
+        return out
+
     # --- search.MetadataProvider interface ---
 
     def all_ids(self) -> set[int]:
+        """MetadataProvider hook: every book id in the library."""
         return set(self._get_all_book_ids())
 
     def vl_expression(self, name: str) -> str | None:
@@ -1851,12 +3156,18 @@ class CalibreDB:
         return None
 
     def custom_locations(self) -> dict[str, str]:
+        """MetadataProvider hook: ``{#label: engine datatype}`` per custom column."""
         cache = self._custom_loc_cache
         if cache is None:
             cache = self._custom_loc_cache = self._build_custom_locations()
         return cache
 
     def field(self, book_id: int, location: str) -> Any:
+        """One book's value for a canonical location (MetadataProvider hook).
+
+        Custom columns are addressed by ``#label``; comments, pages, and
+        annotations have dedicated lazy paths; everything else reads the
+        search view."""
         if location.startswith("#"):
             return self._custom_value(book_id, location)
 
@@ -2048,7 +3359,7 @@ class CalibreDB:
             if location not in self._custom_val_cache:
                 self._custom_val_cache[location] = {}
             if book_id not in self._custom_val_cache[location]:
-                cid = col["id"]
+                cid = int(col["id"])  # f-string SQL below; never interpolate raw ids
                 try:
                     cur = self.conn.cursor()
                     cur.execute(
