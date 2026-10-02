@@ -4952,10 +4952,12 @@ class TestBlobWriters(unittest.TestCase):
     def test_book_storage_non_string_values_raise(self):
         # Upstream validate_book_storage: keys AND values must be str. The
         # 1.25 test used a float value, which upstream's reader rejects.
+        # The value case raises ValueError (upstream's InvalidBookStorage
+        # maps there); a non-str key is a caller type error.
         with WritableCalibreDB(self.db_path) as wdb:
             with self.assertRaises(ValueError):
                 wdb.set_book_storage(1, "EPUB", {"position": 0.42})
-            with self.assertRaises(ValueError):
+            with self.assertRaises(TypeError):
                 wdb.set_book_storage(1, "EPUB", {1: "x"})
 
     def test_book_storage_newer_entry_wins(self):
