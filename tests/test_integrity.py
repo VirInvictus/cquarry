@@ -13,6 +13,7 @@ import uuid
 
 from cquarry.db import CalibreDB
 from cquarry.integrity import (
+    check_library_disk,
     find_authorless,
     find_bad_language_codes,
     find_coverless,
@@ -407,6 +408,190 @@ class TestMetadataQuality(unittest.TestCase):
         # a two-letter code beside a good fra link (one bad code flags the
         # book), book 4 = the empty string.
         self.assertEqual(find_bad_language_codes(self.db), [2, 3, 4])
+
+
+class TestCheckLibraryDisk(unittest.TestCase):
+    """check_library_disk (1.24, Phase 15): the extra side of the disk
+    story, upstream check_library's walk shape."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT,
+                timestamp TEXT, pubdate TEXT, series_index REAL,
+                has_cover INTEGER DEFAULT 0, path TEXT, last_modified TEXT
+            );
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,
+                format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER);
+            INSERT INTO books (id, title, path, has_cover) VALUES
+                (1, 'Kept', 'Kept Author/Kept (1)', 1),
+                (2, 'Bare', 'Bare Author/Bare (2)', 0),
+                (3, 'Moved', 'Moved Author/Moved (3)', 0);
+            INSERT INTO data (book, format, uncompressed_size, name) VALUES
+                (1, 'EPUB', 10, 'Kept - Kept Author');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        def mk(rel, files=()):
+            path = os.path.join(self.temp_dir, *rel.split("/"))
+            os.makedirs(path, exist_ok=True)
+            for name in files:
+                with open(os.path.join(path, name), "w") as f:
+                    f.write("x")
+            return path
+
+        # Book 1: catalogued file + cover + an unknown txt.
+        mk(
+            "Kept Author/Kept (1)",
+            ["Kept - Kept Author.epub", "cover.jpg", "notes.txt", "README"],
+        )
+        # Book 2: no files at all, but a cover on disk with the flag down.
+        mk("Bare Author/Bare (2)", ["cover.jpg"])
+        # Book 3: db says 'Moved (3)' but the dir spells it 'Muved (3)'.
+        mk("Moved Author/Muved (3)", ["Moved - Moved Author.epub"])
+        # A stale directory for an id nobody owns, and an author dir with
+        # no recognized titles.
+        mk("Kept Author/Ghost (99)", ["ghost.epub"])
+        mk("Empty Author", [])
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+
+        import shutil
+
+        shutil.rmtree(self.temp_dir)
+
+    def test_the_extra_side_is_categorized(self):
+        out = check_library_disk(self.db)
+        # Book 1: the extensionless file is an extra file; the txt is a
+        # format candidate here exactly as upstream (txt is in Calibre's
+        # own BOOK_EXTENSIONS).
+        self.assertEqual(
+            [e["path"] for e in out["extra_files"]],
+            ["Kept Author/Kept (1)/README"],
+        )
+        # notes.txt is a format candidate (upstream's txt rule), and the
+        # mis-spelled book 3's epub is uncatalogued because no data row
+        # exists for it yet.
+        self.assertEqual(
+            [e["path"] for e in out["extra_formats"]],
+            [
+                "Kept Author/Kept (1)/notes.txt",
+                "Moved Author/Muved (3)/Moved - Moved Author.epub",
+            ],
+        )
+        # Book 2: cover on disk, flag down.
+        self.assertEqual(
+            [(e["book_id"], e["path"]) for e in out["extra_covers"]],
+            [(2, "Bare Author/Bare (2)/cover.jpg")],
+        )
+        # Book 3: live id under the wrong spelling, canonical dir absent.
+        self.assertEqual(
+            [(e["book_id"], e["path"]) for e in out["malformed_paths"]],
+            [(3, "Moved Author/Muved (3)")],
+        )
+        # The ghost directory: live-wrong-dir rules put an unknown id in
+        # extra_titles; the empty author dir in extra_authors.
+        self.assertEqual(
+            [(e["book_id"], e["path"]) for e in out["extra_titles"]],
+            [(99, "Kept Author/Ghost (99)")],
+        )
+        self.assertEqual([e["path"] for e in out["extra_authors"]], ["Empty Author"])
+        self.assertEqual(out["malformed_formats"], [])
+        self.assertEqual(out["failed_folders"], [])
+
+    def test_extra_and_malformed_formats(self):
+        # An uncatalogued format file, and a catalogued row whose disk
+        # spelling differs only in case.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO data (book, format, uncompressed_size, name)"
+            " VALUES (2, 'EPUB', 10, 'Bare - Bare Author')"
+        )
+        conn.commit()
+        conn.close()
+        self.db.refresh()
+        with open(
+            os.path.join(self.temp_dir, "Bare Author", "Bare (2)", "stray.epub"), "w"
+        ) as f:
+            f.write("x")
+        with open(
+            os.path.join(
+                self.temp_dir, "Bare Author", "Bare (2)", "bare - bare author.EPUB"
+            ),
+            "w",
+        ) as f:
+            f.write("x")
+        out = check_library_disk(self.db)
+        # The walk order is author-sorted; the standing fixture findings
+        # (the txt candidate and the mis-spelled book's epub) ride along.
+        self.assertEqual(
+            [e["path"] for e in out["extra_formats"]],
+            [
+                "Bare Author/Bare (2)/stray.epub",
+                "Kept Author/Kept (1)/notes.txt",
+                "Moved Author/Muved (3)/Moved - Moved Author.epub",
+            ],
+        )
+        self.assertEqual(
+            [e["path"] for e in out["malformed_formats"]],
+            ["Bare Author/Bare (2)/bare - bare author.EPUB"],
+        )
+
+    def test_ignores_are_honored(self):
+        out = check_library_disk(
+            self.db,
+            name_ignores={
+                "README",
+                "Ghost (99)",
+                "Empty Author",
+                "Moved Author",  # ignoring the only title empties the dir
+            },
+        )
+        self.assertEqual(out["extra_files"], [])
+        self.assertEqual(out["extra_titles"], [])
+        self.assertEqual(out["extra_authors"], [])
+        self.assertEqual(out["malformed_paths"], [])
+        # Extension ignores drop the txt format candidate too (the
+        # mis-spelled book's epub remains: epub is not ignored).
+        out = check_library_disk(self.db, extension_ignores={"txt"})
+        self.assertEqual(
+            [e["path"] for e in out["extra_formats"]],
+            ["Moved Author/Muved (3)/Moved - Moved Author.epub"],
+        )
+
+    def test_top_level_sidecars_are_never_findings(self):
+        # .caltrash, full-text-search.db etc. are not books; a walk over a
+        # library that uses them reports nothing about them.
+        os.makedirs(os.path.join(self.temp_dir, ".caltrash", "b", "1"))
+        with open(os.path.join(self.temp_dir, "full-text-search.db"), "w") as f:
+            f.write("x")
+        out = check_library_disk(self.db)
+        paths = [e["path"] for entries in out.values() for e in entries]
+        self.assertFalse(
+            any(".caltrash" in p or "full-text-search" in p for p in paths)
+        )
+        # Empty Author remains a genuine extra author; the sidecars do not.
+        self.assertEqual([e["path"] for e in out["extra_authors"]], ["Empty Author"])
 
 
 if __name__ == "__main__":
