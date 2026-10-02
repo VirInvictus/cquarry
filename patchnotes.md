@@ -22,7 +22,10 @@ the recorded decision #81 deltas.
   masked it on main).
 - The publish trigger stays defused (`v-disabled-*`): the compat line
   never publishes to PyPI; Hermitage's Flatpak pins a commit.
-- Suite on Python 3.13.15: 413 collected (CI's discover shape), green.
+- Suite on Python 3.13.15: 653 collected, green. (An earlier draft of
+  this entry said 413 -- the number from the pre-fix intermediate run
+  that FAILED on a test_write import error; erratum 2026-10-02, when
+  the post-merge review caught it.)
 
 ## v1.25.0 (2026-10-02)
 
@@ -1363,3 +1366,33 @@ against upstream Calibre source (`calibre/db/search.py`):
 - **Database Engine (`cquarry.db`):** Features the `CalibreDB` wrapper, which intelligently manages `metadata.db` access, falling back to a WAL-consistent snapshot if the Calibre desktop application holds an exclusive write-lock. Exposes `get_all_books()`, tags, series, and identifiers with performant SQLite JOINs and internal memory caching.
 - **Search Grammar Engine (`cquarry.search`):** A full recursive descent parser implementing Calibre's search expression logic. Provides boolean logic (`AND`, `OR`, `NOT`), exact matching (`=value`), hierarchical tag prefix matching (`tags:Fic` matches `Fic.Fantasy`), date math (`date:>14daysago`), and nested Virtual Library resolution (`vl:"My Books"`).
 - **Helpers:** Inherits standard Calibre domain formatters from CalibreQuarry (star rating converters, deterministic missing series gap detection, and binary image dimension sniffing).
+
+
+## v1.18.0+py313.1 (2026-09-15)
+
+### The Python 3.13 compatibility branch (the Hermitage Flatpak ledger)
+
+Hermitage's Flatpak manifest pins cquarry 132aa2c (= 1.18.0), which
+cannot build on the GNOME 50 runtime's Python 3.13: this line requires
+Python >=3.14 and used PEP 758 bare except-groups (`except A, B:`),
+a SyntaxError on 3.13. Recorded decision #81 chose an upstream compat
+branch over a runtime bump.
+
+- Branch `compat-py313`, cut from 132aa2c (1.18.0), NOT from main:
+  main's 1.19-1.23 line stays Python 3.14+ by contract.
+- `requires-python >=3.13`.
+- The seven bare except-groups parenthesized (verified count at the
+  branch point: db.py x2, helpers.py x1, search.py x2, write.py x2;
+  the recorded count of eight was off by one). No other 3.14-only
+  syntax exists on this line.
+- Distinct version series `1.18.0+py313.x` (PEP 440 local version), so
+  a branch build can never be confused with a mainline release; the
+  version-sync guard's carriers all agree on it.
+- The publish workflow's tag trigger is defused (`v-disabled-*`): the
+  compat line never publishes to PyPI (PyPI stays 3.14-only;
+  Hermitage's Flatpak pins a commit, and a `+local` version is not
+  uploadable anyway).
+
+Mainline consumers (CalibreQuarry, bindery-cli, Carrel-calibre-web)
+are unaffected: PyPI remains the 3.14+ line. Hermitage's manifest pin
+moves to this branch's HEAD under cross-repo grant #117.

@@ -28,7 +28,7 @@ This library powers [CalibreQuarry](https://github.com/VirInvictus/CalibreQuarry
   - **Whole-library verbs.** Entity-wide renames (`rename_entity` fixes a misspelled author everywhere, merging case variants), verbatim sort corrections, cover replacement (`set_cover`/`remove_cover`), and trash management (`list_trash`/`empty_trash`/`expire_trash`).
   - **Calibre stays truthful.** Every row-level mutation queues OPF resync in `metadata_dirtied`; renames re-lay the on-disk layout (the book directory and format stems move with the rows); format writes queue FTS re-extraction and pages rescans in the sidecar.
 - **Context manager.** `CalibreDB` supports `with` statements for automatic cleanup of snapshot files.
-- **Zero dependencies.** Pure Python 3.14+ stdlib (`sqlite3`, `re`, `json`, `unicodedata`).
+- **Zero dependencies.** Pure Python 3.13+ stdlib (`sqlite3`, `re`, `json`, `unicodedata`).
 
 ## Usage
 
