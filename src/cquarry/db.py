@@ -722,6 +722,96 @@ class CalibreDB:
             out[location] = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
         return out
 
+    def _date_field_values(
+        self, field: str, ids: Sequence[int] | None
+    ) -> dict[int, Any]:
+        """Per-book raw date values for ``books_by_year``/``books_by_month``.
+
+        ``field`` is a builtin date location (``pubdate``, ``timestamp``,
+        ``last_modified``) or a date-typed custom column by ``#label``, bare
+        label, or display name; anything else raises ValueError. Custom
+        columns read through :meth:`load_custom_column` (cached like every
+        read); builtin fields off the hydrated rows.
+        """
+        if field in ("pubdate", "timestamp", "last_modified"):
+            rows = self.get_all_books()
+            values = {b["id"]: b[field] for b in rows}
+        else:
+            col = self.find_custom_column(field)
+            if col is None:
+                raise ValueError(f"Unknown date field: {field!r}")
+            if col["datatype"] != "datetime":
+                raise ValueError(
+                    f"{field!r} is a {col['datatype']} column, not a date field"
+                )
+            values = self.load_custom_column(col["name"])
+        if ids is not None:
+            wanted = set(ids)
+            values = {k: v for k, v in values.items() if k in wanted}
+        return values
+
+    @staticmethod
+    def _date_bucket(value: Any, width: int) -> tuple[int, ...] | None:
+        """(year[, month]) integers from a stored date, None when undated.
+
+        Accepts the stored ISO text (``YYYY-MM-DD ...``, the schema's shape)
+        and real ``datetime`` objects. The 0101/0100 undefined-date sentinels
+        and blank values land here as None -- cquarry treats them as no-date
+        everywhere (the search engine's rule), and hunting them is
+        :func:`cquarry.integrity.find_sentinel_pubdates`' job, not a bucket's.
+        """
+        if isinstance(value, datetime):
+            return (value.year, value.month)[:width]
+        if not isinstance(value, str) or not value.strip():
+            return None
+        head = value.strip()[: width * 3 + 1]  # 'YYYY' or 'YYYY-MM'
+        parts = head.split("-")
+        if len(parts) < width:
+            return None
+        try:
+            bucket = tuple(int(p) for p in parts[:width])
+        except ValueError:
+            return None
+        if bucket[0] in (100, 101):  # the undefined-date sentinels
+            return None
+        return bucket
+
+    def books_by_year(
+        self, field: str = "pubdate", ids: Sequence[int] | None = None
+    ) -> dict[int, set[int]]:
+        """Books bucketed by year over any date field (upstream
+        ``Cache.books_by_year``): ``{year: {book_ids}}``.
+
+        ``field`` is a builtin date location or a date-typed custom column
+        (see :meth:`_date_field_values`); ``ids`` restricts the books
+        counted (the browse-over-a-search-result shape). Books with no
+        value -- including the 0101/0100 sentinel dates -- appear nowhere.
+        Years key as plain ints, ascending order not guaranteed (dict over
+        insertion; sort keys before display).
+        """
+        out: dict[int, set[int]] = {}
+        for book_id, value in self._date_field_values(field, ids).items():
+            bucket = self._date_bucket(value, 1)
+            if bucket is not None:
+                out.setdefault(bucket[0], set()).add(book_id)
+        return out
+
+    def books_by_month(
+        self, field: str = "pubdate", ids: Sequence[int] | None = None
+    ) -> dict[tuple[int, int], set[int]]:
+        """Books bucketed by (year, month) over any date field (upstream
+        ``Cache.books_by_month``): ``{(year, month): {book_ids}}``.
+
+        Same contract as :meth:`books_by_year`, one level finer; the key is
+        the ``(year, month)`` tuple.
+        """
+        out: dict[tuple[int, int], set[int]] = {}
+        for book_id, value in self._date_field_values(field, ids).items():
+            bucket = self._date_bucket(value, 2)
+            if bucket is not None:
+                out.setdefault(bucket, set()).add(book_id)
+        return out
+
     def get_format_path(self, book_id: int, fmt: str, verify: bool = True) -> str:
         """Resolve the absolute filesystem path of a book's format file.
 

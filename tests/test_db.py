@@ -2810,3 +2810,82 @@ class TestFormatHashAndMetadata(unittest.TestCase):
             self.assertEqual(meta["path"], self.epub)
             self.assertEqual(meta["size"], len(b"EPUB-CONTENTS-v1"))
             self.assertEqual(meta["mtime"].tzinfo, UTC)
+
+
+class TestBooksByDateBuckets(unittest.TestCase):
+    """books_by_year / books_by_month over any date field (1.25, Phase 16)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT, is_multiple INTEGER, editable INTEGER DEFAULT 1, display TEXT DEFAULT '{}', normalized INTEGER DEFAULT 0);
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, book INTEGER, value TEXT, link TEXT DEFAULT '');
+            INSERT INTO books (id, title, sort, path, has_cover, pubdate, timestamp) VALUES
+                (1, 'One', 'One', 'a/1', 0, '1991-10-01 00:00:00+00:00', '2020-01-15 00:00:00+00:00'),
+                (2, 'Two', 'Two', 'a/2', 0, '1991-03-05 00:00:00+00:00', '2021-07-02 00:00:00+00:00'),
+                (3, 'Three', 'Three', 'a/3', 0, NULL, '2020-01-15 00:00:00+00:00'),
+                (4, 'Sentinel', 'Sentinel', 'a/4', 0, '0101-01-01 00:00:00+00:00', '2019-12-31 00:00:00+00:00');
+            INSERT INTO custom_columns (id,label,name,datatype,is_multiple) VALUES (1,'acquired','Acquired','datetime',0);
+            INSERT INTO custom_column_1 (book, value) VALUES
+                (1, '2022-05-05 00:00:00+00:00'), (2, '2022-05-05 00:00:00+00:00');
+            """
+        )
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_pubdate_years_skip_null_and_sentinel(self):
+        result = self.db.books_by_year()
+        self.assertEqual(result, {1991: {1, 2}})
+
+    def test_timestamp_years(self):
+        result = self.db.books_by_year("timestamp")
+        self.assertEqual(result, {2019: {4}, 2020: {1, 3}, 2021: {2}})
+
+    def test_month_buckets_key_on_tuples(self):
+        result = self.db.books_by_month("timestamp")
+        self.assertEqual(
+            result,
+            {
+                (2019, 12): {4},
+                (2020, 1): {1, 3},
+                (2021, 7): {2},
+            },
+        )
+
+    def test_custom_date_column_by_label(self):
+        result = self.db.books_by_year("#acquired")
+        self.assertEqual(result, {2022: {1, 2}})
+
+    def test_restriction_narrows_the_buckets(self):
+        result = self.db.books_by_year("timestamp", ids=[1, 4])
+        self.assertEqual(result, {2019: {4}, 2020: {1}})
+
+    def test_unknown_and_non_date_fields_raise(self):
+        with self.assertRaises(ValueError):
+            self.db.books_by_year("nope")
+        with self.assertRaises(ValueError):
+            self.db.books_by_year("title")

@@ -194,9 +194,10 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   detector the FTS sidecar's own hash columns compare against. Size XS.
   **Shipped 1.25**: SHA-256 over `get_format_path`'s verified resolution; metadata is
   `{path, size, mtime}` with an aware-UTC stamp.
-- [ ] `books_by_year` / `books_by_month` over any date field (`cache.py:1057`, `:1080`);
+- [x] `books_by_year` / `books_by_month` over any date field (`cache.py:1057`, `:1080`);
   `analytics.addition_timeline` buckets only the fixed `timestamp` field into counts.
-  Size S.
+  Size S. **Shipped 1.25**: builtin date locations plus date-typed custom columns,
+  restriction-shaped like facet_counts_for_ids; sentinels/blank land nowhere.
 - [ ] `get_next_series_num_for` (+ custom-column variant, `cache.py:2567`,
   `legacy.py:873`): the preference-aware next series number. Size XS-S.
 - [ ] Annotation conveniences: filter/limit/user/type variants over `get_annotations`,
