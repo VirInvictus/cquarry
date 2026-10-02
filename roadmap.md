@@ -165,13 +165,16 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   delete triggers tokenize through Calibre's custom FTS5 tokenizer (the schema fact the
   CLAUDE.md NEVER-delete rule is built on), so removing indexed text stays Calibre's
   (an O-lane `calibredb fts_unindex` wrap if a consumer asks).
-- [ ] **Typed `set_preference` writer** (the 2026-09-29 automation-set reversal; the
+- [x] **Typed `set_preference` writer** (the 2026-09-29 automation-set reversal; the
   survey's "needs a recorded decision" note is satisfied by that decision): saved-search
   add/delete/rename (`cache.py:3379-3399`), virtual libraries, user categories, grouped
   search terms, and the FTS enable flag (`cache.py:588` + `fts/connect.py:60`) are all
   plain preference rows; cquarry reads all of them and writes none. One schema-faithful
   JSON upsert unlocks the set; this is the calibredb `saved_searches` parity item.
-  Size S.
+  Size S. **Shipped 1.24** as `set_preference(key, value)` over a five-key whitelist
+  (payload validated per key before anything lands) plus `saved_search_add`/
+  `saved_search_delete`/`saved_search_rename` (rename resolves NOCASE and REFUSES to
+  overwrite an existing name, where upstream silently overwrites -- documented).
 
 ### Phase 16: Read-surface wave and shared-helper promotions
 

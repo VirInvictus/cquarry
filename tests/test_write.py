@@ -627,6 +627,149 @@ class TestFtsQueueVerbs(unittest.TestCase):
         self.assertEqual(self._fts_rows(), [])
 
 
+class TestTypedPreferences(unittest.TestCase):
+    """set_preference + the saved-search verbs (1.24, Phase 15): the
+    calibredb saved_searches parity item, typed by key."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,"
+            " series_index REAL, path TEXT, has_cover INTEGER, uuid TEXT)"
+        )
+        conn.execute("INSERT INTO books (id, title, sort) VALUES (1, 'One', 'One')")
+        conn.execute(
+            "CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT NOT NULL,"
+            " val TEXT NOT NULL, UNIQUE(key))"
+        )
+        # The join family the search view hydrates over (the engine test
+        # resolves a written VL through it).
+        for table in (
+            "authors (id INTEGER PRIMARY KEY, name TEXT)",
+            "books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER)",
+            "tags (id INTEGER PRIMARY KEY, name TEXT)",
+            "books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER)",
+            "series (id INTEGER PRIMARY KEY, name TEXT)",
+            "books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER)",
+            "publishers (id INTEGER PRIMARY KEY, name TEXT)",
+            "books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER)",
+            "ratings (id INTEGER PRIMARY KEY, rating INTEGER)",
+            "books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER)",
+            "languages (id INTEGER PRIMARY KEY, lang_code TEXT)",
+            "books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER)",
+            (
+                "data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT,"
+                " uncompressed_size INTEGER, name TEXT)"
+            ),
+        ):
+            conn.execute("CREATE TABLE " + table)
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _pref(self, key):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT val FROM preferences WHERE key = ?", (key,)
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+        finally:
+            conn.close()
+
+    def test_set_preference_writes_the_five_keys(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(
+                wdb.set_preference("saved_searches", {"Recent": "timestamp:>30daysago"})
+            )
+            self.assertTrue(
+                wdb.set_preference("virtual_libraries", {"Wing": "tags:Wing"})
+            )
+            self.assertTrue(
+                wdb.set_preference(
+                    "user_categories", {"Favorites": [["Tolkien", "authors"]]}
+                )
+            )
+            self.assertTrue(
+                wdb.set_preference("grouped_search_terms", {"Ident": ["isbn", "doi"]})
+            )
+            self.assertTrue(wdb.set_preference("fts_enabled", True))
+        self.assertEqual(
+            self._pref("saved_searches"), {"Recent": "timestamp:>30daysago"}
+        )
+        self.assertIs(self._pref("fts_enabled"), True)
+
+    def test_set_preference_rejects_unknown_keys_and_bad_payloads(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_preference("main_window_geometry", {"x": 1})
+            with self.assertRaises(ValueError):
+                wdb.set_preference("saved_searches", {"X": "   "})
+            with self.assertRaises(ValueError):
+                wdb.set_preference("fts_enabled", 1)
+            with self.assertRaises(TypeError):
+                wdb.set_preference("user_categories", {"Bad": "not-a-list"})
+            with self.assertRaises(ValueError):
+                wdb.set_preference("user_categories", {"Bad": [["lonely-member"]]})
+        self.assertIsNone(self._pref("saved_searches"))
+
+    def test_set_preference_honest_noop_on_equal_payload(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_preference("virtual_libraries", {"Wing": "tags:Wing"})
+            self.assertFalse(
+                wdb.set_preference("virtual_libraries", {"Wing": "tags:Wing"})
+            )
+
+    def test_saved_search_add_delete_rename(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.saved_search_add("Recent", " timestamp:>30daysago "))
+            self.assertFalse(wdb.saved_search_add("Recent", "timestamp:>30daysago"))
+            self.assertTrue(wdb.saved_search_add("Borrowed", "identifiers:loan:true"))
+            self.assertTrue(wdb.saved_search_rename("recent", "New Books"))
+            self.assertEqual(
+                self._pref("saved_searches"),
+                {
+                    "New Books": "timestamp:>30daysago",
+                    "Borrowed": "identifiers:loan:true",
+                },
+            )
+            # Delete is exact-key (upstream's pop): the stored spelling
+            # deletes, a case variant honestly does not.
+            self.assertTrue(wdb.saved_search_delete("Borrowed"))
+            self.assertFalse(wdb.saved_search_delete("Borrowed"))
+            with self.assertRaises(ValueError):
+                wdb.saved_search_rename("nope", "X")
+            self.assertTrue(wdb.saved_search_add("Borrowed", "x"))
+            with self.assertRaises(ValueError):
+                wdb.saved_search_rename("New Books", "Borrowed")  # exists
+            # A rename onto the stored spelling is an honest no-op; a
+            # case-variant is a genuine case-change rename.
+            self.assertFalse(wdb.saved_search_rename("borrowed", "Borrowed"))
+            self.assertTrue(wdb.saved_search_rename("Borrowed", "borrowed"))
+            self.assertIn("borrowed", self._pref("saved_searches"))
+
+    def test_the_reader_sees_the_written_state(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.saved_search_add("Recent", "timestamp:>30daysago")
+            wdb.set_preference("virtual_libraries", {"Wing": "tags:Wing"})
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(
+                db.get_saved_searches(), {"Recent": "timestamp:>30daysago"}
+            )
+            self.assertEqual(db.get_virtual_libraries(), {"Wing": "tags:Wing"})
+
+    def test_written_search_state_resolves_in_the_engine(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_preference("virtual_libraries", {"Wing": "id:1"})
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.resolve_vl("wing"), {1})
+
+
 if __name__ == "__main__":
     unittest.main()
 

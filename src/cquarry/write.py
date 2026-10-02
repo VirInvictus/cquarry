@@ -3691,6 +3691,232 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    # -- Typed preferences (1.24; the Phase 15 ring, the 2026-09-29
+    # automation-set reversal) --
+
+    # The GUI-state rows cquarry reads and now writes: search-grammar state
+    # the ecosystem composes from. Anything else stays out: the preferences
+    # table is full of GUI internals a stdlib writer has no business
+    # guessing at.
+    _TYPED_PREFERENCE_KEYS = frozenset(
+        {
+            "saved_searches",
+            "virtual_libraries",
+            "user_categories",
+            "grouped_search_terms",
+            "fts_enabled",
+        }
+    )
+
+    def _validate_preference(self, key: str, value: Any) -> str:
+        """Type-check one writable preference payload; returns the JSON."""
+        if key == "fts_enabled":
+            if not isinstance(value, bool):
+                raise ValueError("fts_enabled takes a bool")
+        elif key in ("saved_searches", "virtual_libraries"):
+            if not isinstance(value, dict):
+                raise ValueError(f"{key} is a dict of name -> search expression")
+            for name, expr in value.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError(f"{key}: every name must be a non-empty string")
+                if not isinstance(expr, str) or not expr.strip():
+                    raise ValueError(
+                        f"{key}: {name!r} needs a non-empty search expression"
+                    )
+        elif key == "grouped_search_terms":
+            if not isinstance(value, dict):
+                raise ValueError("grouped_search_terms is a dict of name -> locations")
+            for name, members in value.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError("grouped_search_terms: names must be non-empty")
+                if (
+                    not isinstance(members, list)
+                    or not members
+                    or not all(isinstance(m, str) and m.strip() for m in members)
+                ):
+                    raise ValueError(
+                        f"grouped_search_terms: {name!r} needs a non-empty list "
+                        "of member locations"
+                    )
+        elif key == "user_categories":
+            if not isinstance(value, dict):
+                raise ValueError("user_categories is a dict of name -> member lists")
+            for name, members in value.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError("user_categories: names must be non-empty")
+                if not isinstance(members, list):
+                    raise TypeError(
+                        f"user_categories: {name!r} needs a list of members"
+                    )
+                for member in members:
+                    if (
+                        not isinstance(member, (list, tuple))
+                        or len(member) < 2
+                        or not str(member[0]).strip()
+                    ):
+                        raise ValueError(
+                            f"user_categories: {name!r} has a malformed member "
+                            "(each is [value, location, ...])"
+                        )
+        else:
+            raise ValueError(
+                f"{key!r} is not a writable preference. Writable: "
+                + ", ".join(sorted(self._TYPED_PREFERENCE_KEYS))
+            )
+        return json.dumps(value)
+
+    def set_preference(self, key: str, value: Any) -> bool:
+        """Typed upsert of one search-grammar preference row (1.24).
+
+        The keys are the GUI-state rows cquarry already reads and the
+        ecosystem composes from: ``saved_searches`` (name -> expression),
+        ``virtual_libraries`` (name -> expression), ``user_categories``
+        (name -> ``[value, location, ...]`` member lists),
+        ``grouped_search_terms`` (name -> member locations), and
+        ``fts_enabled`` (bool; Calibre builds the sidecar and drains the
+        queue on its next start). Each payload is validated by key BEFORE
+        anything is written -- a typo'd dict must not become GUI-visible
+        state -- and the whole payload is stored as one JSON row, exactly
+        the shape Calibre reads. Returns True when the stored JSON changed;
+        the callers that mutate one entry inside a map are
+        :meth:`saved_search_add` / :meth:`saved_search_delete` /
+        :meth:`saved_search_rename`.
+        """
+        if key not in self._TYPED_PREFERENCE_KEYS:
+            raise ValueError(
+                f"{key!r} is not a writable preference. Writable: "
+                + ", ".join(sorted(self._TYPED_PREFERENCE_KEYS))
+            )
+        payload = self._validate_preference(key, value)
+        self._begin()
+        try:
+            row = self.conn.execute(
+                "SELECT val FROM preferences WHERE key = ?", (key,)
+            ).fetchone()
+            if row is not None and row["val"] == payload:
+                self._rollback()
+                return False
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                (key, payload),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def _read_pref_map(self, key: str) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT val FROM preferences WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None or not isinstance(row["val"], str) or not row["val"].strip():
+            return {}
+        try:
+            decoded = json.loads(row["val"])
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    def saved_search_add(self, name: str, expression: str) -> bool:
+        """Add (or replace) one saved search. Returns True when changed.
+
+        The calibredb ``saved_searches`` parity verb over the typed
+        preference writer: an upsert on the name, the expression stored
+        stripped like upstream. An identical re-add is an honest False."""
+        name = (name or "").strip()
+        expression = (expression or "").strip()
+        if not name:
+            raise ValueError("Saved search name must not be empty")
+        if not expression:
+            raise ValueError("Saved search expression must not be empty")
+        self._begin()
+        try:
+            searches = self._read_pref_map("saved_searches")
+            if searches.get(name) == expression:
+                self._rollback()
+                return False
+            searches[name] = expression
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("saved_searches", json.dumps(searches)),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def saved_search_delete(self, name: str) -> bool:
+        """Delete one saved search by its stored spelling. Returns True
+        when a row was removed; an unknown name is an honest False
+        (upstream's exact-key pop, not a case-folding lookup)."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Saved search name must not be empty")
+        self._begin()
+        try:
+            searches = self._read_pref_map("saved_searches")
+            if name not in searches:
+                self._rollback()
+                return False
+            del searches[name]
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("saved_searches", json.dumps(searches)),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
+    def saved_search_rename(self, old_name: str, new_name: str) -> bool:
+        """Rename one saved search, keeping its expression. Returns True
+        when changed.
+
+        The old name resolves against the stored spellings first exactly,
+        then case-insensitively (the house entity-resolution rule).
+        Renaming onto another EXISTING saved search raises instead of
+        upstream's silent overwrite -- losing a saved search to a typo'd
+        rename is not recoverable here. An equal-spelling rename is an
+        honest False."""
+        old_name = (old_name or "").strip()
+        new_name = (new_name or "").strip()
+        if not old_name or not new_name:
+            raise ValueError("Saved search names must not be empty")
+        self._begin()
+        try:
+            searches = self._read_pref_map("saved_searches")
+            if old_name in searches:
+                stored = old_name
+            else:
+                stored = next(
+                    (n for n in searches if n.lower() == old_name.lower()),
+                    None,
+                )
+                if stored is None:
+                    raise ValueError(f"No saved search named {old_name!r}")
+            if stored == new_name:
+                self._rollback()
+                return False
+            if new_name in searches:
+                raise ValueError(
+                    f"A saved search named {new_name!r} already exists; "
+                    "renaming would overwrite it (upstream does overwrite; "
+                    "this deliberately refuses)"
+                )
+            searches[new_name] = searches.pop(stored)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO preferences(key, val) VALUES (?, ?)",
+                ("saved_searches", json.dumps(searches)),
+            )
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
     # -- Book lifecycle --
 
     # Upstream's library-local trash directory (constants.py TRASH_DIR_NAME);
