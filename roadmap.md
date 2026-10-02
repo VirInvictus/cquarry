@@ -233,21 +233,27 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   stored tab position first, unknown names alphabetical). Size XS. **Shipped 1.25**
   as `CalibreDB.ordered_virtual_library_names()`; per the waiver both consumers
   still carry their private copies, to retire in a future consumer wave.
+  **Retired 2026-10-02**: the consumer wave shipped (Carrel 0.6.43,
+  Hermitage 1.8.6) and both private copies are gone.
 - [x] **Unpiped-author display helper**: retires the nine `replace("|", ",")` copies
   across Carrel-calibre-web and Hermitage. Size XS. **Shipped 1.25** as
   `helpers.unpipe_author` (render-identical: a bare comma, so switching call sites
   is not a visual change); per the waiver the copies stay until a consumer wave.
+  **Retired 2026-10-02** in the consumer wave (Carrel 0.6.43: seven code sites,
+  thirteen template lines through a Jinja filter; Hermitage 1.8.6).
 - [x] **Tag-membership id-set rollup**: Carrel `cps/categories.py:29-52` builds
   `tag_path -> frozenset(book_ids)` privately because `tag_rollup` returns counts only.
   Size S. **Shipped 1.25** as `CalibreDB.tag_rollup_ids(ids=None)`; the counts-only
   helper stays for count consumers, and Carrel's private copy retires in a consumer
-  wave per the waiver.
+  wave per the waiver. **Retired 2026-10-02** (Carrel 0.6.43 adopts it).
 - [x] **Identifier-link helper, Open Library canonical** (Brandon's 2026-09-29 call):
   ISBN links resolve to `openlibrary.org/isbn/`; Carrel's WorldCat mapping
   (`quarry_grid.py:581`) switches; Hermitage's mapping is already the canonical shape
   (`codex.py:124-138`). Size XS. **Shipped 1.25** as `helpers.IDENTIFIER_LINKS` +
   `identifier_link()` (Hermitage's table verbatim, unknown types None); Carrel's
-  WorldCat switch is its consumer wave's business.
+  WorldCat switch is its consumer wave's business. **Switched 2026-10-02** in the
+  consumer wave (Carrel 0.6.43 adopts the canonical table and drops WorldCat;
+  Hermitage 1.8.6 retires its now-redundant private copy).
 
 ### Phase 17: Write-side extras
 
@@ -321,10 +327,14 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   Environments -> pypi -> Deployment branches and tags); the REST API creates
   branch-type policies only, and any branch policy rejects tag deployments outright
   (the v1.22.0 erratum). Apply if and when GitHub ships REST/UI parity.
-- [ ] **Hermitage's Flatpak side** (that repo's gate, recorded here for the trigger map):
-  the pip-floor policy decision (`requires-python >=3.14` vs the 3.13-capable compat
-  branch) and the forward-only tag the manifest's `hermitage` module pins. cquarry's
-  half is verified end to end. This is the program's first Hermitage item.
+- [x] **Hermitage's Flatpak side** (that repo's gate, recorded here for the trigger map):
+  the pip-floor policy decision and the forward-only tag the manifest's `hermitage`
+  module pins. **Decided and landed 2026-10-02** (Brandon): the install floor drops
+  to 3.13+ and the manifest repins cquarry to `v1.25.0+py313.1` -- the compat-py313
+  branch synced forward through the 1.25 line (90-commit merge; bare except-groups
+  re-parenthesized; one genuine fix: a TYPE_CHECKING annotation 3.13 evaluates
+  eagerly, quoted; the 3.13.15 suite green, 653 tests; the publish trigger stays
+  defused). Hermitage 1.8.6 shipped with the decision.
 - [x] **Dependabot's two open major-bump PRs** (actions/checkout 4 -> 7,
   actions/setup-python 5 -> 7): resolved 2026-09-30, both merged and CI green
   (#3 setup-python 5.6.0 -> 7.0.0, #4 checkout 4.4.0 -> 7.0.1).
@@ -369,15 +379,16 @@ the queue. cquarry's half of every item is phased above.
   (`backup-metadata`, `restore-database`, `clone`, `fts-index`, catalog plugin builds,
   `customize`, the calibre-debug subset, the ebook-device USBMS wrapper) and adopts
   `get_dirtied_formats()` when Phase 14 ships it.
-- **Hermitage**: adopts `get_annotations_decoded()` in `codex.py:_annotation_line`
-  (`codex.py:201-226`; cquarry side shipped 1.23.0); optionally grows
-  `strip_html(keep_paragraphs=True)` (would ride Phase 16 if Codex wants one HTML
-  definition in the family); adopts the ordered-VL-names and unpiped-author helpers in
-  Phase 16; its Flatpak pip-floor decision gates the program's install story.
-- **Carrel-calibre-web**: its roadmap (created 2026-09-29) carries the `preserve_order`
-  retirement via `list_books(sort="ids")` (shipped 1.21.0), the two raw custom-column
-  reads to `load_custom_column()`, the ORM residuals, and the Phase 16 helper
-  adoptions including the Open Library ISBN switch.
+- **Hermitage**: ADOPTED 2026-10-02 in 1.8.6 (get_annotations_decoded,
+  ordered-VL-names, unpipe_author, the canonical identifier table); the optional
+  `strip_html(keep_paragraphs=True)` growth was DECLINED for now (the local
+  `_clean_html` keeps its v1.7.0 render-parity waiver); the pip-floor decision
+  landed with 1.8.6.
+- **Carrel-calibre-web**: the Phase 16 helper adoptions (including the Open Library
+  ISBN switch) are DONE in 0.6.43 (2026-10-02; CI pin moved to v1.25.0). Its roadmap
+  still carries the `preserve_order` retirement via `list_books(sort="ids")`
+  (shipped 1.21.0), the two raw custom-column reads to `load_custom_column()`, and
+  the ORM residuals for its own lanes.
 - **Stats-metrics tripwire** (Carrel spec §12.3): unchanged; a FOURTH library-metrics
   consumer triggers the headless metrics-layer promotion. Three lanes exist today
   (CalibreQuarry `--analytics`, Hermitage Insights, Carrel `stats.py`).
