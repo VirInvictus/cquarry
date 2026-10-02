@@ -44,6 +44,7 @@ import uuid as _uuid
 from collections.abc import Callable, Generator
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Self
+from xml.etree import ElementTree
 
 from cquarry.helpers import sniff_image_format, title_sort
 from cquarry.search import BOOL_FALSE_WORDS, BOOL_TRUE_WORDS
@@ -126,6 +127,126 @@ def _same_instant(current: str | None, new: str) -> bool:
         return datetime.fromisoformat(current) == datetime.fromisoformat(new)
     except ValueError, TypeError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Calibre's sidecar metadata.opf parser (the restore-from-trash source).
+# Calibre writes this backup into every book directory it manages; a trashed
+# book directory carries the last one, and move_book_from_trash rebuilds the
+# row from it. Reads what Calibre wrote -- it does not generate OPFs (that
+# stays Calibre's own backup thread / the declined OPF-generation family).
+# ---------------------------------------------------------------------------
+
+
+def _opf_localname(tag: str) -> str:
+    """Local name of an ElementTree tag, namespaces stripped."""
+    return tag.rpartition("}")[2]
+
+
+def _read_trash_opf(opf_path: str) -> dict[str, Any]:
+    """Parse a Calibre sidecar ``metadata.opf`` into the core row fields.
+
+    Stdlib ElementTree over Calibre's own OPF, matching elements by local
+    name so namespaced and bare spellings both parse. Returns ``title``,
+    ``title_sort``, ``authors`` (deduplicated, order preserved),
+    ``author_sort``, ``tags``, ``identifiers`` (the uuid scheme becomes
+    ``uuid`` instead), ``comments``, ``publisher``, ``languages``,
+    ``pubdate``, ``timestamp``, ``series``, ``series_index``, and
+    ``rating`` (the raw 0-10 internal value). Per-author file-as sort keys,
+    custom-column values, and annotations in the OPF are deliberately not
+    returned: the restore path rebuilds the core row.
+    """
+    root = ElementTree.parse(opf_path).getroot()
+    metadata = None
+    for el in root.iter():
+        if _opf_localname(el.tag) == "metadata":
+            metadata = el
+            break
+    if metadata is None:
+        raise ValueError(f"No <metadata> element in {opf_path}")
+
+    def _text_of(localname: str) -> str | None:
+        for el in metadata:
+            if _opf_localname(el.tag) == localname:
+                text = "".join(el.itertext()).strip()
+                return text or None
+        return None
+
+    def _meta_content(name: str) -> str | None:
+        for el in metadata:
+            if _opf_localname(el.tag) == "meta" and el.get("name") == name:
+                content = (el.get("content") or "").strip()
+                return content or None
+        return None
+
+    def _float_or_none(raw: str | None) -> float | None:
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    out: dict[str, Any] = {
+        "title": _text_of("title"),
+        "title_sort": _meta_content("calibre:title_sort"),
+        "authors": [],
+        "author_sort": _meta_content("calibre:author_sort"),
+        "tags": [],
+        "identifiers": {},
+        "uuid": None,
+        "comments": _text_of("description"),
+        "publisher": _text_of("publisher"),
+        "languages": [],
+        "pubdate": _text_of("date"),
+        "timestamp": _meta_content("calibre:timestamp"),
+        "series": _meta_content("calibre:series"),
+        "series_index": _float_or_none(_meta_content("calibre:series_index")),
+        "rating": None,
+    }
+    seen_authors: set[str] = set()
+    for el in metadata:
+        if _opf_localname(el.tag) != "creator":
+            continue
+        role = (el.get("role") or "aut").strip().lower()
+        if role not in ("aut", "author"):
+            continue
+        name = "".join(el.itertext()).strip()
+        if name and name.lower() not in seen_authors:
+            seen_authors.add(name.lower())
+            out["authors"].append(name)
+    for el in metadata:
+        if _opf_localname(el.tag) != "subject":
+            continue
+        name = "".join(el.itertext()).strip()
+        if name:
+            out["tags"].append(name)
+    for el in metadata:
+        if _opf_localname(el.tag) != "identifier":
+            continue
+        scheme = (
+            el.get("scheme") or el.get("{http://www.idpf.org/2007/opf}scheme") or ""
+        ).strip()
+        value = "".join(el.itertext()).strip()
+        if not value:
+            continue
+        if scheme.lower() == "uuid":
+            out["uuid"] = value
+        elif scheme:
+            out["identifiers"][scheme.lower()] = value
+    for el in metadata:
+        if _opf_localname(el.tag) != "language":
+            continue
+        code = "".join(el.itertext()).strip()
+        if code:
+            out["languages"].append(code)
+    raw_rating = _meta_content("calibre:rating")
+    if raw_rating is not None:
+        try:
+            out["rating"] = int(float(raw_rating))
+        except ValueError:
+            pass
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2297,6 +2418,282 @@ class WritableCalibreDB:
             for category in self._TRASH_CATEGORIES:
                 os.makedirs(os.path.join(root, category), exist_ok=True)
         return removed
+
+    # -- Restore from trash (1.24; the Phase 14 opener) --
+
+    # Upstream's reserved names inside a trashed book directory: every other
+    # extension-bearing file is a format to re-register (backend.py
+    # get_metadata_for_trash_book).
+    _TRASH_RESERVED_NAMES = frozenset({"cover.jpg", "cover.png", "metadata.opf"})
+
+    def _trash_entry_path(self, category: str, book_id: int) -> str:
+        if category not in self._TRASH_CATEGORIES:
+            raise ValueError(
+                f"category must be 'b' (books) or 'f' (formats), got {category!r}"
+            )
+        return os.path.join(self._trash_root(), category, str(book_id))
+
+    def copy_format_from_trash(self, book_id: int, fmt: str, dest: str) -> str:
+        """Copy a trashed format file out of the trash to ``dest``.
+
+        The rescue half of the format trash (upstream
+        ``copy_format_from_trash``): no database involvement, the file just
+        lands at ``dest`` (created, an existing file replaced) and its
+        absolute path is returned. The trash entry stores files under their
+        bare extension (``.caltrash/f/<book_id>/<fmt>``), so ``fmt`` is
+        case-insensitive. Raises ValueError when the entry or the format
+        file is missing."""
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Format must not be empty")
+        src = os.path.join(self._trash_entry_path("f", book_id), fmt.lower())
+        if not os.path.isfile(src):
+            raise ValueError(f"No {fmt} format in the trash for book {book_id}")
+        dest = os.path.abspath(os.path.expanduser(dest))
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.copyfile(src, dest)
+        return dest
+
+    def copy_book_from_trash(self, book_id: int, dest: str) -> str:
+        """Copy a trashed book directory out of the trash to ``dest``.
+
+        The rescue half of the book trash (upstream
+        ``copy_book_from_trash``): no database involvement, the whole entry
+        (OPF sidecar, covers, format files) is copied to ``dest`` (created
+        when missing, merged over an existing directory) and returned as an
+        absolute path. Raises ValueError when the trash entry is missing."""
+        src = self._trash_entry_path("b", book_id)
+        if not os.path.isdir(src):
+            raise ValueError(f"Book {book_id} is not in the trash")
+        dest = os.path.abspath(os.path.expanduser(dest))
+        os.makedirs(dest, exist_ok=True)
+        shutil.copytree(src, dest, dirs_exist_ok=True)
+        return dest
+
+    def delete_trash_entry(self, book_id: int, category: str) -> bool:
+        """Delete one trash entry outright. Returns True when removed.
+
+        ``category`` is ``'b'`` for books, ``'f'`` for formats (upstream
+        ``delete_trash_entry``). Irreversible -- call :meth:`list_trash`
+        first if review is wanted. A missing entry is an honest False, and a
+        library with no trash at all stays untouched (no tree is
+        materialized)."""
+        path = self._trash_entry_path(category, book_id)
+        if not os.path.isdir(path):
+            return False
+        shutil.rmtree(path)
+        return True
+
+    def move_format_from_trash(self, book_id: int, fmt: str) -> bool:
+        """Undelete one format from the trash into its book (upstream
+        ``move_format_from_trash``). Returns True.
+
+        The book must exist and have a path; the trashed file (stored under
+        its bare extension) is re-registered in ``data`` under the book's
+        shared filename stem -- the stem of its surviving formats, or the
+        freshly computed ``Title - Author`` stem when none are left -- and
+        the file is placed into the book directory only after the commit
+        (deferred inside a :meth:`batch`). The restored format is queued for
+        FTS re-extraction and a pages rescan (the :meth:`set_format`
+        machinery), and the trash entry directory is removed once only its
+        ``metadata.json`` bookkeeping file remains. Raises ValueError when
+        the book, its path, or the trashed file is missing."""
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Format must not be empty")
+        # ATTACH must precede the transaction (see _ensure_fts_attached):
+        # set_format's queue write joins it.
+        self._ensure_fts_attached()
+        with self.batch():
+            self._require_book(book_id)
+            trash_dir = self._trash_entry_path("f", book_id)
+            src = os.path.join(trash_dir, fmt.lower())
+            if not os.path.isfile(src):
+                raise ValueError(f"No {fmt} format in the trash for book {book_id}")
+            with open(src, "rb") as f:
+                data = f.read()
+            # All of a book's formats share one filename stem (data.name);
+            # a book with no formats left gets the add_book stem.
+            row = self.conn.execute(
+                "SELECT name FROM data WHERE book = ? AND name IS NOT NULL "
+                "AND name != '' LIMIT 1",
+                (book_id,),
+            ).fetchone()
+            if row is not None:
+                stem = row["name"]
+            else:
+                brow = self.conn.execute(
+                    "SELECT title FROM books WHERE id = ?", (book_id,)
+                ).fetchone()
+                stem = _construct_file_name(
+                    brow["title"] or "",
+                    self._first_author_name(book_id),
+                    len(fmt) + 1,
+                )
+            book_dir = self._book_dir_path(book_id)
+            if book_dir is None:
+                raise ValueError(f"Book {book_id} has no path to place a format in")
+            dest = os.path.join(book_dir, f"{stem}.{fmt.lower()}")
+            self.set_format(book_id, fmt, stem, len(data))
+
+            def _place(dest=dest, data=data):
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                _place_bytes(data, dest)
+
+            self._pending_fs_ops.append(_place)
+
+            def _clean_entry(trash_dir=trash_dir, consumed=src):
+                # The trashed file was copied, not moved (the placement is
+                # commit-deferred), so the restore consumes it here; the
+                # entry goes once only metadata.json (or nothing) remains,
+                # upstream's remove_trash_formats_dir_if_empty rule.
+                with contextlib.suppress(OSError):
+                    os.unlink(consumed)
+                with contextlib.suppress(OSError):
+                    if len(os.listdir(trash_dir)) <= 1:
+                        shutil.rmtree(trash_dir)
+
+            self._pending_fs_ops.append(_clean_entry)
+        return True
+
+    def move_book_from_trash(self, book_id: int) -> None:
+        """Undelete a whole book from the trash (upstream
+        ``move_book_from_trash``).
+
+        The book id must NOT exist in the database; the trash entry's
+        sidecar ``metadata.opf`` (Calibre's own backup, written into the
+        directory before the trash move) is parsed to rebuild the row:
+        title and title sort, authors (the OPF's ``author_sort`` stored
+        verbatim over the recomputed one), tags, identifiers (the uuid
+        scheme becomes the preserved per-book ``uuid``), comments,
+        publisher, languages, pubdate, timestamp, series + index, and
+        rating. Every other extension-bearing file in the entry is
+        re-registered in ``data`` under its stored stem and queued for FTS
+        re-extraction; a cover file sets ``has_cover``. The directory moves
+        back to its ``Author/Title (id)`` place only after the rows COMMIT
+        (deferred inside a :meth:`batch`), and the OPF-resync queue entry
+        has Calibre regenerate a fresh sidecar on next start.
+
+        Custom-column values, annotations, and plugin data are NOT restored:
+        the sidecar OPF carries only the core metadata (annotation writes
+        are a recorded decline). Raises ValueError when the id is live, the
+        trash entry is missing, or the entry carries no ``metadata.opf``.
+        """
+        # ATTACH must precede the transaction (see _ensure_fts_attached).
+        self._ensure_fts_attached()
+        with self.batch():
+            if (
+                self.conn.execute(
+                    "SELECT 1 FROM books WHERE id = ?", (book_id,)
+                ).fetchone()
+                is not None
+            ):
+                raise ValueError(f"A book with the id {book_id} already exists")
+            trash_dir = self._trash_entry_path("b", book_id)
+            if not os.path.isdir(trash_dir):
+                raise ValueError(f"Book {book_id} is not in the trash")
+            opf_path = os.path.join(trash_dir, "metadata.opf")
+            if not os.path.isfile(opf_path):
+                raise ValueError(
+                    f"Book {book_id}'s trash entry has no metadata.opf; the row "
+                    "cannot be rebuilt (Calibre writes the sidecar OPF into "
+                    "directories it manages; a book trashed before Calibre "
+                    "ever saw it has none)"
+                )
+            meta = _read_trash_opf(opf_path)
+            title = meta["title"] or "Unknown"
+            authors: list[str] = meta["authors"]
+            first_author = authors[0] if authors else ""
+            # The entry dir carries the original id, so the recomputed
+            # layout is the layout it left with.
+            rel_path = _construct_path_name(book_id, title, first_author)
+            self.conn.execute(
+                "INSERT INTO books (id, title, author_sort, series_index, "
+                "pubdate, timestamp, path, last_modified) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    book_id,
+                    title,
+                    meta["author_sort"] or "",
+                    meta["series_index"] if meta["series_index"] is not None else 1.0,
+                    _normalize_pubdate(meta["pubdate"]),
+                    _normalize_pubdate(meta["timestamp"]),
+                    rel_path,
+                    self._now(),
+                ),
+            )
+            # books_insert_trg filled sort/uuid from the title; the OPF's
+            # stored values are the trash-time truth and win.
+            self.conn.execute(
+                "UPDATE books SET sort = ? WHERE id = ?",
+                (meta["title_sort"] or title_sort(title), book_id),
+            )
+            if meta["uuid"]:
+                self.conn.execute(
+                    "UPDATE books SET uuid = ? WHERE id = ?", (meta["uuid"], book_id)
+                )
+            if authors:
+                self.set_authors(book_id, authors)
+                if meta["author_sort"]:
+                    # set_authors recomputes from the authors' sort columns;
+                    # a fresh author row defaults to the display name, so the
+                    # OPF's stored sort is applied verbatim over it.
+                    self.conn.execute(
+                        "UPDATE books SET author_sort = ? WHERE id = ?",
+                        (meta["author_sort"], book_id),
+                    )
+            for tag in meta["tags"]:
+                self.add_tag(book_id, tag)
+            if meta["publisher"]:
+                self.set_publisher(book_id, meta["publisher"])
+            if meta["languages"]:
+                self.set_languages(book_id, meta["languages"])
+            if meta["identifiers"]:
+                self.set_identifiers(book_id, meta["identifiers"])
+            if meta["comments"]:
+                self.set_comments(book_id, meta["comments"])
+            if meta["series"]:
+                self.set_series(book_id, meta["series"], meta["series_index"])
+            if meta["rating"]:
+                # The OPF carries the internal 0-10 value; set_rating takes
+                # stars and stores it back verbatim.
+                self.set_rating(book_id, meta["rating"] / 2)
+            for name in sorted(os.listdir(trash_dir)):
+                path = os.path.join(trash_dir, name)
+                if name in self._TRASH_RESERVED_NAMES or not os.path.isfile(path):
+                    continue
+                stem, dot_ext = os.path.splitext(name)
+                ext = dot_ext[1:]
+                if not ext:
+                    continue
+                self.conn.execute(
+                    "INSERT INTO data (book, format, uncompressed_size, name) "
+                    "VALUES (?, ?, ?, ?)",
+                    (book_id, ext.upper(), os.path.getsize(path), stem),
+                )
+                self._mark_fts_dirty(book_id, ext.upper())
+            if any(
+                os.path.isfile(os.path.join(trash_dir, cover))
+                for cover in ("cover.jpg", "cover.png")
+            ):
+                self.conn.execute(
+                    "UPDATE books SET has_cover = 1 WHERE id = ?", (book_id,)
+                )
+            self._touch_book(book_id)
+            book_dir = os.path.join(os.path.dirname(self.db_path), rel_path)
+
+            def _move_back(trash_dir=trash_dir, book_dir=book_dir):
+                os.makedirs(os.path.dirname(book_dir), exist_ok=True)
+                if os.path.exists(book_dir):
+                    # ids are unique in paths, so a live book cannot own
+                    # this directory; it is a stale orphan, same rule as
+                    # _apply_relayout.
+                    shutil.rmtree(book_dir)
+                shutil.move(trash_dir, book_dir)
+
+            self._pending_fs_ops.append(_move_back)
 
     # -- Original-format save/restore (1.19; the approved C.8) --
 

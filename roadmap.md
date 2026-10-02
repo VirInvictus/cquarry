@@ -107,13 +107,15 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
 
 ### Phase 14: Completion wave (finishes contracts cquarry owns)
 
-- [ ] **Restore-from-trash verbs** (committed 2026-09-29 under the automation-set
+- [x] **Restore-from-trash verbs** (committed 2026-09-29 under the automation-set
   decision; was survey-logged). `copy_format_from_trash`/`move_format_from_trash`,
   `copy_book_from_trash`/`move_book_from_trash`, `delete_trash_entry`
   (`cache.py:3503-3568`): cquarry's own `remove_book(delete_files="trash")` is write-only
   today. Size S for the format half; the book half needs sidecar-OPF parsing (adjacent to,
   but distinct from, the declined OPF-generation family: this reads Calibre's own stored
-  OPF, it does not generate one).
+  OPF, it does not generate one). **Shipped 1.24**: the book half parses the entry's
+  sidecar `metadata.opf` (stdlib ElementTree) to rebuild the core row; custom-column
+  values, annotations, and plugin data are not restored (the OPF carries none of them).
 - [ ] **`get_dirtied_formats()` read** beside `get_dirtied_books()` and
   `get_annotations_dirtied_books()`. Retires CalibreQuarry's raw sidecar read
   (`modes/fts.py:91`) and unblocks its `fts-index` verb. Size XS.

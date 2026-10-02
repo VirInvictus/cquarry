@@ -3558,3 +3558,347 @@ class TestSeriesClearAgainstNotNullSchema(unittest.TestCase):
                 check.execute("SELECT COUNT(*) FROM books_series_link").fetchone()[0],
                 0,
             )
+
+
+class TestRestoreFromTrash(unittest.TestCase):
+    """The Phase 14 restore-from-trash verbs (1.24): a trashed book or
+    format is not a dead end. The book half rebuilds the row from the
+    sidecar metadata.opf Calibre keeps in every book directory."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)  # the seed INSERT fires books_insert_trg
+        conn.executescript(
+            """
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY, title TEXT, sort TEXT, author_sort TEXT,
+                timestamp TEXT, pubdate TEXT, series_index REAL,
+                has_cover INTEGER DEFAULT 0, uuid TEXT, path TEXT,
+                last_modified TEXT
+            );
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER UNIQUE);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT UNIQUE);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE custom_columns (
+                id INTEGER PRIMARY KEY, label TEXT UNIQUE, name TEXT, datatype TEXT,
+                editable BOOL DEFAULT 1, display TEXT DEFAULT '{}',
+                is_multiple BOOL DEFAULT 0, normalized BOOL DEFAULT 0
+            );
+            CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT, UNIQUE(book, type));
+            CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, text TEXT, UNIQUE(book));
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
+            CREATE TRIGGER books_insert_trg AFTER INSERT ON books
+            BEGIN
+                UPDATE books SET sort = title_sort(NEW.title),
+                    uuid = uuid4() WHERE id = NEW.id;
+            END;
+            CREATE TRIGGER books_delete_trg AFTER DELETE ON books
+            BEGIN
+                DELETE FROM books_authors_link WHERE book = OLD.id;
+                DELETE FROM books_tags_link WHERE book = OLD.id;
+                DELETE FROM books_publishers_link WHERE book = OLD.id;
+                DELETE FROM books_series_link WHERE book = OLD.id;
+                DELETE FROM books_ratings_link WHERE book = OLD.id;
+                DELETE FROM books_languages_link WHERE book = OLD.id;
+                DELETE FROM data WHERE book = OLD.id;
+            END;
+            INSERT INTO books (id, title, path) VALUES (1, 'Keeper', 'Keeper, A (1)');
+            INSERT INTO authors VALUES (1, 'Alive Author', 'Author, Alive');
+            INSERT INTO books_authors_link (book, author) VALUES (1, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.executescript(
+            """
+            CREATE TABLE dirtied_formats (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, format TEXT NOT NULL COLLATE NOCASE,
+                in_progress INTEGER NOT NULL DEFAULT FALSE, UNIQUE(book, format));
+            """
+        )
+        fts.commit()
+        fts.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql(self, query):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query).fetchall()]
+        finally:
+            conn.close()
+
+    def _write_opf(self, book_dir, title="The Doomed Title"):
+        # A Calibre-shaped sidecar OPF (namespaced, like the real backups).
+        opf = f"""<?xml version='1.0' encoding='utf-8'?>
+<package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+        <dc:title>{title}</dc:title>
+        <dc:creator opf:role="aut" opf:file-as="Author, Doomed">Doomed Author</dc:creator>
+        <dc:subject>Doomed Tag</dc:subject>
+        <dc:identifier opf:scheme="uuid">doomed-uuid-123</dc:identifier>
+        <dc:identifier opf:scheme="ISBN">9780123456789</dc:identifier>
+        <dc:description>&lt;p&gt;Doomed comments.&lt;/p&gt;</dc:description>
+        <dc:publisher>Doomed Pub</dc:publisher>
+        <dc:language>eng</dc:language>
+        <dc:date>2020-05-01T00:00:00+00:00</dc:date>
+        <meta name="calibre:title_sort" content="Doomed Title, The"/>
+        <meta name="calibre:author_sort" content="Author, Doomed"/>
+        <meta name="calibre:timestamp" content="2021-06-01T12:00:00+00:00"/>
+        <meta name="calibre:series" content="Doomed Series"/>
+        <meta name="calibre:series_index" content="2.0"/>
+        <meta name="calibre:rating" content="8"/>
+    </metadata>
+    <guide/>
+</package>
+"""
+        with open(os.path.join(book_dir, "metadata.opf"), "w") as f:
+            f.write(opf)
+
+    def _seed_book_dir(self, book_id, title="The Doomed Title", *, opf=True):
+        rel = f"Doomed Author/{title} ({book_id})"
+        book_dir = os.path.join(self.temp_dir, *rel.split("/"))
+        os.makedirs(book_dir, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE books SET path = ?, uuid = ? WHERE id = ?",
+            (rel, "doomed-uuid-123", book_id),
+        )
+        conn.commit()
+        conn.close()
+        with open(os.path.join(book_dir, f"{title} - Doomed Author.epub"), "w") as f:
+            f.write("xxxxx")
+        with open(os.path.join(book_dir, "cover.jpg"), "w") as f:
+            f.write("cover")
+        if opf:
+            self._write_opf(book_dir, title)
+        return rel, book_dir
+
+    def test_move_book_round_trip(self):
+        rel, book_dir = self._seed_book_dir(3)
+        with WritableCalibreDB(self.db_path) as wdb:
+            # A live row with the satellites, like a real doomed book.
+            wdb.conn.execute(
+                "INSERT INTO books (id, title, series_index, author_sort, path, "
+                "pubdate, timestamp) VALUES (3, 'The Doomed Title', 2.0, "
+                "'Author, Doomed', ?, '2020-05-01 00:00:00+00:00', "
+                "'2021-06-01 12:00:00+00:00')",
+                (rel,),
+            )
+            wdb.conn.commit()  # the raw INSERT opened an implicit transaction
+            wdb.set_authors(3, ["Doomed Author"])
+            wdb.add_tag(3, "Doomed Tag")
+            wdb.set_publisher(3, "Doomed Pub")
+            wdb.set_series(3, "Doomed Series", 2.0)
+            wdb.set_rating(3, 4.0)
+            wdb.set_languages(3, ["eng"])
+            wdb.set_identifier(3, "isbn", "9780123456789")
+            wdb.set_comments(3, "<p>Doomed comments.</p>")
+            wdb.add_format(3, "EPUB", "The Doomed Title - Doomed Author", 5)
+            wdb.remove_book(3, delete_files="trash")
+        # The trash half: rows gone, directory parked in .caltrash/b/3.
+        self.assertEqual(self._sql("SELECT id FROM books"), [(1,)])
+        self.assertFalse(os.path.isdir(book_dir))
+        trashed = os.path.join(self.temp_dir, ".caltrash", "b", "3")
+        self.assertTrue(os.path.isfile(os.path.join(trashed, "metadata.opf")))
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.move_book_from_trash(3)
+        # The row is back with the OPF's values, original id and uuid.
+        row = self._sql(
+            "SELECT title, sort, author_sort, uuid, path, series_index, "
+            "has_cover, pubdate, timestamp FROM books WHERE id = 3"
+        )[0]
+        self.assertEqual(row[0], "The Doomed Title")
+        self.assertEqual(row[1], "Doomed Title, The")
+        self.assertEqual(row[2], "Author, Doomed")
+        self.assertEqual(row[3], "doomed-uuid-123")
+        self.assertEqual(row[4], rel)
+        self.assertEqual(row[5], 2.0)
+        self.assertEqual(row[6], 1)
+        self.assertEqual(row[7], "2020-05-01 00:00:00+00:00")
+        self.assertEqual(row[8], "2021-06-01 12:00:00+00:00")
+        # Links rebuilt; the fresh author row defaults sort to the display
+        # name while the book's author_sort keeps the OPF's file-as.
+        self.assertEqual(
+            self._sql("SELECT name FROM authors WHERE id > 1"), [("Doomed Author",)]
+        )
+        self.assertEqual(self._sql("SELECT name FROM tags"), [("Doomed Tag",)])
+        self.assertEqual(self._sql("SELECT name FROM publishers"), [("Doomed Pub",)])
+        self.assertEqual(self._sql("SELECT name FROM series"), [("Doomed Series",)])
+        self.assertEqual(self._sql("SELECT rating FROM ratings"), [(8,)])
+        self.assertEqual(self._sql("SELECT lang_code FROM languages"), [("eng",)])
+        self.assertEqual(
+            self._sql("SELECT type, val FROM identifiers WHERE book = 3"),
+            [("isbn", "9780123456789")],
+        )
+        self.assertEqual(
+            self._sql("SELECT text FROM comments WHERE book = 3"),
+            [("<p>Doomed comments.</p>",)],
+        )
+        # The format row and the files came home; the trash entry is gone.
+        self.assertEqual(
+            self._sql(
+                "SELECT format, uncompressed_size, name FROM data WHERE book = 3"
+            ),
+            [("EPUB", 5, "The Doomed Title - Doomed Author")],
+        )
+        self.assertTrue(
+            os.path.isfile(
+                os.path.join(book_dir, "The Doomed Title - Doomed Author.epub")
+            )
+        )
+        self.assertTrue(os.path.isfile(os.path.join(book_dir, "cover.jpg")))
+        self.assertFalse(os.path.exists(trashed))
+        # OPF resync queued (Calibre regenerates the sidecar) and the
+        # restored format queued for FTS re-extraction.
+        self.assertEqual(self._sql("SELECT book FROM metadata_dirtied"), [(3,)])
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        try:
+            queued = sorted(fts.execute("SELECT book, format FROM dirtied_formats"))
+        finally:
+            fts.close()
+        self.assertIn((3, "EPUB"), queued)
+
+    def test_move_book_refuses_a_live_id_and_keeps_the_entry(self):
+        _rel, book_dir = self._seed_book_dir(3)
+        trashed = os.path.join(self.temp_dir, ".caltrash", "b", "3")
+        os.makedirs(os.path.dirname(trashed), exist_ok=True)
+        shutil.move(book_dir, trashed)
+        with (
+            WritableCalibreDB(self.db_path) as wdb,
+            self.assertRaises(ValueError),
+        ):
+            wdb.move_book_from_trash(1)
+        self.assertTrue(os.path.isdir(trashed))
+
+    def test_move_book_missing_entry_and_missing_opf_raise(self):
+        with (
+            WritableCalibreDB(self.db_path) as wdb,
+            self.assertRaises(ValueError),
+        ):
+            wdb.move_book_from_trash(9)  # no entry at all
+        # An entry without the sidecar OPF cannot rebuild a row.
+        entry = os.path.join(self.temp_dir, ".caltrash", "b", "9")
+        os.makedirs(entry)
+        with open(os.path.join(entry, "x.epub"), "w") as f:
+            f.write("x")
+        with (
+            WritableCalibreDB(self.db_path) as wdb,
+            self.assertRaises(ValueError),
+        ):
+            wdb.move_book_from_trash(9)
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM books WHERE id = 9"), [(0,)])
+
+    def test_move_book_inside_failed_batch_rolls_back(self):
+        _rel, book_dir = self._seed_book_dir(3)
+        trashed = os.path.join(self.temp_dir, ".caltrash", "b", "3")
+        os.makedirs(os.path.dirname(trashed), exist_ok=True)
+        shutil.move(book_dir, trashed)
+        with (
+            self.assertRaises(ValueError),
+            WritableCalibreDB(self.db_path) as wdb,
+            wdb.batch(),
+        ):
+            wdb.move_book_from_trash(3)
+            wdb.remove_book(999)  # fails the pass
+        self.assertEqual(self._sql("SELECT id FROM books"), [(1,)])
+        self.assertTrue(os.path.isdir(trashed))
+
+    def test_move_format_from_trash_round_trip(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO data (book, format, uncompressed_size, name) "
+            "VALUES (1, 'MOBI', 3, 'Keeper - Alive Author')"
+        )
+        conn.commit()
+        conn.close()
+        entry = os.path.join(self.temp_dir, ".caltrash", "f", "1")
+        os.makedirs(entry)
+        with open(os.path.join(entry, "epub"), "w") as f:
+            f.write("xxxxxxxxx")  # 9 bytes
+        with open(os.path.join(entry, "metadata.json"), "w") as f:
+            f.write("{}")
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.move_format_from_trash(1, "epub"))
+        # The row uses the book's surviving stem; the file sits beside the
+        # MOBI; the entry (only metadata.json left) is cleaned up.
+        self.assertEqual(
+            self._sql(
+                "SELECT format, uncompressed_size, name FROM data "
+                "WHERE book = 1 AND format = 'EPUB'"
+            ),
+            [("EPUB", 9, "Keeper - Alive Author")],
+        )
+        self.assertTrue(
+            os.path.isfile(
+                os.path.join(
+                    self.temp_dir, "Keeper, A (1)", "Keeper - Alive Author.epub"
+                )
+            )
+        )
+        self.assertFalse(os.path.exists(entry))
+
+    def test_move_format_from_trash_missing_targets_raise(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.move_format_from_trash(99, "epub")  # unknown book
+            with self.assertRaises(ValueError):
+                wdb.move_format_from_trash(1, "epub")  # no trash entry
+
+    def test_copy_verbs_leave_the_database_alone(self):
+        _rel, book_dir = self._seed_book_dir(3)
+        book_entry = os.path.join(self.temp_dir, ".caltrash", "b", "3")
+        os.makedirs(os.path.dirname(book_entry), exist_ok=True)
+        shutil.move(book_dir, book_entry)
+        entry = os.path.join(self.temp_dir, ".caltrash", "f", "3")
+        os.makedirs(entry)
+        with open(os.path.join(entry, "epub"), "w") as f:
+            f.write("epubbytes")
+        with WritableCalibreDB(self.db_path) as wdb:
+            dest_fmt = wdb.copy_format_from_trash(
+                3, "EPUB", os.path.join(self.temp_dir, "rescued.epub")
+            )
+            dest_book = wdb.copy_book_from_trash(
+                3, os.path.join(self.temp_dir, "rescued-book")
+            )
+        self.assertTrue(os.path.isfile(dest_fmt))
+        self.assertTrue(os.path.isfile(os.path.join(dest_book, "metadata.opf")))
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM data"), [(0,)])
+        # Both entries are still in the trash.
+        self.assertTrue(os.path.isdir(book_entry))
+        self.assertTrue(os.path.isfile(os.path.join(entry, "epub")))
+
+    def test_delete_trash_entry(self):
+        entry = os.path.join(self.temp_dir, ".caltrash", "b", "3")
+        os.makedirs(entry)
+        with open(os.path.join(entry, "x.epub"), "w") as f:
+            f.write("x")
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.delete_trash_entry(3, "b"))
+            self.assertFalse(wdb.delete_trash_entry(3, "b"))  # already gone
+            with self.assertRaises(ValueError):
+                wdb.delete_trash_entry(3, "z")  # invalid category
+        self.assertFalse(os.path.exists(entry))
+
+    def test_trash_verbs_do_not_materialize_a_trash_tree(self):
+        # The 1.20.1 LOW rule holds for the restore family too: a library
+        # that never trashed gains no .caltrash directories.
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertFalse(wdb.delete_trash_entry(1, "b"))
+            with self.assertRaises(ValueError):
+                wdb.copy_book_from_trash(1, os.path.join(self.temp_dir, "x"))
+        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, ".caltrash")))
