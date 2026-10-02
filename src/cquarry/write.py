@@ -296,6 +296,22 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 _FILENAME_ILLEGAL = frozenset('\\|?*<>":+/') | {chr(i) for i in range(32)}
 
 
+def _unframe_conversion_blob(blob: bytes) -> bytes:
+    """Strip upstream's protocol-2 BINSTRING frame from a stored
+    conversion-options blob (b'\x80\x02T' + 4-byte LE length + payload +
+    b'.'), returning the inner payload. A blob that does not carry a
+    self-consistent frame returns verbatim -- pre-1.26 cquarry rows and
+    hand-written payloads are stored raw."""
+    if (
+        len(blob) > 8
+        and blob[:3] == b"\x80\x02T"
+        and blob[-1:] == b"."
+        and int.from_bytes(blob[3:7], "little") == len(blob) - 8
+    ):
+        return blob[7:-1]
+    return blob
+
+
 def _ascii_filename(text: str, substitute: str = "_") -> str:
     """Sanitize one path component the way upstream's ``ascii_filename`` +
     ``sanitize_file_name`` chain does, with the plain ASCII fold."""
@@ -1279,7 +1295,9 @@ class WritableCalibreDB:
                     )
         return len(affected)
 
-    def set_author_sort_name(self, name: str, sort: str) -> int:
+    def set_author_sort_name(
+        self, name: str, sort: str, *, update_books: bool = True
+    ) -> int:
         """Set one author's per-author sort key (upstream
         ``set_sort_for_authors``, the row-level column behind the book-level
         ``author_sort``).
@@ -1288,11 +1306,14 @@ class WritableCalibreDB:
         fallback, ``authors.sort`` stores ``sort`` verbatim, and every book
         of the author recomputes ``books.author_sort`` as its authors' sort
         keys joined " & " in link order -- the same computation
-        :meth:`set_authors` performs -- and is touched and queued for OPF
-        resync. Returns the number of books affected (0 when the sort was
-        already equal). Raises ValueError for an empty sort, an unknown
-        author, or a schema whose authors table predates the ``sort``
-        column.
+        :meth:`set_authors` performs -- touched and queued for OPF resync.
+        ``update_books=False`` (upstream's
+        ``set_sort_for_authors(..., update_books=False)`` shape, used by the
+        cross-library copy) writes the sort ROW only, leaving every book's
+        ``author_sort`` and the queues untouched. An equal stored sort is an
+        honest no-op returning 0. Returns the number of books affected.
+        Raises ValueError for an empty sort, an unknown author, or a schema
+        whose authors table predates the ``sort`` column.
         """
         if not isinstance(sort, str) or not sort.strip():
             raise ValueError("Author sort must not be empty")
@@ -1302,11 +1323,11 @@ class WritableCalibreDB:
         affected: list[int] = []
         with self.batch():
             row = self.conn.execute(
-                "SELECT id FROM authors WHERE name = ?", (name,)
+                "SELECT id, sort FROM authors WHERE name = ?", (name,)
             ).fetchone()
             if row is None:
                 row = self.conn.execute(
-                    "SELECT id FROM authors WHERE name = ? COLLATE NOCASE "
+                    "SELECT id, sort FROM authors WHERE name = ? COLLATE NOCASE "
                     "ORDER BY id LIMIT 1",
                     (name,),
                 ).fetchone()
@@ -1315,6 +1336,11 @@ class WritableCalibreDB:
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(authors)")}
             if "sort" not in cols:
                 raise ValueError("Authors table predates the sort column")
+            if (row["sort"] or "") == sort:
+                # Honest no-op: an equal stored sort must not touch and
+                # queue every book of the author.
+                self._rollback()
+                return 0
             self.conn.execute(
                 "UPDATE authors SET sort = ? WHERE id = ?", (sort, row["id"])
             )
@@ -1326,6 +1352,10 @@ class WritableCalibreDB:
                     (row["id"],),
                 )
             ]
+            if not update_books:
+                # Upstream's update_books=False: the sort ROW commits (the
+                # batch exit) but no book is touched or queued.
+                return len(affected)
             for book_id in affected:
                 sorts = [
                     r["s"] or r["name"]
@@ -2568,6 +2598,18 @@ class WritableCalibreDB:
             changed = self.conn.total_changes > before
             if changed:
                 self._clear_fts_dirty(book_id, fmt.strip().upper())
+                # Upstream's remove_formats queues a pages rescan
+                # (cache.py:2576-2577) -- page counts may reflect the
+                # removed format until one is recomputed. Schema-guarded
+                # like set_pages.
+                if self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='books_pages_link'"
+                ).fetchone():
+                    self.conn.execute(
+                        "UPDATE books_pages_link SET needs_scan = 1 WHERE book = ?",
+                        (book_id,),
+                    )
                 self._touch_book(book_id)
             self._commit()
             return changed
@@ -2734,7 +2776,11 @@ class WritableCalibreDB:
                 changed = self.conn.total_changes > before
                 self._commit()
                 return changed
-            payload = val if isinstance(val, str) else json.dumps(val, default=str)
+            # Upstream add_custom_data json.dumps EVERY value (its reader
+            # json.loads with a revive hook), so a verbatim plain string is
+            # unreadable to Calibre -- the 1.25 str-verbatim shortcut is
+            # gone; payloads serialize exactly like upstream's writer.
+            payload = json.dumps(val, default=str)
             self.conn.execute(
                 "INSERT OR REPLACE INTO books_plugin_data (book, name, val) "
                 "VALUES (?, ?, ?)",
@@ -2782,7 +2828,14 @@ class WritableCalibreDB:
                 changed = self.conn.total_changes > before
                 self._commit()
                 return changed
-            payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+            raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+            # Upstream set_conversion_options wraps the payload in a fixed
+            # protocol-2 BINSTRING pickle frame (backend.py:2955-2964:
+            # b'\x80\x02T' + 4-byte LE length + payload + b'.'). The frame
+            # is deterministic bytes -- no pickle module needed to WRITE it;
+            # without it Calibre's unpickling reader answers None for every
+            # fresh cquarry-written row.
+            payload = b"\x80\x02T" + len(raw).to_bytes(4, "little") + raw + b"."
             self.conn.execute(
                 "INSERT OR REPLACE INTO conversion_options (book, format, data) "
                 "VALUES (?, ?, ?)",
@@ -4012,7 +4065,10 @@ class WritableCalibreDB:
             for tag in row["tags"] or []:
                 self.add_tag(new_id, tag)
             if row["series"]:
-                self.set_series(new_id, row["series"], row["series_index"] or 1.0)
+                # Verbatim index (upstream carries mi.series_index as-is):
+                # a legitimate 0.0 must not be coerced to 1.0.
+                index = row["series_index"] if row["series_index"] is not None else 1.0
+                self.set_series(new_id, row["series"], index)
             if row["rating"]:
                 self.set_rating(new_id, row["rating"] / 2.0)
             if row["languages"]:
@@ -4024,7 +4080,10 @@ class WritableCalibreDB:
             # survives the copy exactly as it reads in the source.
             for name, stored in zip(authors, author_sorts):
                 if stored and stored != name:
-                    self.set_author_sort_name(name, stored)
+                    # update_books=False, upstream's postprocess_copy: the
+                    # sort ROW is set but existing destination books keep
+                    # their author_sort (only the new book reflects it).
+                    self.set_author_sort_name(name, stored, update_books=False)
             if row["author_sort"]:
                 self.set_author_sort(new_id, row["author_sort"])
             if row["title_sort"] and row["title_sort"] != row["title"]:
@@ -4037,12 +4096,16 @@ class WritableCalibreDB:
                 self.set_timestamp(new_id, datetime.now(UTC))
             # The postprocess half of copy_one_book: conversion overrides
             # ride the blob writer verbatim (upstream copies them the same
-            # way; plugin data it does not copy, and neither do we).
+            # way; plugin data it does not copy, and neither do we). The
+            # source blob arrives FRAMED (upstream's stored shape), so the
+            # inner payload is unwrapped before the writer re-frames it.
             for profile in src_db.get_conversion_profiles(book_id):
                 blob = profile.get("data")
                 if isinstance(blob, (bytes, bytearray)) and blob:
                     self.set_conversion_options(
-                        new_id, bytes(blob), fmt=profile.get("format") or "PIPE"
+                        new_id,
+                        _unframe_conversion_blob(bytes(blob)),
+                        fmt=profile.get("format") or "PIPE",
                     )
         return new_id
 

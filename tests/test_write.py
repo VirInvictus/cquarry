@@ -4429,13 +4429,22 @@ class TestAuthorSortNameAndLinkMap(_WriteSideFixture, unittest.TestCase):
             self.assertEqual(wdb.set_author_sort_name("zed a. writer", "W, Z.A."), 2)
 
     def test_author_sort_name_honest_noop(self):
+        # The docstring promised this from day one; the 1.25 body never
+        # compared (it touched and queued every book of the author). The
+        # 1.26 body honors it -- and the fixture's stored sort IS
+        # 'Writer, Zed A.', so the very first call is the no-op.
         with self._wdb() as wdb:
             self.assertEqual(
-                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed A."), 2
+                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed A."), 0
             )
-            # Equal stored sort: books recompute to the same string.
             self.assertEqual(
-                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed A."), 2
+                self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)]
+            )
+            self.assertEqual(
+                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed"), 2
+            )
+            self.assertEqual(
+                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed"), 0
             )
 
     def test_author_sort_name_rejects_empty_and_unknown(self):
@@ -4957,12 +4966,15 @@ class TestBlobWriters(unittest.TestCase):
             conn.close()
 
     def test_plugin_data_str_verbatim_json_serialized_and_delete(self):
+        # 1.26: every payload json.dumps's like upstream's writer -- a
+        # verbatim plain string was unreadable to upstream's json.loads
+        # reader (it needs quoted JSON strings).
         with WritableCalibreDB(self.db_path) as wdb:
             self.assertTrue(wdb.set_plugin_data(1, "wordcount", "5123"))
             self.assertTrue(wdb.set_plugin_data(1, "metrics", {"a": 1}))
             self.assertEqual(
                 self._sql("SELECT val FROM books_plugin_data WHERE name='wordcount'"),
-                [("5123",)],
+                [('"5123"',)],
             )
             self.assertEqual(
                 json.loads(
@@ -4986,15 +4998,20 @@ class TestBlobWriters(unittest.TestCase):
                 wdb.set_plugin_data(999, "name", "x")
 
     def test_conversion_options_passthrough_and_delete(self):
+        # 1.26: fresh payloads store inside upstream's protocol-2 BINSTRING
+        # frame, so Calibre's unpickling reader can decode them.
         with WritableCalibreDB(self.db_path) as wdb:
-            blob = b"\x80\x04 pickled-recipe-bytes"
-            self.assertTrue(wdb.set_conversion_options(1, blob))
+            self.assertTrue(wdb.set_conversion_options(1, b"recipe-bytes"))
             self.assertTrue(wdb.set_conversion_options(1, "text payload", fmt="mobi"))
             rows = self._sql(
                 "SELECT format, data FROM conversion_options ORDER BY format"
             )
             self.assertEqual(rows[0][0], "MOBI")  # NOCASE lookup, stored spelling ours
-            self.assertEqual(rows[1], ("PIPE", blob))
+            frame = rows[1][1]
+            self.assertTrue(frame.startswith(b"\x80\x02T"))
+            self.assertEqual(int.from_bytes(frame[3:7], "little"), 12)
+            self.assertEqual(frame[7:-1], b"recipe-bytes")  # 3 magic + 4 length
+            self.assertEqual(frame[-1:], b".")
             self.assertTrue(wdb.set_conversion_options(1, None, fmt="mobi"))
             self.assertFalse(wdb.set_conversion_options(1, None, fmt="mobi"))
             self.assertEqual(
@@ -5106,12 +5123,13 @@ class TestBlobWriters(unittest.TestCase):
             wdb.set_plugin_data(1, "wordcount", "10")
         with CalibreDB(src_path) as src, WritableCalibreDB(self.db_path) as dest:
             new_id = dest.copy_book_from_library(src, 1)
-        self.assertEqual(
-            self._sql(
-                "SELECT format, data FROM conversion_options WHERE book=?", (new_id,)
-            ),
-            [("PIPE", b"recipe")],
-        )
+        # The destination stores the framed shape (upstream's column
+        # contract): the source's framed blob is unwrapped and re-framed.
+        dest_blob = self._sql(
+            "SELECT data FROM conversion_options WHERE book=?", (new_id,)
+        )[0][0]
+        self.assertTrue(dest_blob.startswith(b"\x80\x02T"))
+        self.assertEqual(dest_blob[7:-1], b"recipe")
         # The source book's plugin data does NOT follow (upstream's copy doesn't).
         self.assertEqual(self._sql("SELECT book FROM books_plugin_data"), [(1,)])
 
