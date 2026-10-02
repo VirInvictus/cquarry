@@ -359,11 +359,16 @@ the all:false loop, cover's numeric vocabulary, the creation-time author
 flip + comma->pipe, remove_format's needs_scan, always-JSON plugin data,
 the conversion-options frame (with the copy path unwrapping framed
 sources), and the honest sort-writer no-op + update_books=False. Recorded
-as spec §5 additions rather than changed: the enum count-operator gap,
-negative `Ndaysago`, `dayago` singular, `loc:="X"`'s contains-vs-exact
-degradation, the translated date vocabulary, the search-behavior prefs,
-and the unregistered-`@name:` sweep (each is dependency-bound or
-GUI-state-bound; §5 carries them). Also recorded, not adopted: upstream's
+as spec §5 entries 14-17 rather than changed (2026-10-02): the enum
+count-operator gap, negative `Ndaysago`, `dayago` singular, `loc:="X"`'s
+contains-vs-exact degradation, the translated date vocabulary, and the
+search-behavior prefs (each is dependency-bound or GUI-state-bound; §5
+carries them). The audit's seventh search item, the unregistered-`@name:`
+all: sweep, was RETRACTED against the upstream reference clone
+(db/search.py:601-602, :719-721, get_user_category_matches:907-929):
+upstream returns the empty set for an unregistered `@name:`, same as
+cquarry -- no divergence to record, and CLAUDE.md's match-nothing claim
+was right all along. Also recorded, not adopted: upstream's
 localized language node names, ICU sort keys, avg_rating's 0-vs-None
 default, and the popularity/first-letter sort parameters (presentational
 or ICU-bound).
@@ -478,14 +483,16 @@ or ICU-bound).
   not apply to them (corrects an assumption, does not reverse a decline).
 - add_book upstream side effects not reproduced or documented:
   `new_book_tags` pref application and custom-column `default_value` fills.
-- spec §5 additions owed from the search audit: enum-multi count operator
-  unavailable, negative `Ndaysago` accepted upstream (and `dayago` singular
-  only in cquarry), `loc:="X"` degrades to CONTAINS upstream (drops the =)
-  vs exact in cquarry -- §5.10's "mis-lexes" understates a result-set
-  difference, translated date vocabulary, the search-behavior prefs
-  (case_sensitive, use_primary_find_in_search, limit_search_columns) absent
-  from §5.4's GUI-state list, unregistered `@name:` upstream sweeps the
-  literal as an all: text search.
+- spec §5 additions from the search audit: RECORDED 2026-10-02 as spec
+  §5 entries 14-17 -- enum-multi count operator unavailable, negative
+  `Ndaysago` accepted upstream (and `dayago` singular only in cquarry),
+  `loc:="X"` degrades to CONTAINS upstream (drops the =) vs exact in
+  cquarry (§5.10's "mis-lexes" understated a result-set difference),
+  translated date vocabulary, the search-behavior prefs
+  (case_sensitive, use_primary_find_in_search, limit_search_columns)
+  outside §5.4's GUI-state list. The seventh (unregistered `@name:`
+  sweeping the literal as an all: text search) was retracted the same
+  day: upstream's reference clone matches nothing, same as cquarry.
 
 ### Confirmed parity (the audits' positive findings)
 
