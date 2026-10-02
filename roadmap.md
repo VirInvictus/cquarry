@@ -259,8 +259,11 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   plus custom columns by `#label`; one named deviation from upstream: unknown values
   raise instead of vanishing silently (a link targeted at a misspelled name should
   fail loudly).
-- [ ] Pages value writer (`set_pages`, `cache.py:2100`): a frontend that computes page
+- [x] Pages value writer (`set_pages`, `cache.py:2100`): a frontend that computes page
   counts itself cannot record the value or clear the `needs_scan` flag today. Size XS.
+  **Shipped 1.25**: one row per book (the book column is the table's PRIMARY KEY),
+  `needs_scan` lands 0, honest no-op on an identical clean row, pending scans always
+  rewrite.
 - [ ] Extra-files (`data/` dir) verbs (`cache.py:4099-4181`): cquarry ignores the data
   directory entirely, reads included. Size S-M.
 - [ ] A blessed cross-library copy primitive (modeled on `copy_to_library.py:77`):
