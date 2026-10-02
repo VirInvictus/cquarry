@@ -2601,6 +2601,78 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    def set_pages(
+        self,
+        book_id: int,
+        pages: int,
+        *,
+        algorithm: int = 0,
+        format: str = "",
+        format_size: int = 0,
+    ) -> bool:
+        """Set the page-count row (upstream ``set_pages``): a frontend that
+        computes page counts itself records the value and clears
+        ``needs_scan``.
+
+        One ``books_pages_link`` row per book (the column is the table's
+        PRIMARY KEY): an existing row is replaced, ``needs_scan`` lands as 0
+        -- a real value is exactly what the pending rescan was waiting for
+        -- and the book is touched and queued for OPF resync like every
+        setter. ``algorithm`` is the producing profile (Calibre's CountPages
+        ids), ``format``/``format_size`` the provenance of the file the
+        count came from. Returns True when a row was written, False when an
+        identical row with ``needs_scan`` already 0 exists. Raises
+        ValueError for a negative ``pages``, an unknown book, or a schema
+        predating the native table.
+        """
+        if pages is None or int(pages) < 0:
+            raise ValueError(f"pages must be a non-negative integer, got {pages!r}")
+        self._begin()
+        try:
+            self._require_book(book_id)
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='books_pages_link'"
+            ).fetchone()
+            if exists is None:
+                raise ValueError("Schema predates books_pages_link")
+            old = self.conn.execute(
+                "SELECT pages, algorithm, format, format_size, needs_scan "
+                "FROM books_pages_link WHERE book = ?",
+                (book_id,),
+            ).fetchone()
+            new = (
+                int(pages),
+                int(algorithm),
+                (format or "").upper(),
+                int(format_size),
+            )
+            if (
+                old is not None
+                and not old["needs_scan"]
+                and (
+                    int(old["pages"]),
+                    int(old["algorithm"]),
+                    old["format"] or "",
+                    int(old["format_size"]),
+                )
+                == new
+            ):
+                self._rollback()
+                return False
+            self.conn.execute("DELETE FROM books_pages_link WHERE book = ?", (book_id,))
+            self.conn.execute(
+                "INSERT INTO books_pages_link (book, pages, algorithm, format, "
+                "format_size, timestamp, needs_scan) VALUES (?,?,?,?,?,?,0)",
+                (book_id, new[0], new[1], new[2], new[3], self._now()),
+            )
+            self._touch_book(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
+
     def set_has_cover(self, book_id: int, has_cover: bool) -> bool:
         """Toggle the catalogued ``has_cover`` flag (the cover FILE itself is
         the caller's responsibility). Returns True when the flag flipped."""

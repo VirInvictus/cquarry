@@ -4449,3 +4449,111 @@ class TestAuthorSortNameAndLinkMap(_WriteSideFixture, unittest.TestCase):
             self._sql2("SELECT link FROM custom_column_3 WHERE id=1"),
             [("https://gr/ya",)],
         )
+
+
+class TestSetPages(unittest.TestCase):
+    """set_pages: the page-count row writer (1.25, Phase 17 item 15)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                timestamp TEXT, last_modified TEXT, path TEXT);
+            CREATE TABLE books_pages_link (
+                book INTEGER PRIMARY KEY,
+                pages INTEGER DEFAULT 0 NOT NULL,
+                algorithm INTEGER DEFAULT 0 NOT NULL,
+                format TEXT DEFAULT '' NOT NULL COLLATE NOCASE,
+                format_size INTEGER DEFAULT 0 NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                needs_scan INTEGER NOT NULL DEFAULT 0 CHECK(needs_scan IN (0, 1))
+            );
+            CREATE TABLE metadata_dirtied (
+                id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book)
+            );
+            INSERT INTO books (id, title) VALUES (1, 'One');
+            INSERT INTO books_pages_link (book, pages, algorithm, format, format_size, needs_scan)
+                VALUES (1, 100, 4, 'EPUB', 1234, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql(self, query):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query).fetchall()]
+        finally:
+            conn.close()
+
+    def test_replace_row_and_clear_needs_scan(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(
+                wdb.set_pages(1, 321, algorithm=4, format="epub", format_size=2000)
+            )
+        self.assertEqual(
+            self._sql(
+                "SELECT pages, algorithm, format, format_size, needs_scan FROM books_pages_link WHERE book=1"
+            ),
+            [(321, 4, "EPUB", 2000, 0)],
+        )
+        self.assertEqual(self._sql("SELECT book FROM metadata_dirtied"), [(1,)])
+
+    def test_fresh_row_for_a_book_without_one(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO books (id, title) VALUES (2, 'Two')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.set_pages(2, 55))
+        self.assertEqual(
+            self._sql("SELECT pages, needs_scan FROM books_pages_link WHERE book=2"),
+            [(55, 0)],
+        )
+
+    def test_identical_row_with_clean_flag_is_honest_noop(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE books_pages_link SET needs_scan = 0 WHERE book = 1")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertFalse(
+                wdb.set_pages(1, 100, algorithm=4, format="EPUB", format_size=1234)
+            )
+
+    def test_pending_scan_always_rewrites(self):
+        # needs_scan=1 means the stored count is stale; an equal value still
+        # lands so the flag clears.
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(
+                wdb.set_pages(1, 100, algorithm=4, format="EPUB", format_size=1234)
+            )
+        self.assertEqual(
+            self._sql("SELECT needs_scan FROM books_pages_link WHERE book=1"), [(0,)]
+        )
+
+    def test_negative_pages_and_unknown_book_raise(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_pages(1, -1)
+            with self.assertRaises(ValueError):
+                wdb.set_pages(999, 10)
+
+    def test_schema_predating_the_table_raises(self):
+        path2 = os.path.join(self.temp_dir, "old.db")
+        conn = sqlite3.connect(path2)
+        conn.executescript(
+            "CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,"
+            " timestamp TEXT, last_modified TEXT, path TEXT);"
+            "INSERT INTO books (id, title) VALUES (1, 'Old');"
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(path2) as wdb, self.assertRaises(ValueError):
+            wdb.set_pages(1, 10)
