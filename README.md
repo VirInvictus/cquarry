@@ -123,7 +123,7 @@ python -m pytest tests/ -v        # verbose
 
 Run with `PYTHONPATH=src` to exercise this checkout rather than any installed copy.
 
-Six test modules: `test_db.py` (CalibreDB against fixture databases), `test_helpers.py` (utility functions), `test_search.py` (parser, matcher, and integration tests), `test_write.py` (opt-in write module with trigger-hazard fixtures), `test_integrity.py` (library integrity predicates), and `test_analytics.py` (analytics derivations).
+Nine test modules: `test_db.py` (CalibreDB against fixture databases), `test_helpers.py` (utility functions), `test_search.py` (parser, matcher, and integration tests), `test_write.py` (opt-in write module with trigger-hazard fixtures), `test_integrity.py` (library integrity predicates), `test_analytics.py` (analytics derivations), `test_config.py`, `test_coverage_fills.py`, and `test_version_sync.py` (the eight-carrier version guard).
 
 See [spec.md](spec.md) for the full contract and [roadmap.md](roadmap.md) for planned work.
 

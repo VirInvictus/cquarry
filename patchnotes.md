@@ -1,3 +1,105 @@
+## v1.25.0 (2026-10-02)
+
+### The parity program's second release: Phases 16, 17, and 18 land
+
+The 2026-09-29 reopen's remaining three phases ship in one release: the
+read-surface wave with the four shared-helper promotions (Phase 16), the
+write-side extras (Phase 17), and the restricted tag browser (Phase 18). The
+Cross-Repo Rule consumers affected this round are Carrel-calibre-web and
+Hermitage; the four promotions carry the standing 2026-10-01 waiver (the
+helpers land here, the consumers' private copies retire in a future consumer
+wave), and both consumer roadmaps carry the adoption rows.
+
+- **Phase 16 reads.** `get_cover_bytes`/`get_cover_last_modified` (the
+  web-frontend pair: raw bytes for serving, an aware-UTC mtime for
+  conditional GET, riding `get_cover_path`'s resolution);
+  `virtual_libraries_for_books` and `user_categories_for_books` (the
+  inverse maps: every book -> the wings / @Name members it holds, resolved
+  through the same engine paths as the search locations so the answers
+  agree with `vl:`/`@Name:` queries; wings that fail to evaluate are
+  skipped with a warning where upstream splices an error string into the
+  name tuples); `format_hash`/`format_metadata` (the SHA-256 file-changed
+  detector the FTS sidecar's hash columns compare against, plus the
+  on-disk `{path, size, mtime}` facts); `books_by_year`/`books_by_month`
+  (upstream's date bucketing generalized to any date field, builtin or
+  date-typed custom column, restriction-shaped; the 0101/0100 sentinels
+  bucket nowhere, exactly as the search engine treats them);
+  `get_next_series_num_for` (the preference-aware next number, builtin or
+  series-typed custom column, with `current_indices=True`; one boundary
+  named rather than faked: upstream reads `series_index_auto_increment`
+  from its tweaks files, which metadata.db never carries, so the setting
+  comes from the library's preferences table with upstream's shipped
+  default "next"); `get_annotations_filtered` plus
+  `get_annotation_users`/`get_annotation_types`/`get_annotation_styles`
+  (the annotation conveniences: the decoded view plus user/kind/style
+  filters, a limit, and Calibre's removed-skeleton tombstones hidden by
+  default -- upstream's `ignore_removed` inverted to the renderer-facing
+  default; styles cover only what the library holds, since the viewer's
+  builtin catalog is GUI constants, not data); `read_backup` (Calibre's
+  stored sidecar OPF as bytes, for diffing its last write against the
+  rows; reads what Calibre wrote, the OPF-generation decline untouched);
+  and the XS tail: `get_size_stats` (notes always 0 per the recorded
+  decline), `is_fts_enabled` (the preference; the in-process pool state
+  is not database-visible), `get_all_link_maps_for_book` (the four
+  builtin fields plus link-carrying custom columns), and
+  `get_last_read_positions` fmt/user/order_by/limit filters. The tail
+  rode one real fix: `load_custom_column` built every normalized column's
+  link map but stashed it series-only, so `custom_column_links` answered
+  empty for text/enumeration/rating despite documenting all four.
+- **Phase 16 promotions** (the 2026-10-01 waiver applies to all four):
+  `ordered_virtual_library_names` (Calibre's sidebar order: stored tab
+  position first, unknown names alphabetical, unparseable positions
+  ranking with the unknowns), `helpers.unpipe_author` (the
+  pipe-flattening display helper, render-identical with the consumer
+  copies), `CalibreDB.tag_rollup_ids` (the id-set sibling of the
+  counts-only rollup, the engine's anchored-subtree rule), and
+  `helpers.IDENTIFIER_LINKS` + `identifier_link()` (Hermitage's canonical
+  identifier-to-link table; ISBN resolves to openlibrary.org per
+  Brandon's 2026-09-29 call, Carrel's WorldCat mapping switches in its
+  consumer wave).
+- **Phase 17 writes.** `set_author_sort_name` (the row-level author sort
+  writer; book-level `author_sort` recomputed " & "-joined in link
+  order) and `set_link_map` (the generic per-value link writer over
+  authors/series/publishers/tags plus normalized custom columns by
+  `#label`; one named deviation: unknown values raise where upstream
+  skips silently, because a link aimed at a misspelling should fail
+  loudly); `set_pages` (the page-count row writer clearing `needs_scan`:
+  a real value is what the pending rescan waited for); the data/
+  directory verbs (`list_data_files`/`get_data_file` reads,
+  `add_data_file`/`rename_data_file`/`remove_data_files` writes -- pure
+  filesystem like the trash verbs, one shared traversal guard, upstream's
+  merge-conflict auto-rename layout); `copy_book_from_library` (the
+  blessed cross-library copy composed from sanctioned reads and writes,
+  one `batch()` on the destination, format files through `add_book`'s
+  seed path, per-author sorts then the book-level `author_sort` verbatim;
+  annotations, data/ extras, custom columns, and the uuid each stay out
+  for a recorded reason, and duplicate policy stays with the frontend);
+  and the blob passthrough writers `set_plugin_data`/
+  `set_conversion_options`/`set_book_storage` (opaque payloads, none of
+  them OPF-queued, matching upstream; upstream's in-process recipe
+  pickling is deliberately the caller's boundary). The copy primitive
+  carries conversion options; plugin data it does not, exactly like
+  upstream's copy.
+- **Phase 18: `get_categories(book_ids=None)`**, the restricted tag
+  browser. Nodes over the builtin browse fields plus storage-backed
+  custom columns carry `{id, name, sort, count, avg_rating, id_set,
+  search_expression}`, and searching a node's expression returns that
+  node's id set (swept per-node in the tests). Restriction narrows to
+  values the restricted books actually hold; counts and entity-view
+  average ratings agree with `get_tag_browser_counts` where they
+  overlap. Named in the ship notes: the views' ratings `avg_rating`
+  column is an upstream cross-join artifact (every row identical,
+  verified against the live library), rating nodes surface stars per the
+  cquarry convention rather than the views' internal 0-10 text, and
+  composite columns stay gated by the section 7 GPM boundary.
+  User categories, `search`, and `news` are upstream GUI synthesizations
+  outside the portable subset. Verified against the live library: 12
+  categories over ~8k books with per-node roundtrips clean.
+- Housekeeping: the pre-tag slop pass returned zero kill findings and
+  three fix-grade notes, all applied (a repeated guarantee clause,
+  a recurring triple negation, and a stale `__version__` example).
+- Suite: 556 -> 653 tests (pytest and CI's unittest discover agree).
+
 ## v1.24.0 (2026-10-02)
 
 ### The parity program's first release: Phases 14 and 15 land
