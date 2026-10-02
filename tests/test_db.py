@@ -3207,3 +3207,50 @@ class TestSmallerReads(unittest.TestCase):
             self.assertEqual(rows[0]["pos_frac"], 0.8)
             rows = db.get_last_read_positions(user="other")
             self.assertEqual([r["book"] for r in rows], [2])
+
+
+class TestOrderedVlNames(unittest.TestCase):
+    """ordered_virtual_library_names: the promoted sidebar-order helper
+    (1.25; Carrel/Hermitage carried near-identical private copies)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            INSERT INTO preferences (key, val) VALUES
+                ('virtual_libraries', '{"Beta Wing": "title:Beta", "Alpha Wing": "title:Alpha", "Gamma Wing": "title:Gamma", "New Wing": "title:New"}'),
+                ('virt_libs_hidden', '["gamma wing"]'),
+                ('virt_libs_order', '{"Alpha Wing": 1, "Beta Wing": 0, "Gamma Wing": "not-a-number"}');
+            """
+        )
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_stored_order_first_then_alphabetical(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(
+                db.ordered_virtual_library_names(),
+                ["Beta Wing", "Alpha Wing", "New Wing"],
+            )
+
+    def test_hidden_dropped_unless_asked(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertIn(
+                "Gamma Wing", db.ordered_virtual_library_names(include_hidden=True)
+            )
+            self.assertNotIn("Gamma Wing", db.ordered_virtual_library_names())
+
+    def test_unparseable_position_ranks_with_unknowns(self):
+        with CalibreDB(self.db_path) as db:
+            names = db.ordered_virtual_library_names(include_hidden=True)
+            # Gamma's stored order is 'not-a-number': it ranks after the
+            # known positions, alphabetically among the unknowns.
+            self.assertEqual(
+                names,
+                ["Beta Wing", "Alpha Wing", "Gamma Wing", "New Wing"],
+            )

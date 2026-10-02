@@ -1934,6 +1934,38 @@ class CalibreDB:
             out["order"] = {str(name): i for i, name in enumerate(order)}
         return out
 
+    def ordered_virtual_library_names(
+        self, *, include_hidden: bool = False
+    ) -> list[str]:
+        """Virtual library names in Calibre's own sidebar order.
+
+        The promoted helper (1.25; near-identical copies lived in Carrel's
+        wings resolver and Hermitage's sidebar): the stored tab position
+        from :meth:`get_vl_ui_state` orders first, unknown names follow
+        alphabetically, and a position that will not parse as a float ranks
+        with the unknowns rather than crashing the sort (both consumers'
+        defensive branch, now in one place). Libraries hidden in the GUI
+        are dropped unless ``include_hidden`` is set.
+        """
+        ui = self.get_vl_ui_state()
+        hidden = {str(h).lower() for h in ui.get("hidden", [])}
+        order = ui.get("order") or {}
+
+        def _sort_key(name: str) -> tuple[int, float, str]:
+            for key, pos in order.items():
+                if str(key).lower() == name.lower():
+                    try:
+                        return (0, float(pos), name.lower())
+                    except TypeError, ValueError:
+                        break
+            return (1, 0.0, name.lower())
+
+        names = self.get_virtual_libraries()
+        return sorted(
+            (n for n in names if include_hidden or n.lower() not in hidden),
+            key=_sort_key,
+        )
+
     def count_books(self) -> int:
         """Total book count; the caches when populated, else a COUNT(*)."""
         if self._all_ids_cache is not None:
