@@ -3355,6 +3355,7 @@ class TestGetCategories(unittest.TestCase):
             INSERT INTO books_custom_column_1_link (book, value) VALUES (1, 1), (2, 1), (3, 2);
             CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, book INTEGER, value INT, link TEXT DEFAULT '');
             INSERT INTO custom_column_2 (book, value) VALUES (1, 321), (3, 55);
+            CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT);
             """
         )
         # The real views, verbatim shapes, so the agreement test has teeth.
@@ -3439,7 +3440,12 @@ class TestGetCategories(unittest.TestCase):
         self.assertEqual({n["name"] for n in cats["formats"]}, {"EPUB", "PDF"})
         self.assertEqual(cats["#status"][0]["name"], "Read")
         self.assertEqual(cats["#status"][1]["name"], "To Read")
-        self.assertEqual([n["name"] for n in cats["#pages"]], ["321", "55"])
+        # Direct-storage customs (int/float/bool/datetime/comments) are NOT
+        # categories -- upstream's is_category rule is `normalized` (the
+        # 1.25 boundary error the 1.26 audit corrected).
+        self.assertNotIn("#pages", cats)
+        # The identifiers category: one node per identifier key.
+        self.assertIn("identifiers", cats)
 
     def test_node_shape_and_expression_roundtrip(self):
         cats = self.db.get_categories()
@@ -3486,6 +3492,44 @@ class TestGetCategories(unittest.TestCase):
         for node in cats["#status"]:
             if node["id_set"] <= {1, 2}:
                 self.assertEqual(facet_counts.get(node["name"]), node["count"])
+
+    def test_identifier_category_nodes_roundtrip(self):
+        # 1.26: the identifiers category (upstream IdentifiersField's
+        # shape) -- one node per identifier key, id None, the keypair
+        # presence form as its expression.
+        con = sqlite3.connect(self.db_path)
+        con.executemany(
+            "INSERT INTO identifiers (book, type, val) VALUES (?, ?, ?)",
+            [
+                (1, "isbn", "9781841499789"),
+                (2, "isbn", "9780345453748"),
+                (3, "goodreads", "5"),
+            ],
+        )
+        con.commit()
+        con.close()
+        self.db.refresh()
+        cats = self.db.get_categories()
+        idents = {n["name"]: n for n in cats["identifiers"]}
+        self.assertEqual(set(idents), {"isbn", "goodreads"})
+        self.assertEqual(idents["isbn"]["id_set"], {1, 2})
+        self.assertEqual(idents["goodreads"]["id_set"], {3})
+        self.assertIsNone(idents["isbn"]["id"])
+        self.assertEqual(idents["isbn"]["search_expression"], "identifiers:=isbn:true")
+        self.assertEqual(self.db.search(idents["isbn"]["search_expression"]), {1, 2})
+
+    def test_expression_values_escape_quotes_and_backslashes(self):
+        # The audit's P0: values containing quotes/backslashes produced
+        # mis-lexing expressions. The builder now escapes both.
+        con = sqlite3.connect(self.db_path)
+        con.execute("INSERT INTO tags (id, name) VALUES (9, 'He said \"hi\"')")
+        con.execute("INSERT INTO books_tags_link (book, tag) VALUES (1, 9)")
+        con.commit()
+        con.close()
+        self.db.refresh()
+        node = next(n for n in self.db.get_categories()["tags"] if "hi" in n["name"])
+        self.assertEqual(node["search_expression"], 'tags:="He said \\"hi\\""')
+        self.assertEqual(self.db.search(node["search_expression"]), {1})
 
     def test_search_expression_agrees_for_every_node(self):
         # The construction guarantee, swept across every node of the

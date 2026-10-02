@@ -2612,11 +2612,18 @@ class CalibreDB:
         reproducing the node against the engine.
 
         Categories: the builtin browse fields (authors, series, publisher,
-        tags, languages, formats, rating) plus every storage-backed custom
-        column keyed ``#label``. Composite columns stay gated by the §7 GPM
-        boundary; comments columns have no category values; user
+        tags, languages, formats, rating), the ``identifiers`` category
+        (one node per identifier key, upstream's own shape), and custom
+        columns keyed ``#label`` under upstream's rule -- only NORMALIZED
+        columns (text, enumeration, series, rating) are categories; the
+        direct-storage datatypes (int, float, bool, datetime, comments)
+        are not categories upstream and are not here either (1.25
+        over-included them; the 1.26 audit corrected the boundary).
+        Composite columns stay gated by the §7 GPM boundary; user
         categories, ``search``, and ``news`` are upstream GUI
-        synthesizations outside the portable subset. Where results overlap
+        synthesizations outside the portable subset. Expression values are
+        escaped (backslash and quote), so nodes with quotes in their names
+        still round-trip. Where results overlap
         :meth:`get_tag_browser_counts`, counts and average ratings agree
         (same data, same rule); two documented naming differences remain:
         rating nodes surface STARS -- ``"4.0"``, matching ``field()`` and
@@ -2639,6 +2646,10 @@ class CalibreDB:
         def _avg(ids: set[int]) -> float | None:
             vals = [rating_map[b] for b in ids if b in rating_map]
             return (sum(vals) / len(vals)) / 2.0 if vals else None
+
+        def _escape(value: str) -> str:
+            # Backslash first, then the quote: the lexer's escape pairs.
+            return value.replace("\\", "\\\\").replace('"', '\\"')
 
         def _node(
             node_id: int | None,
@@ -2677,7 +2688,7 @@ class CalibreDB:
                     name,
                     (meta.get(name, {}) or {}).get("sort") or name,
                     ids,
-                    f'{location}:="{name}"',
+                    f'{location}:="{_escape(name)}"',
                 )
                 for name, ids in buckets.items()
             ]
@@ -2693,6 +2704,28 @@ class CalibreDB:
             "formats": _from_rows("formats", "formats"),
         }
 
+        # Identifiers: one node per identifier KEY (upstream
+        # IdentifiersField.get_categories), id=None like formats; the
+        # expression is the keypair presence form, exact on the key.
+        ident_buckets: dict[str, set[int]] = {}
+        for b in restricted:
+            for key in self.get_identifiers(b["id"]) or {}:
+                ident_buckets.setdefault(key, set()).add(b["id"])
+        out["identifiers"] = [
+            _node(
+                None,
+                key,
+                key,
+                ids,
+                # Exact-key presence form. The key cannot contain a colon
+                # (upstream's identifier cleaning strips them), so the
+                # unquoted keypair is unambiguous; the = prefix makes the
+                # key match exact, so isbn13 never answers for isbn.
+                f"identifiers:={key}:true",
+            )
+            for key, ids in sorted(ident_buckets.items(), key=lambda kv: kv[0].lower())
+        ]
+
         # Rating: star nodes merged across legacy duplicate rating rows
         # (upstream merges same-star tags too), descending.
         star_buckets: dict[float, set[int]] = {}
@@ -2705,12 +2738,14 @@ class CalibreDB:
             for stars, ids in sorted(star_buckets.items(), reverse=True)
         ]
 
-        # Storage-backed custom columns, keyed #label. Normalized columns
-        # carry entity ids from their value tables; direct-storage columns
-        # name their nodes (id None, like formats).
+        # Custom columns, keyed #label, under upstream's is_category rule:
+        # NORMALIZED columns only (text, enumeration, series, rating).
+        # Direct-storage datatypes (int, float, bool, datetime, comments)
+        # are not categories upstream -- 1.25 over-included them, and their
+        # raw stored values made engine-unparseable node expressions.
         for col in self.get_custom_columns().values():
             datatype = col["datatype"]
-            if datatype in ("composite", "comments"):
+            if not col["normalized"]:
                 continue
             location = "#" + col["label"]
             try:
@@ -2757,7 +2792,7 @@ class CalibreDB:
                         str(value),
                         str(value),
                         ids,
-                        f'{location}:="{value}"',
+                        f'{location}:="{_escape(str(value))}"',
                     )
                     for value, ids in buckets.items()
                 ]
