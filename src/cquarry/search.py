@@ -1180,13 +1180,26 @@ class SearchEngine:
         # the same; only the VALUES stay unswept.)
         ql = q.lower()
         if kind == CONTAINS and ql in ("true", "false"):
-            probe = fields + ["identifiers", "cover"]
-            found = {
-                b
-                for b in candidates
-                if any(_present(self.provider.field(b, loc)) for loc in probe)
-            }
-            return found if ql == "true" else (candidates - found)
+            # Upstream's sequential loop (DS:848-866): per swept location,
+            # the still-standing candidates are probed and the pool shrinks
+            # by everything matched so far. `true` accumulates the present
+            # (any-field-present, as 1.18-1.25 answered); `false`
+            # accumulates the still-standing ABSENT -- i.e. books missing
+            # AT LEAST ONE swept field, which is nearly every book. The
+            # 1.18-1.25 `false` answer (missing every swept field, i.e.
+            # almost nothing) was an over-simplification of this loop; the
+            # 1.26 audit corrected it (single-field `X:false` already
+            # agreed and is unchanged).
+            matches: set[int] = set()
+            current = set(candidates)
+            for loc in fields + ["identifiers", "cover"]:
+                current -= matches
+                present = {b for b in current if _present(self.provider.field(b, loc))}
+                if ql == "true":
+                    matches |= present
+                else:
+                    matches |= current - present
+            return matches
         # Bare terms reach numeric fields as exact-equality probes (upstream
         # parity); languages are canonicalized in the sweep like any other
         # path.

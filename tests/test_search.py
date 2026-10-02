@@ -776,12 +776,19 @@ class TestSearchParityFixes(unittest.TestCase):
         self.assertEqual(self.s("3"), {4})
 
     def test_all_sweep_bare_true_false_is_the_presence_test(self):
-        # The 1.18 pin: with contains semantics, a bare true/false term is
-        # upstream's presence branch across the sweep (DS:849-855), not a
-        # substring match. Every fixture book has a title, so true matches
-        # everything and false matches nothing.
+        # The 1.18 pin, with the 1.26 `false` correction: a bare true/false
+        # term is upstream's presence branch across the sweep (DS:848-866),
+        # not a substring match. Every fixture book has a title, so true
+        # matches everything; false is upstream's missing-AT-LEAST-ONE --
+        # a book whose title is blank somewhere in the sweep's field list
+        # (comments, identifiers, cover...) qualifies, so the answer is
+        # the books with blank comments rather than nothing.
+        # Under upstream's missing-AT-LEAST-ONE semantics the answer is
+        # every book missing any swept field (a book lacking publisher or
+        # comments qualifies) -- the audit's 'nearly every book'. The two
+        # fully-blank fixture books (3, 4) are certainly in.
         self.assertEqual(self.s("true"), {1, 2, 3, 4})
-        self.assertEqual(self.s("false"), set())
+        self.assertEqual(self.s("false"), {1, 2, 3, 4})
 
     def test_all_sweep_presence_counts_identifiers_and_cover(self):
         # Isolated sweep: books with no text at all -- identifiers and the
@@ -798,11 +805,19 @@ class TestSearchParityFixes(unittest.TestCase):
                 "cover": False,
             },
             2: {
-                "title": "",
-                "authors": [],
-                "tags": [],
-                "comments": "",
-                "identifiers": {},
+                # The complete book: present in EVERY swept field (the
+                # author_sort key included -- it is one of the swept
+                # fields), so it is the one title missing from all:false.
+                "title": "t",
+                "authors": ["a"],
+                "author_sort": "a",
+                "series": "s",
+                "publisher": "p",
+                "tags": ["t"],
+                "comments": "c",
+                "formats": ["EPUB"],
+                "languages": ["eng"],
+                "identifiers": {"goodreads": "y"},
                 "cover": True,
             },
             3: {
@@ -833,7 +848,9 @@ class TestSearchParityFixes(unittest.TestCase):
 
         engine = SearchEngine(_BareProvider())
         self.assertEqual(engine.search("true"), {1, 2})
-        self.assertEqual(engine.search("false"), {3})
+        # Upstream's missing-AT-LEAST-ONE semantics: only the complete
+        # book (2) stays out; books 1 and 3 each miss swept fields.
+        self.assertEqual(engine.search("false"), {1, 3})
         # Identifier KEYS join the text sweep (the 1.26 audit: upstream's
         # matcher iterates the identifiers dict, i.e. its keys -- the 1.18
         # comment claiming otherwise was wrong about upstream). Book 1
