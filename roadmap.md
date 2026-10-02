@@ -187,8 +187,8 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   answered (upstream's shape); a wing that fails to evaluate is skipped with a
   warning where upstream splices an error string into the name tuple.
 - [x] Inverse user-category map: `user_categories_for_books` (`cache.py:3645`). Size S.
-  **Shipped 1.25**: members probed exactly like the `@Name` location (so the answers
-  agree with `@Name:Category` by construction); composite and unknown-location members
+  **Shipped 1.25**: members probed exactly like the `@Name` location (so
+  `@Name:Category` and the map answer identically); composite and unknown-location members
   match nothing rather than erroring.
 - [x] `format_hash` / `format_metadata` (`cache.py:1255`, `:1268`): the file-changed
   detector the FTS sidecar's own hash columns compare against. Size XS.
@@ -302,8 +302,8 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   composite-column categories stay gated by the §7 template-engine boundary. Ships
   together with Phase 14's `facet_counts` for Carrel. Size M-L. **Shipped 1.25** as
   `CalibreDB.get_categories(book_ids=None)`: nodes carry `{id, name, sort, count,
-  avg_rating, id_set, search_expression}` (searching the expression returns the id set
-  by construction, swept per-node in tests); counts and entity-view average ratings
+  avg_rating, id_set, search_expression}` (the expression reproduces the id set,
+  swept per-node in tests); counts and entity-view average ratings
   agree with `get_tag_browser_counts` where they overlap. Named in the ship notes: the
   views' ratings `avg_rating` column is an upstream cross-join artifact (every row
   identical, verified live), so only counts are held to agreement there; rating nodes
