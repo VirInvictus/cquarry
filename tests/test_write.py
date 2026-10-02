@@ -1016,6 +1016,15 @@ class TestRemoveBook(unittest.TestCase):
             CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, book INTEGER UNIQUE, value INTEGER);
             CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
             CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE books_pages_link (
+                book INTEGER PRIMARY KEY,
+                pages INTEGER DEFAULT 0 NOT NULL,
+                needs_scan INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TRIGGER books_pages_link_create_trigger AFTER INSERT ON books
+            BEGIN
+                INSERT INTO books_pages_link(book) VALUES (NEW.id);
+            END;
             -- The cascade trigger the real schema carries; remove_book cleans
             -- exactly what falls OUTSIDE this trigger.
             CREATE TRIGGER books_delete_trg AFTER DELETE ON books
@@ -1212,6 +1221,55 @@ class TestRemoveBook(unittest.TestCase):
         self.assertTrue(
             os.path.isdir(os.path.join(self.temp_dir, ".caltrash", "b", "1"))
         )
+
+    def test_remove_book_cleans_the_fk_cascade_tables_the_trigger_misses(self):
+        # The audit's HIGH (claim-verified): books_pages_link and
+        # book_storage carry ON DELETE CASCADE FKs that upstream's
+        # PRAGMA foreign_keys=ON fires but this write connection does not
+        # engage, and books_delete_trg covers neither. The stranded pages
+        # row (its book column is the PRIMARY KEY) used to make a later
+        # move_book_from_trash of the same id abort with IntegrityError.
+        # The fixture's create trigger already seeded the pages row (the
+        # real schema's shape: every book carries one automatically).
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_pages_link WHERE book = 1"),
+            [(1,)],
+        )
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1)
+        # Book 2's own auto-seeded row legitimately remains; book 1's is gone.
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_pages_link WHERE book = 1"),
+            [(0,)],
+        )
+
+    def test_remove_then_move_back_from_trash_round_trips(self):
+        # The end-to-end shape the stranding broke: trash a book with a
+        # pages row, restore it, and the resurrection must not hit the
+        # stranded PK.
+        book_dir = self._book_dir(1, "Doomed")
+        # Calibre's own backup thread writes this sidecar; move_book_from_trash
+        # refuses entries without one.
+        with open(os.path.join(book_dir, "metadata.opf"), "w") as f:
+            f.write(
+                "<?xml version='1.0' encoding='utf-8'?>"
+                "<package xmlns='http://www.idpf.org/2007/opf' version='2.0' unique-identifier='id'>"
+                "<metadata/><guide/></package>"
+            )
+        # The create trigger's auto-seeded pages row is the strander.
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_pages_link WHERE book = 1"),
+            [(1,)],
+        )
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1, delete_files="trash")
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.move_book_from_trash(1)
+        # Book 2 was never removed; book 1 is back (its empty OPF restores
+        # the Unknown placeholder title, the documented behavior).
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM books"), [(2,)])
+        self.assertEqual(self._sql("SELECT id FROM books ORDER BY id"), [(1,), (2,)])
+        self.assertTrue(os.path.isdir(book_dir))
 
     def test_remove_book_is_irreversible_second_call_raises(self):
         # Irreversible: the second call sees a book that is not there.

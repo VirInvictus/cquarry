@@ -4903,6 +4903,19 @@ class WritableCalibreDB:
             # to a no-op inside _clear_fts_dirty).
             for fmt in book_fmts:
                 self._clear_fts_dirty(book_id, fmt)
+            # books_pages_link and book_storage have ON DELETE CASCADE FKs
+            # that upstream's connection (PRAGMA foreign_keys=ON) fires but
+            # this write connection deliberately does not engage -- and the
+            # books_delete_trg cascade covers neither table. Without these
+            # deletes a stranded pages row (the table's PRIMARY KEY) makes
+            # any later move_book_from_trash of the same id abort with
+            # IntegrityError. Schema-guarded like every optional table.
+            for table in ("books_pages_link", "book_storage"):
+                if self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone():
+                    self.conn.execute(f"DELETE FROM {table} WHERE book = ?", (book_id,))
             # The cascade trigger does the rest.
             self.conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
             # Orphan pruning AFTER the cascade: links are gone, so the
