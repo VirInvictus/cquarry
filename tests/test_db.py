@@ -3079,3 +3079,31 @@ class TestAnnotationConveniences(unittest.TestCase):
                 {"kind": "color", "which": "yellow"},
             ],
         )
+
+
+class TestReadBackup(unittest.TestCase):
+    """read_backup: Calibre's stored sidecar OPF, readable (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        d1 = os.path.join(self.temp_dir, "Author A", "Thick Book (1)")
+        os.makedirs(d1)
+        with open(os.path.join(d1, "metadata.opf"), "wb") as f:
+            f.write(b"<?xml version='1.0'?><metadata/>")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_roundtrip_the_stored_bytes(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.read_backup(1), b"<?xml version='1.0'?><metadata/>")
+
+    def test_none_without_the_file_or_the_directory(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertIsNone(db.read_backup(2))  # no dir, no file
+            self.assertIsNone(db.read_backup(3))  # dir exists, no backup yet
+
+    def test_unknown_book_raises(self):
+        with CalibreDB(self.db_path) as db, self.assertRaises(ValueError):
+            db.read_backup(999)

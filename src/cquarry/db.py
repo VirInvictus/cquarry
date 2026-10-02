@@ -1068,6 +1068,34 @@ class CalibreDB:
             "mtime": datetime.fromtimestamp(st.st_mtime, tz=UTC),
         }
 
+    def read_backup(self, book_id: int) -> bytes | None:
+        """Calibre's stored sidecar ``metadata.opf`` for a book, as bytes.
+
+        Upstream ``Cache.read_backup``: the backup Calibre's own thread
+        writes after every metadata change, readable so a caller can diff
+        Calibre's last write against the rows (a sync auditor's ground
+        truth). This READS what Calibre wrote and never generates an OPF;
+        the generation family stays declined. None when the book has no
+        directory or no backup file yet (upstream's missing-file answer);
+        ``ValueError`` for an unknown book, like every path-riding read.
+        """
+        cur = self.conn.cursor()
+        brow = cur.execute("SELECT path FROM books WHERE id = ?", (book_id,)).fetchone()
+        if brow is None:
+            raise ValueError(f"Book {book_id} not found")
+        if not brow["path"]:
+            return None  # nowhere to look, the empty-path rule
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(self.db_path)),
+            brow["path"],
+            "metadata.opf",
+        )
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
     def format_path_index(self) -> dict[str, int]:
         """Map every catalogued format file path to its book id.
 

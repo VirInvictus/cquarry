@@ -213,9 +213,11 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   the discoveries `get_annotation_users`/`get_annotation_types`/`get_annotation_styles`
   (styles are what the library holds; upstream's builtin viewer catalog is GUI
   constants, not data).
-- [ ] `read_backup` (`cache.py:2212`): read the stored sidecar `metadata.opf` to diff
+- [x] `read_backup` (`cache.py:2212`): read the stored sidecar `metadata.opf` to diff
   Calibre's last write against the rows; reads what Calibre wrote, does not generate.
-  Size XS.
+  Size XS. **Shipped 1.25** as `CalibreDB.read_backup` (bytes; None on no
+  directory/backup yet, the empty-path rule included; the OPF-generation decline
+  untouched).
 - [ ] Smaller: `size_stats` (`cache.py:1753`), a per-book all-fields link map
   (`cache.py:3130`), `is_fts_enabled` (`cache.py:551`), last-read-position filters
   (`cache.py:3751`). Size XS each.
