@@ -2760,3 +2760,50 @@ class TestInverseUserCategories(TestInverseLibraryMaps):
                     self.assertIn(book_id, self.db.search(f"@{ucat}:true"))
                 else:
                     self.assertNotIn(book_id, self.db.search(f"@{ucat}:true"))
+
+
+class TestFormatHashAndMetadata(unittest.TestCase):
+    """format_hash / format_metadata: the file-changed detector pair (1.25)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        d1 = os.path.join(self.temp_dir, "Author A", "Thick Book (1)")
+        os.makedirs(d1)
+        self.epub = os.path.join(d1, "thick.epub")
+        with open(self.epub, "wb") as f:
+            f.write(b"EPUB-CONTENTS-v1")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_hash_is_the_file_sha256(self):
+        import hashlib
+
+        with CalibreDB(self.db_path) as db:
+            self.assertEqual(db.format_hash(1, "EPUB"), hashlib.sha256(b"EPUB-CONTENTS-v1").hexdigest())
+            self.assertEqual(db.format_hash(1, "epub"), db.format_hash(1, "EPUB"))
+
+    def test_hash_follows_a_file_swap(self):
+        with CalibreDB(self.db_path) as db:
+            before = db.format_hash(1, "EPUB")
+        with open(self.epub, "wb") as f:
+            f.write(b"EPUB-CONTENTS-v2")
+        with CalibreDB(self.db_path) as db:
+            self.assertNotEqual(db.format_hash(1, "EPUB"), before)
+
+    def test_hash_errors_follow_get_format_path(self):
+        with CalibreDB(self.db_path) as db:
+            with self.assertRaises(ValueError):
+                db.format_hash(1, "MOBI")  # not catalogued
+            with self.assertRaises(ValueError):
+                db.format_hash(999, "EPUB")  # unknown book
+
+    def test_format_metadata_reports_disk_facts(self):
+        from datetime import UTC
+
+        with CalibreDB(self.db_path) as db:
+            meta = db.format_metadata(1, "EPUB")
+            self.assertEqual(meta["path"], self.epub)
+            self.assertEqual(meta["size"], len(b"EPUB-CONTENTS-v1"))
+            self.assertEqual(meta["mtime"].tzinfo, UTC)

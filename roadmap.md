@@ -190,8 +190,10 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   **Shipped 1.25**: members probed exactly like the `@Name` location (so the answers
   agree with `@Name:Category` by construction); composite and unknown-location members
   match nothing rather than erroring.
-- [ ] `format_hash` / `format_metadata` (`cache.py:1255`, `:1268`): the file-changed
+- [x] `format_hash` / `format_metadata` (`cache.py:1255`, `:1268`): the file-changed
   detector the FTS sidecar's own hash columns compare against. Size XS.
+  **Shipped 1.25**: SHA-256 over `get_format_path`'s verified resolution; metadata is
+  `{path, size, mtime}` with an aware-UTC stamp.
 - [ ] `books_by_year` / `books_by_month` over any date field (`cache.py:1057`, `:1080`);
   `analytics.addition_timeline` buckets only the fixed `timestamp` field into counts.
   Size S.

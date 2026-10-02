@@ -16,6 +16,7 @@ to empty results rather than errors on schemas that predate a table.
 
 import contextlib
 import functools
+import hashlib
 import json
 import os
 import re
@@ -854,6 +855,42 @@ class CalibreDB:
         if path is None:
             return None
         return datetime.fromtimestamp(os.stat(path).st_mtime, tz=UTC)
+
+    def format_hash(self, book_id: int, fmt: str) -> str:
+        """A format file's SHA-256 hex digest (upstream ``Cache.format_hash``).
+
+        This is the file-changed detector: the FTS sidecar's
+        ``format_hash``/``text_hash`` columns are compared against it to
+        decide whether Calibre's extracted text is stale, and frontends use
+        it the same way to detect on-disk edits. Resolution rides
+        :meth:`get_format_path` (verified against disk), so its errors are
+        this API's: ``ValueError`` for an unknown book or format,
+        ``FileNotFoundError`` when the catalogued file is absent.
+        """
+        path = self.get_format_path(book_id, fmt)
+        sha = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                sha.update(chunk)
+        return sha.hexdigest()
+
+    def format_metadata(self, book_id: int, fmt: str) -> dict[str, Any]:
+        """A format file's on-disk facts (upstream ``Cache.format_metadata``):
+        ``{"path", "size", "mtime"}``.
+
+        ``path`` is the verified resolution (:meth:`get_format_path`'s
+        errors apply), ``size`` the file's real byte count -- which can
+        drift from the catalogued ``uncompressed_size`` until Calibre
+        rescans -- and ``mtime`` a timezone-aware UTC ``datetime``. Empty
+        dict is never returned: an unresolvable pair raises.
+        """
+        path = self.get_format_path(book_id, fmt)
+        st = os.stat(path)
+        return {
+            "path": path,
+            "size": st.st_size,
+            "mtime": datetime.fromtimestamp(st.st_mtime, tz=UTC),
+        }
 
     def format_path_index(self) -> dict[str, int]:
         """Map every catalogued format file path to its book id.
