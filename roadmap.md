@@ -218,9 +218,16 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   Size XS. **Shipped 1.25** as `CalibreDB.read_backup` (bytes; None on no
   directory/backup yet, the empty-path rule included; the OPF-generation decline
   untouched).
-- [ ] Smaller: `size_stats` (`cache.py:1753`), a per-book all-fields link map
+- [x] Smaller: `size_stats` (`cache.py:1753`), a per-book all-fields link map
   (`cache.py:3130`), `is_fts_enabled` (`cache.py:551`), last-read-position filters
-  (`cache.py:3751`). Size XS each.
+  (`cache.py:3751`). Size XS each. **Shipped 1.25** in one commit: `get_size_stats`
+  (notes always 0 -- the recorded decline -- kept for the three-column shape),
+  `get_all_link_maps_for_book` (the four builtin fields plus link-carrying custom
+  columns via the custom_column_links seam), `is_fts_enabled` (the preference; the
+  in-process pool state is not database-visible), and `get_last_read_positions`
+  fmt/user/order_by/limit filters. Rode one fix: the custom-column link map was
+  stashed series-only inside load_custom_column, so custom_column_links answered
+  empty for text/enumeration/rating despite its documented promise.
 - [ ] **Ordered-VL-names helper**: promotes the near-identical copies at Carrel
   `cps/wings.py:33-47` and Hermitage `app.py:1605-1616` (Calibre sidebar order:
   stored tab position first, unknown names alphabetical). Size XS.

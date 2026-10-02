@@ -3107,3 +3107,103 @@ class TestReadBackup(unittest.TestCase):
     def test_unknown_book_raises(self):
         with CalibreDB(self.db_path) as db, self.assertRaises(ValueError):
             db.read_backup(999)
+
+
+class TestSmallerReads(unittest.TestCase):
+    """size_stats, is_fts_enabled, the per-book link map, and the
+    last-read-position filters (1.25, Phase 16's XS tail)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = _make_library(self.temp_dir)
+        con = sqlite3.connect(self.db_path)
+        # The v27 fixture schema predates entity link columns; add them.
+        con.execute("ALTER TABLE authors ADD COLUMN link TEXT")
+        con.execute("ALTER TABLE publishers ADD COLUMN link TEXT")
+        # authors.link populated for the link-map read.
+        con.execute("UPDATE authors SET link = 'https://example.com/author-a'")
+        con.execute(
+            "INSERT INTO publishers (id, name, link) VALUES (1, 'Orbit', 'https://example.com/orbit')"
+        )
+        con.execute("INSERT INTO books_publishers_link (book, publisher) VALUES (1, 1)")
+        # link-carrying custom column: value-table link for book 1's value.
+        con.execute(
+            "INSERT INTO custom_columns (id,label,name,datatype,is_multiple) "
+            "VALUES (1,'src','Source','text',0)"
+        )
+        con.execute(
+            "CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT, link TEXT DEFAULT '')"
+        )
+        con.execute(
+            "INSERT INTO custom_column_1 (id, value, link) VALUES (1, 'GR', 'https://example.com/gr')"
+        )
+        con.execute(
+            "CREATE TABLE books_custom_column_1_link (id INTEGER PRIMARY KEY, book INTEGER, value INTEGER)"
+        )
+        con.execute(
+            "INSERT INTO books_custom_column_1_link (book, value) VALUES (1, 1)"
+        )
+        # Reading positions for the filter read.
+        con.execute(
+            "CREATE TABLE last_read_positions (id INTEGER PRIMARY KEY, book INTEGER,"
+            " format TEXT, user TEXT, device TEXT, cfi TEXT, epoch REAL, pos_frac REAL)"
+        )
+        con.executemany(
+            "INSERT INTO last_read_positions (book, format, user, device, cfi, epoch, pos_frac) VALUES (?,?,?,?,?,?,?)",
+            [
+                (1, "EPUB", "viewer", "kobo", "epub.cfi/4", 1700000000, 0.4),
+                (1, "EPUB", "viewer", "kindle", "epub.cfi/12", 1710000000, 0.8),
+                (1, "PDF", "viewer", "kobo", "pdf.cfi/2", 1690000000, 0.1),
+                (2, "EPUB", "other", "kobo", "epub.cfi/1", 1680000000, 0.05),
+            ],
+        )
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_size_stats_reports_main_and_sidecar(self):
+        with CalibreDB(self.db_path) as db:
+            stats = db.get_size_stats()
+            self.assertGreater(stats["main"], 0)
+            self.assertEqual(stats["fts"], 0)  # no sidecar in this fixture
+            self.assertEqual(stats["notes"], 0)
+
+    def test_is_fts_enabled_reads_the_preference(self):
+        with CalibreDB(self.db_path) as db:
+            self.assertFalse(db.is_fts_enabled())
+        con = sqlite3.connect(self.db_path)
+        con.execute("INSERT INTO preferences (key, val) VALUES ('fts_enabled', 'true')")
+        con.commit()
+        con.close()
+        with CalibreDB(self.db_path) as db:
+            self.assertTrue(db.is_fts_enabled())
+
+    def test_link_map_covers_builtin_and_custom(self):
+        with CalibreDB(self.db_path) as db:
+            links = db.get_all_link_maps_for_book(1)
+            self.assertEqual(
+                links["authors"], {"Author A": "https://example.com/author-a"}
+            )
+            self.assertEqual(links["publisher"], {"Orbit": "https://example.com/orbit"})
+            self.assertEqual(links["#src"], {"GR": "https://example.com/gr"})
+            self.assertEqual(
+                links.get("tags"), None if not links.get("tags") else links["tags"]
+            )
+            # Book 3 shares Author A (and thus that link) but nothing else.
+            self.assertEqual(
+                db.get_all_link_maps_for_book(3),
+                {"authors": {"Author A": "https://example.com/author-a"}},
+            )
+
+    def test_position_filters(self):
+        with CalibreDB(self.db_path) as db:
+            rows = db.get_last_read_positions(1, fmt="epub")
+            self.assertEqual(len(rows), 2)  # format filter is case-insensitive
+            rows = db.get_last_read_positions(1, order_by="epoch", limit=1)
+            self.assertEqual(rows[0]["device"], "kindle")  # most recent first
+            rows = db.get_last_read_positions(1, order_by="pos_frac", limit=1)
+            self.assertEqual(rows[0]["pos_frac"], 0.8)
+            rows = db.get_last_read_positions(user="other")
+            self.assertEqual([r["book"] for r in rows], [2])

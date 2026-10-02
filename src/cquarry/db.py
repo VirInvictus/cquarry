@@ -1096,6 +1096,80 @@ class CalibreDB:
         except OSError:
             return None
 
+    def get_size_stats(self) -> dict[str, int]:
+        """The library's file sizes in bytes (upstream ``Cache.size_stats``):
+        ``{"main", "fts", "notes"}``.
+
+        ``main`` is metadata.db itself, ``fts`` the full-text-search.db
+        sidecar (0 when absent), ``notes`` always 0 here -- the notes DB is
+        a recorded decline (``.calnotes/`` is never read), kept in the shape
+        so consumers can render the same three columns.
+        """
+        main_size = 0
+        with contextlib.suppress(OSError):
+            main_size = os.path.getsize(self.db_path)
+        fts_size = 0
+        fts_path = os.path.join(
+            os.path.dirname(os.path.abspath(self.db_path)), "full-text-search.db"
+        )
+        with contextlib.suppress(OSError):
+            fts_size = os.path.getsize(fts_path)
+        return {"main": main_size, "fts": fts_size, "notes": 0}
+
+    def is_fts_enabled(self) -> bool:
+        """Whether Calibre's FTS indexing is switched on for this library
+        (upstream ``Cache.is_fts_enabled``, database-side).
+
+        Reads the ``fts_enabled`` preference (upstream's default False);
+        the in-process extraction-pool state the property form answers is
+        GUI/process state metadata.db cannot carry. The sidecar's presence
+        is a separate question: the sidecar reads degrade to empty when
+        ``full-text-search.db`` is missing regardless of this flag.
+        """
+        return bool(self.get_preference("fts_enabled", False))
+
+    def get_all_link_maps_for_book(self, book_id: int) -> dict[str, dict[str, str]]:
+        """All of one book's entity links in one map (upstream
+        ``Cache.get_all_link_maps_for_book``):
+        ``{field: {value: link_url}}``.
+
+        Builtin fields first -- authors, publisher, series, tags, the four
+        upstream maps -- then every custom column that carries a link for
+        this book through cquarry's ``custom_column_links`` seam, keyed by
+        ``#label``. Empty fields are omitted, so an unlinked book answers
+        ``{}``; unknown books answer ``{}`` too (upstream's ``_has_id``
+        rule). Schemas whose entity tables predate the ``link`` column
+        degrade field by field.
+        """
+        out: dict[str, dict[str, str]] = {}
+        for field, etable, ltable, fk in (
+            ("authors", "authors", "books_authors_link", "author"),
+            ("publisher", "publishers", "books_publishers_link", "publisher"),
+            ("series", "series", "books_series_link", "series"),
+            ("tags", "tags", "books_tags_link", "tag"),
+        ):
+            try:
+                rows = self.conn.execute(
+                    f"SELECT e.name AS name, e.link AS link FROM {ltable} l "
+                    f"JOIN {etable} e ON e.id = l.{fk} WHERE l.book = ?",
+                    (book_id,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue  # table or link column predates this schema
+            links = {r["name"]: r["link"] for r in rows if r["link"]}
+            if links:
+                out[field] = links
+        for col in self.get_custom_columns().values():
+            # custom_column_links fills as a side effect of load_custom_column:
+            # load first, then look the book's url up.
+            value = self.load_custom_column(col["name"]).get(book_id)
+            url = self.custom_column_links(col["name"]).get(book_id)
+            if not url:
+                continue
+            names = value if isinstance(value, (list, tuple)) else [value]
+            out["#" + col["label"]] = {str(v): url for v in names if v is not None}
+        return out
+
     def format_path_index(self) -> dict[str, int]:
         """Map every catalogued format file path to its book id.
 
@@ -1745,6 +1819,12 @@ class CalibreDB:
                         index_map[row["book"]] = row["extra"]
                     if row["clink"]:
                         link_map[row["book"]] = row["clink"]
+                # Every normalized column's link map is stashed, not just
+                # series: custom_column_links() promises text/enumeration/
+                # series/rating, and the value-table `link` column exists on
+                # all of them (the stash used to be series-only, answering
+                # empty for the other three).
+                self._custom_link_cache["#" + col["label"]] = link_map
                 if col["datatype"] == "series":
                     # Serve the registered-but-previously-unresolvable
                     # `#label_index` float location. An exact label that
@@ -1754,7 +1834,6 @@ class CalibreDB:
                     token = "#" + col["label"] + "_index"
                     if token not in self._custom_by_label():
                         self._custom_val_cache[token] = index_map
-                    self._custom_link_cache["#" + col["label"]] = link_map
                 if col["is_multiple"]:
                     # Native lists, never a comma-joined string: a stored
                     # value like "Doe, John" is ONE value, and re-splitting
@@ -1902,7 +1981,13 @@ class CalibreDB:
         return out
 
     def get_last_read_positions(
-        self, book_id: int | None = None
+        self,
+        book_id: int | None = None,
+        *,
+        fmt: str | None = None,
+        user: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Map reading progress per device from ``last_read_positions``.
 
@@ -1910,20 +1995,39 @@ class CalibreDB:
         ``epoch`` (unix seconds — sort key for "most recent") and
         ``pos_frac`` (0.0-1.0 progress fraction). Columns follow Calibre's
         real schema exactly (there is no ``user_type`` and the time column is
-        ``epoch``, not ``epoch_time``).
+        ``epoch``, not ``epoch_time``). The 1.25 filters mirror upstream's:
+        ``fmt``/``user`` narrow the rows (format case-insensitive),
+        ``order_by`` accepts ``"pos_frac"`` or ``"epoch"`` (descending, the
+        most-progressed / most-recent first) and ``limit`` caps the count
+        -- the "where was I in THIS book" read. Rows default to
+        ``ORDER BY book, device``.
         """
         cur = self.conn.cursor()
         sql = (
             "SELECT id, book, format, user, device, cfi, epoch, pos_frac "
             "FROM last_read_positions"
         )
-        params: tuple = ()
+        conds: list[str] = []
+        params: list[Any] = []
         if book_id is not None:
-            sql += " WHERE book = ?"
-            params = (book_id,)
-        sql += " ORDER BY book, device"
+            conds.append("book = ?")
+            params.append(book_id)
+        if fmt:
+            conds.append("format = ?")
+            params.append(fmt.upper())
+        if user:
+            conds.append("user = ?")
+            params.append(user)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        if order_by in ("pos_frac", "epoch"):
+            sql += f" ORDER BY {order_by} DESC"
+        else:
+            sql += " ORDER BY book, device"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
         try:
-            cur.execute(sql, params)
+            cur.execute(sql, tuple(params))
         except sqlite3.OperationalError:
             return []
         return [dict(row) for row in cur.fetchall()]
