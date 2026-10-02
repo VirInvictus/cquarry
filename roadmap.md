@@ -125,10 +125,14 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   open; today nothing can populate that list. Size S. **Shipped 1.24**: honest no-op on
   equal values; a change sets `update_all_last_mod_dates_on_start` like upstream's
   wrapper; datatype and label changes are refused by omission (schema compatibility).
-- [ ] **The Carrel residue trio, ungated**: `get_book_by_uuid` (the Calibre-Companion
+- [x] **The Carrel residue trio, ungated**: `get_book_by_uuid` (the Calibre-Companion
   endpoint dependency), the entity-to-ids resolver, and a bulk formats map. The standing
   gate ("waits for Carrel's lane") is answered: the fork's roadmap (created 2026-09-29)
-  pulls them. Size S each.
+  pulls them. Size S each. **Shipped 1.24** as `get_book_by_uuid` (NOCASE, None on miss),
+  `get_entity_book_ids(kind, name)` (authors/series/publishers/tags/languages; tags are
+  the engine's anchored-subtree rule; ratings out, a rating slice is a search), and
+  `get_all_formats()` (cached `{book_id: [FMT]}`). Carrel's adoption stays waived this
+  round per the decision record.
 - [ ] **`facet_counts`**: browse facets over a search result; ungated with Carrel's lane,
   ships together with Phase 18's restricted tag browser. Size M.
 

@@ -2177,6 +2177,78 @@ class TestPrecedentTags(unittest.TestCase):
         self.assertEqual(self.db.precedent_tags(["Herbert, Frank"], limit=1), ["Dune"])
 
 
+class TestResidueReads(TestCalibreDB):
+    """The Carrel residue trio (1.24, Phase 14): get_book_by_uuid (the
+    Calibre-Companion endpoint shape), get_entity_book_ids (the id-set half
+    of get_entities), get_all_formats (the bulk formats map)."""
+
+    def setUp(self):
+        super().setUp()
+        self.conn.execute("ALTER TABLE books ADD COLUMN uuid TEXT")
+        self.conn.execute("UPDATE books SET uuid = ? WHERE id = 1", ("uuid-one",))
+        self.conn.execute(
+            "INSERT INTO tags (name) VALUES ('Fiction'), ('Fiction.Scifi'), ('Fiction.Scifi.Space'), ('History')"
+        )
+        for book, tag in ((1, 1), (1, 2), (1, 3), (2, 4)):
+            self.conn.execute(
+                "INSERT INTO books_tags_link (book, tag) VALUES (?, ?)", (book, tag)
+            )
+        self.conn.execute(
+            "INSERT INTO series (id, name, sort) VALUES (1, 'Wing Series', 'Wing Series')"
+        )
+        self.conn.execute("INSERT INTO books_series_link (book, series) VALUES (2, 1)")
+        self.conn.commit()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_get_book_by_uuid(self):
+        row = self.db.get_book_by_uuid("uuid-one")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["id"], 1)
+        self.assertEqual(row["title"], "Book 1")
+        # Case-insensitive, trimmed; unknown is None; blank is None.
+        self.assertEqual(self.db.get_book_by_uuid("  UUID-ONE ")["id"], 1)
+        self.assertIsNone(self.db.get_book_by_uuid("uuid-nope"))
+        self.assertIsNone(self.db.get_book_by_uuid(""))
+        self.assertIsNone(self.db.get_book_by_uuid(None))
+
+    def test_get_entity_book_ids_tags_are_anchored_subtrees(self):
+        # 'Fiction' covers the tag and its whole subtree; 'History' is exact.
+        self.assertEqual(self.db.get_entity_book_ids("tags", "Fiction"), {1})
+        self.assertEqual(self.db.get_entity_book_ids("tags", "Fiction.Scifi"), {1})
+        self.assertEqual(
+            self.db.get_entity_book_ids("tags", "fiction.scifi.space"), {1}
+        )
+        self.assertEqual(self.db.get_entity_book_ids("tags", "History"), {2})
+        self.assertEqual(self.db.get_entity_book_ids("tags", "Fict"), set())
+
+    def test_get_entity_book_ids_other_kinds(self):
+        self.assertEqual(self.db.get_entity_book_ids("authors", "author"), {1, 2})
+        self.assertEqual(self.db.get_entity_book_ids("series", "wing series"), {2})
+        self.assertEqual(self.db.get_entity_book_ids("publishers", "Nobody"), set())
+        with self.assertRaises(ValueError):
+            self.db.get_entity_book_ids("ratings", "4")
+        with self.assertRaises(ValueError):
+            self.db.get_entity_book_ids("nope", "x")
+        self.assertEqual(self.db.get_entity_book_ids("tags", ""), set())
+
+    def test_get_all_formats(self):
+        # The base fixture catalogues EPUB for book 1 and PDF for book 2.
+        self.assertEqual(self.db.get_all_formats(), {1: ["EPUB"], 2: ["PDF"]})
+        # Cached: a second call answers from the map without re-deriving.
+        self.assertIs(self.db.get_all_formats(), self.db.get_all_formats())
+        # refresh() clears the map with everything else.
+        self.conn.execute(
+            "INSERT INTO data (book, format, uncompressed_size, name)"
+            " VALUES (1, 'MOBI', 10, 'BookOne')"
+        )
+        self.conn.commit()
+        self.db.refresh()
+        self.assertEqual(self.db.get_all_formats(), {1: ["EPUB", "MOBI"], 2: ["PDF"]})
+
+
 if __name__ == "__main__":
     unittest.main()
 

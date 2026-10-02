@@ -169,6 +169,7 @@ class CalibreDB:
         self._vl_cache: dict[str, str] | None = None
         self._books_cache: list[dict[str, Any]] | None = None
         self._all_ids_cache: set[int] | None = None
+        self._all_formats_cache: dict[int, list[str]] | None = None
 
         # Search-engine state (lazily built).
         self._search_engine: SearchEngine | None = None
@@ -590,6 +591,24 @@ class CalibreDB:
         if include_comments:
             b["comments"] = self.field(book_id, "comments")
         return b
+
+    def get_book_by_uuid(self, uuid: str) -> dict[str, Any] | None:
+        """Fetch one hydrated book by its per-book ``uuid`` (1.24).
+
+        The Calibre-Companion endpoint dependency (upstream
+        ``lookup_by_uuid``): mobile clients cache libraries by book uuid and
+        come back asking for the row. Matching is case-insensitive (uuids
+        are stored lowercase, but hand-built rows may not be); an unknown
+        uuid is None, never an error. The row is the standard
+        :meth:`get_book` shape."""
+        if not uuid or not str(uuid).strip():
+            return None
+        row = self.conn.execute(
+            "SELECT id FROM books WHERE uuid = ? COLLATE NOCASE", (str(uuid).strip(),)
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_book(row["id"])
 
     def get_comments(self, book_id: int | None = None) -> dict[int, str]:
         """Raw comments HTML keyed by book id.
@@ -1178,6 +1197,20 @@ class CalibreDB:
             out[rec["name"]] = rec
         return out
 
+    def get_all_formats(self) -> dict[int, list[str]]:
+        """Every book's format list in one map: ``{book_id: [FMT, ...]}`` (1.24).
+
+        The bulk shape of :meth:`get_formats`'s keys (Carrel's residue trio):
+        a web frontend rendering a whole shelf of format badges takes one
+        cache pass instead of one call per book. Values are the same native
+        uppercase lists the hydrated rows carry; the map is cached like
+        them (a long-lived holder's ``refresh()`` covers it)."""
+        if self._all_formats_cache is None:
+            self._all_formats_cache = {
+                b["id"]: list(b["formats"]) for b in self.get_all_books()
+            }
+        return self._all_formats_cache
+
     def get_entities(self, kind: str) -> list[dict[str, Any]]:
         """Entity rows with secondary columns and book counts.
 
@@ -1226,6 +1259,45 @@ class CalibreDB:
         except sqlite3.OperationalError:
             return []
         return [dict(row) for row in rows]
+
+    def get_entity_book_ids(self, kind: str, name: str) -> set[int]:
+        """The book ids carrying one entity value: the id-set half of
+        :meth:`get_entities` (1.24, Carrel's residue trio).
+
+        ``kind`` is one of ``authors``, ``series``, ``publishers``,
+        ``tags``, ``languages`` (the named entities; ratings have no name
+        to resolve, a rating slice is ``search("rating:...")`'s job).
+        Names match case-insensitively and exactly. Tags are the engine's
+        anchored rule (see spec §3.2): ``Foo`` resolves Foo AND its
+        ``Foo.*`` subtree, so a browse tree node's id set covers its
+        children -- the shape Carrel's category pages build privately
+        today. Pure over the cached rows; unknown names are an empty set,
+        like the search engine's unknown-location rule."""
+        named = {"authors", "series", "publishers", "tags", "languages"}
+        kind = (kind or "").strip().lower()
+        if kind not in named:
+            raise ValueError(
+                f"Unknown entity kind {kind!r}. Available: {', '.join(sorted(named))}"
+            )
+        name = (name or "").strip()
+        if not name:
+            return set()
+        low = name.lower()
+        out: set[int] = set()
+        for b in self.get_all_books():
+            # authors/tags/languages are native lists; series/publisher are
+            # scalar strings on the hydrated rows.
+            values = b.get(kind) or []
+            if isinstance(values, str):
+                values = [values]
+            if kind == "tags":
+                if any(
+                    v.lower() == low or v.lower().startswith(low + ".") for v in values
+                ):
+                    out.add(b["id"])
+            elif any(v.lower() == low for v in values):
+                out.add(b["id"])
+        return out
 
     def find_custom_column(self, key: str) -> dict[str, Any] | None:
         """One custom-columns record by ``#label``, bare label, or display name.
