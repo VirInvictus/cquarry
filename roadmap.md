@@ -182,8 +182,10 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   (`cache.py:1426`, `:1481`); web frontends need bytes and conditional-GET mtimes. Size XS.
   **Shipped 1.25** as `get_cover_bytes` / `get_cover_last_modified` (aware-UTC stamp),
   riding `get_cover_path`'s resolution and unknown-book ValueError.
-- [ ] Inverse virtual-library map: `virtual_libraries_for_books` (`cache.py:3600`).
-  Size S.
+- [x] Inverse virtual-library map: `virtual_libraries_for_books` (`cache.py:3600`).
+  Size S. **Shipped 1.25**: `{book: sorted wing-name tuple}`, every requested id
+  answered (upstream's shape); a wing that fails to evaluate is skipped with a
+  warning where upstream splices an error string into the name tuple.
 - [ ] Inverse user-category map: `user_categories_for_books` (`cache.py:3645`). Size S.
 - [ ] `format_hash` / `format_metadata` (`cache.py:1255`, `:1268`): the file-changed
   detector the FTS sidecar's own hash columns compare against. Size XS.

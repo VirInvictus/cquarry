@@ -78,6 +78,7 @@ with CalibreDB("/path/to/metadata.db") as db:
 | `get_virtual_libraries()` | `dict[str, str]` | Virtual library names mapped to their Calibre search expressions, read from the `preferences` table. Cached after the first call. A corrupt or non-dict stored payload degrades to `{}` (since 1.16.0; it used to crash every read touching virtual libraries). |
 | `get_saved_searches()` | `dict[str, str]` | Saved-search names mapped to their expressions (the source for `search:"Name"` interpolation). |
 | `get_vl_ui_state()` | `dict[str, Any]` | Calibre's sidebar layout state: `{"hidden": [names], "order": {...}}` decoded from `virt_libs_hidden` / `virt_libs_order`. |
+| `virtual_libraries_for_books(book_ids=None)` | `dict[int, tuple[str, ...]]` | The inverse virtual-library map (since 1.25.0, upstream `Cache.virtual_libraries_for_books`): every requested book id -> the sorted names of the wings containing it; `None` means every book, and ids absent from the library come back as empty tuples like members of no wing. Wings resolve through the same engine path `resolve_vl()` uses, so the answers agree by construction; a wing whose expression fails to evaluate is skipped with a stderr warning rather than failing the map (upstream splices an error string into the name tuple there, which would pollute set algebra on the values). |
 | `count_books()` | `int` | Total book count. Uses the cache if available; otherwise issues a `SELECT COUNT(*)`. |
 
 #### Annotations, progress & plugin data

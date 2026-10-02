@@ -43,6 +43,7 @@ from cquarry.search import (
     DT_RATING,
     DT_TEXT,
     DT_TEXT_MULTI,
+    ParseException,
     SearchEngine,
     _fold,
 )
@@ -168,6 +169,7 @@ class CalibreDB:
     def _init_caches(self) -> None:
         """(Re)initialize every lazy cache; __init__ and refresh() share it."""
         self._vl_cache: dict[str, str] | None = None
+        self._vl_for_books_cache: dict[int, tuple[str, ...]] | None = None
         self._books_cache: list[dict[str, Any]] | None = None
         self._all_ids_cache: set[int] | None = None
         self._all_formats_cache: dict[int, list[str]] | None = None
@@ -2237,6 +2239,44 @@ class CalibreDB:
                 f"Available: {', '.join(sorted(sss.keys()))}"
             )
         return self._engine()._match_saved_search(canonical, self.all_ids(), set())
+
+    def virtual_libraries_for_books(
+        self, book_ids: Sequence[int] | None = None
+    ) -> dict[int, tuple[str, ...]]:
+        """The inverse virtual-library map (upstream ``Cache.
+        virtual_libraries_for_books``): every requested book id -> the sorted
+        names of the virtual libraries containing it.
+
+        Each library resolves through the same engine path
+        :meth:`resolve_vl` uses, so the answers agree by construction. A
+        library whose expression fails to evaluate (a ``vl:`` target renamed
+        or deleted in Calibre, a corrupt preference) is skipped with a
+        warning rather than failing the map -- upstream splices an error
+        string into the name tuple there, which would pollute every set
+        algebra a consumer does with the values. ``book_ids=None`` means
+        every book; ids absent from the library come back as empty tuples
+        exactly like members of no library.
+        """
+        if self._vl_for_books_cache is None:
+            owners: dict[int, list[str]] = {}
+            for name in self.get_virtual_libraries():
+                try:
+                    members = self.resolve_vl(name)
+                except ParseException as e:
+                    print(
+                        f"Warning: virtual library {name!r} failed to evaluate, "
+                        f"skipped in the inverse map: {e}",
+                        file=sys.stderr,
+                    )
+                    continue
+                for book_id in members:
+                    owners.setdefault(book_id, []).append(name)
+            self._vl_for_books_cache = {
+                book: tuple(sorted(names)) for book, names in owners.items()
+            }
+        cache = self._vl_for_books_cache
+        ids = self._get_all_book_ids() if book_ids is None else book_ids
+        return {book_id: cache.get(book_id, ()) for book_id in ids}
 
     # --- search.MetadataProvider interface ---
 

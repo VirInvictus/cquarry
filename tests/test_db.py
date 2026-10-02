@@ -2609,3 +2609,90 @@ class TestCoverBytesAndFreshness(unittest.TestCase):
             f.write(b"replaced")
         with CalibreDB(self.db_path) as db:
             self.assertEqual(db.get_cover_bytes(1), b"replaced")
+
+
+class TestInverseLibraryMaps(unittest.TestCase):
+    """virtual_libraries_for_books: the inverse VL map (1.25, Phase 16)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT, link TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+            CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+            CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+            CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+            CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+            CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+            CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE preferences (id INTEGER PRIMARY KEY, key TEXT, val TEXT);
+            INSERT INTO books (id, title, sort, path, has_cover) VALUES
+                (1, 'Alpha Book', 'Alpha Book', 'A/Alpha (1)', 0),
+                (2, 'Beta Book', 'Beta Book', 'A/Beta (2)', 0),
+                (3, 'Gamma Book', 'Gamma Book', 'A/Gamma (3)', 0);
+            INSERT INTO authors (id, name, sort) VALUES (1, 'Ann Alpha', 'Alpha, Ann');
+            INSERT INTO books_authors_link (book, author) VALUES (1, 1), (2, 1);
+            INSERT INTO tags (id, name) VALUES (1, 'Alpha'), (2, 'Beta');
+            INSERT INTO books_tags_link (book, tag) VALUES (1, 1), (2, 1), (2, 2);
+            INSERT INTO preferences (key, val) VALUES ('virtual_libraries', ?), ('virtual_libraries2', NULL);
+            """
+        )
+        # Three wings: two healthy, one whose expression references a missing
+        # target (the per-name fault-isolation case).
+        vl_json = '{"Alpha Wing": "tags:Alpha", "Beta Wing": "tags:Beta", "Broken": "vl:\\"Missing\\""}'
+        con.execute(
+            "UPDATE preferences SET val = ? WHERE key = 'virtual_libraries'",
+            (vl_json,),
+        )
+        con.execute("DELETE FROM preferences WHERE key = 'virtual_libraries2'")
+        con.commit()
+        con.close()
+        self.db = CalibreDB(self.db_path)
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.temp_dir)
+
+    def test_map_names_the_wings_per_book(self):
+        result = self.db.virtual_libraries_for_books()
+        self.assertEqual(result[1], ("Alpha Wing",))
+        self.assertEqual(result[2], ("Alpha Wing", "Beta Wing"))
+        self.assertEqual(result[3], ())
+
+    def test_restriction_answers_only_the_asked_ids(self):
+        result = self.db.virtual_libraries_for_books([3, 999])
+        self.assertEqual(result, {3: (), 999: ()})
+
+    def test_broken_wing_is_skipped_with_a_warning(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = self.db.virtual_libraries_for_books()
+        self.assertNotIn("Broken", result[1])
+        self.assertIn("Broken", err.getvalue())
+
+    def test_refresh_picks_up_preference_changes(self):
+        self.assertEqual(self.db.virtual_libraries_for_books()[1], ("Alpha Wing",))
+        self.assertFalse(self.db.external_changes_detected())  # prime the baseline
+        con = sqlite3.connect(self.db_path)
+        con.execute(
+            "UPDATE preferences SET val = ? WHERE key = 'virtual_libraries'",
+            ('{"Gamma Wing": "title:Gamma"}',),
+        )
+        con.commit()
+        con.close()
+        self.assertTrue(self.db.external_changes_detected())
+        self.db.refresh()
+        result = self.db.virtual_libraries_for_books()
+        self.assertEqual(result[3], ("Gamma Wing",))
+        self.assertEqual(result[1], ())
