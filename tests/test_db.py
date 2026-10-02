@@ -3498,3 +3498,62 @@ class TestGetCategories(unittest.TestCase):
                     set(node["id_set"]),
                     f"{key}:{node['name']}",
                 )
+
+
+class TestBookStorageRead(unittest.TestCase):
+    """get_book_storage: the read half of the book_storage table (1.26)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        con = sqlite3.connect(self.db_path)
+        con.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            INSERT INTO books (id, title) VALUES (1, 'One');
+            CREATE TABLE book_storage (id INTEGER PRIMARY KEY,
+                book INTEGER NOT NULL, format TEXT NOT NULL COLLATE NOCASE,
+                user_type TEXT NOT NULL, user TEXT NOT NULL,
+                timestamp REAL NOT NULL, data TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(book, format, user_type, user));
+            INSERT INTO book_storage (book, format, user_type, user, timestamp, data)
+                VALUES (1, 'EPUB', 'local', 'viewer', 1700000000.0, '{"position": "0.42"}');
+            """
+        )
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_roundtrip_reassembles_upstreams_shape(self):
+        with CalibreDB(self.db_path) as db:
+            entry = db.get_book_storage(1, "epub")
+            self.assertEqual(entry["timestamp"], 1700000000.0)
+            self.assertEqual(entry["data"], {"position": "0.42"})
+            self.assertIsNone(db.get_book_storage(1, "MOBI"))
+            self.assertIsNone(db.get_book_storage(2, "EPUB"))
+
+    def test_invalid_payload_answers_none_like_upstream(self):
+        con = sqlite3.connect(self.db_path)
+        con.execute(
+            "UPDATE book_storage SET data = ? WHERE book = 1",
+            (json.dumps({"wrapped": {"inner": 1}}),),
+        )
+        con.commit()
+        con.close()
+        # A non-str->str map fails upstream's validation; the viewer answers
+        # None and so does this read.
+        with CalibreDB(self.db_path) as db:
+            self.assertIsNone(db.get_book_storage(1, "EPUB"))
+
+    def test_missing_table_answers_none(self):
+        path2 = os.path.join(self.temp_dir, "old.db")
+        con = sqlite3.connect(path2)
+        con.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+        con.commit()
+        con.close()
+        with CalibreDB(path2) as db:
+            self.assertIsNone(db.get_book_storage(1, "EPUB"))

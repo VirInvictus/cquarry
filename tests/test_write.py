@@ -4931,17 +4931,45 @@ class TestBlobWriters(unittest.TestCase):
                 self._sql("SELECT COUNT(*) FROM conversion_options"), [(1,)]
             )
 
-    def test_book_storage_wraps_and_clears(self):
+    def test_book_storage_stores_the_bare_map_and_clears(self):
+        # Upstream's column contract (the 1.25 shape bug, fixed): the data
+        # column is ONLY the str->str payload map, JSON-encoded; the
+        # timestamp lives in its own REAL column. The 1.25 wrapped
+        # {"timestamp", "data"} into the column and Calibre's reader
+        # silently dropped every such row.
         with WritableCalibreDB(self.db_path) as wdb:
-            self.assertTrue(wdb.set_book_storage(1, "epub", {"position": 0.42}))
-            row = self._sql("SELECT format, user_type, user, data FROM book_storage")[0]
+            self.assertTrue(wdb.set_book_storage(1, "epub", {"position": "0.42"}))
+            row = self._sql(
+                "SELECT format, user_type, user, timestamp, data FROM book_storage"
+            )[0]
             self.assertEqual(row[0], "EPUB")
             self.assertEqual((row[1], row[2]), ("local", "viewer"))
-            entry = json.loads(row[3])
-            self.assertEqual(entry["data"], {"position": 0.42})
-            self.assertIsInstance(entry["timestamp"], float)
+            self.assertIsInstance(row[3], float)
+            self.assertEqual(json.loads(row[4]), {"position": "0.42"})
             self.assertTrue(wdb.set_book_storage(1, "EPUB", None))
             self.assertFalse(wdb.set_book_storage(1, "EPUB", None))
+
+    def test_book_storage_non_string_values_raise(self):
+        # Upstream validate_book_storage: keys AND values must be str. The
+        # 1.25 test used a float value, which upstream's reader rejects.
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_book_storage(1, "EPUB", {"position": 0.42})
+            with self.assertRaises(ValueError):
+                wdb.set_book_storage(1, "EPUB", {1: "x"})
+
+    def test_book_storage_newer_entry_wins(self):
+        # Upstream's guard: an older entry never overwrites a newer one.
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.set_book_storage(1, "EPUB", {"v": "new"}))
+            # Force an older timestamp into the row, then replay an old write.
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("UPDATE book_storage SET timestamp = ?", (time.time() + 3600,))
+            conn.commit()
+            conn.close()
+            self.assertFalse(wdb.set_book_storage(1, "EPUB", {"v": "old"}))
+            row = self._sql("SELECT data FROM book_storage")[0]
+            self.assertEqual(json.loads(row[0]), {"v": "new"})
 
     def test_book_storage_non_dict_raises(self):
         with (

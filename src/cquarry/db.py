@@ -2222,6 +2222,50 @@ class CalibreDB:
             return []
         return [dict(row) for row in cur.fetchall()]
 
+    def get_book_storage(
+        self,
+        book_id: int,
+        fmt: str,
+        *,
+        user_type: str = "local",
+        user: str = "viewer",
+    ) -> dict[str, Any] | None:
+        """One book's viewer localStorage entry (upstream
+        ``Cache.book_storage_for_book``; the read half of
+        :meth:`cquarry.write.WritableCalibreDB.set_book_storage`'s table).
+
+        Returns ``{'timestamp': float, 'data': {key: value}}`` -- the
+        timestamp from the row's REAL column reassembled with the JSON-
+        decoded ``data`` column, exactly upstream's reassembly -- or None
+        when no row exists, the schema predates the (newer-Calibre) table,
+        or the stored payload fails upstream's validation (a str->str map;
+        invalid rows are what upstream's viewer also answers None to).
+        ``fmt`` is case-insensitive.
+        """
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Book-storage format must not be empty")
+        cur = self.conn.cursor()
+        try:
+            row = cur.execute(
+                "SELECT timestamp, data FROM book_storage WHERE book = ? "
+                "AND format = ? AND user_type = ? AND user = ?",
+                (book_id, fmt, user_type, user),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None  # schema predates the table
+        if row is None:
+            return None
+        try:
+            data = json.loads(row["data"])
+        except json.JSONDecodeError, TypeError:
+            return None
+        if not isinstance(data, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in data.items()
+        ):
+            return None  # upstream validate_book_storage's rule
+        return {"timestamp": float(row["timestamp"]), "data": data}
+
     def get_conversion_profiles(
         self, book_id: int | None = None
     ) -> list[dict[str, Any]]:

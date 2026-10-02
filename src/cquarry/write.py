@@ -2772,11 +2772,29 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    # Upstream validate_book_storage (db/book_storage.py): the data map's
+    # keys AND values must be str, the serialized UTF-16 size caps at 1 MiB,
+    # and the timestamp is a non-negative float. Matching the rule here keeps
+    # every cquarry-written row readable by Calibre's viewer.
+    _BOOK_STORAGE_MAX_BYTES = 1024 * 1024
+
+    @staticmethod
+    def _validate_book_storage(data: dict[str, Any]) -> None:
+        for key, value in data.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise TypeError(
+                    "Book-storage keys and values must be strings "
+                    "(upstream validate_book_storage rejects anything else)"
+                )
+        encoded = json.dumps(data, ensure_ascii=False).encode("utf-16-le")
+        if len(encoded) > WritableCalibreDB._BOOK_STORAGE_MAX_BYTES:
+            raise ValueError("Book-storage payload exceeds the 1 MiB cap")
+
     def set_book_storage(
         self,
         book_id: int,
         fmt: str,
-        data: dict[str, Any] | None,
+        data: dict[str, str] | None,
         *,
         user_type: str = "local",
         user: str = "viewer",
@@ -2785,14 +2803,18 @@ class WritableCalibreDB:
         ``update_book_storage_for_book``, the viewers' per-book
         localStorage); ``None`` deletes the row.
 
-        The payload dict stores as the JSON object upstream's shape carries
-        (``{'timestamp': <now epoch>, 'data': <payload>}``; the timestamp is
-        stamped here like upstream's update). ``fmt`` uppercases (the
-        column is NOCASE but the stored spelling follows the formats row);
-        the (book, format, user_type, user) key is UNIQUE. Returns True
-        when a row was written or deleted, False when a delete found
-        nothing; unknown books and schemas predating the (newer-Calibre)
-        table raise ValueError.
+        The ``data`` column stores ONLY the payload map, JSON-encoded with
+        ``ensure_ascii=False`` exactly like upstream (the timestamp lives in
+        its own REAL column); storing the wrapped ``{'timestamp', 'data'}``
+        entry there was the 1.25 shape bug -- upstream's reader validates the
+        column as the bare str->str map and silently dropped every
+        cquarry-written row. Upstream's other guards are reproduced: keys and
+        values must be ``str``, the UTF-16 payload caps at 1 MiB, and an
+        OLDER entry never overwrites a newer one (newest-timestamp-wins).
+        ``fmt`` uppercases; the (book, format, user_type, user) key is
+        UNIQUE. Returns True when a row was written or deleted, False when a
+        delete found nothing or an older entry was refused; unknown books and
+        schemas predating the (newer-Calibre) table raise ValueError.
         """
         fmt = (fmt or "").strip().upper()
         if not fmt:
@@ -2813,7 +2835,17 @@ class WritableCalibreDB:
                 changed = self.conn.total_changes > before
                 self._commit()
                 return changed
-            entry = {"timestamp": time.time(), "data": data}
+            self._validate_book_storage(data)
+            timestamp = time.time()
+            existing = self.conn.execute(
+                "SELECT timestamp FROM book_storage WHERE book = ? AND "
+                "format = ? AND user_type = ? AND user = ?",
+                (book_id, fmt, user_type, user),
+            ).fetchone()
+            if existing is not None and float(existing["timestamp"]) > timestamp:
+                # Upstream's guard: a newer stored entry never regresses.
+                self._rollback()
+                return False
             self.conn.execute(
                 "INSERT OR REPLACE INTO book_storage "
                 "(book, format, user_type, user, timestamp, data) "
@@ -2823,8 +2855,8 @@ class WritableCalibreDB:
                     fmt,
                     user_type,
                     user,
-                    entry["timestamp"],
-                    json.dumps(entry),
+                    timestamp,
+                    json.dumps(data, ensure_ascii=False),
                 ),
             )
             self._commit()
