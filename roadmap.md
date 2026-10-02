@@ -237,9 +237,11 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   across Carrel-calibre-web and Hermitage. Size XS. **Shipped 1.25** as
   `helpers.unpipe_author` (render-identical: a bare comma, so switching call sites
   is not a visual change); per the waiver the copies stay until a consumer wave.
-- [ ] **Tag-membership id-set rollup**: Carrel `cps/categories.py:29-52` builds
+- [x] **Tag-membership id-set rollup**: Carrel `cps/categories.py:29-52` builds
   `tag_path -> frozenset(book_ids)` privately because `tag_rollup` returns counts only.
-  Size S.
+  Size S. **Shipped 1.25** as `CalibreDB.tag_rollup_ids(ids=None)`; the counts-only
+  helper stays for count consumers, and Carrel's private copy retires in a consumer
+  wave per the waiver.
 - [ ] **Identifier-link helper, Open Library canonical** (Brandon's 2026-09-29 call):
   ISBN links resolve to `openlibrary.org/isbn/`; Carrel's WorldCat mapping
   (`quarry_grid.py:581`) switches; Hermitage's mapping is already the canonical shape
