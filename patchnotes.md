@@ -1,3 +1,46 @@
+## v1.26.1 (2026-10-02)
+
+### The closing sweep: documentation truth after the audit wave
+
+A verification sweep over the 1.26 wave's documentation found the prose
+lagging the shipped code and the recorded facts. No behavior changes; the
+only Python delta is one docstring. Every fix was re-verified against the
+current tree and upstream's reference clone before landing.
+
+- **CLAUDE.md's blob-writer bullets teach the 1.26 storage shapes.** The
+  bullets still described the 1.25 passthrough (str verbatim / raw
+  json.dumps / wrapped entry) and instructed "do not 'complete' that" --
+  which, after 1.26 shipped the conversion-options frame, read as a
+  mandate to revert a shipped fix. They now match spec §3.6 and API.md:
+  json.dumps on every plugin-data payload, upstream's deterministic
+  protocol-2 BINSTRING frame, the bare str->str map in the data column.
+- **The author-sort bullet carries the 1.26 refinements** (the honest
+  no-op on an equal stored sort and `update_books=False`'s row-only
+  write), and the four consumer-wave spots in CLAUDE.md and API.md speak
+  in the recorded past: Carrel 0.6.43 and Hermitage 1.8.6 retired their
+  helper copies on 2026-10-02.
+- **`set_plugin_data`'s docstring matches its body**: every payload goes
+  through `json.dumps(val, default=str)` since 1.26; the docstring's
+  first half still claimed a `str` stores verbatim.
+- **Spec §5 carries the search-audit divergences it promised.** New
+  entries 14-17 record the enum-multi count-operator scope, the
+  relative-date vocabulary pair (negative `Ndaysago` upstream, singular
+  `1dayago` here), `loc:="X"`'s contains-vs-exact result-set difference,
+  and the search-behavior preferences -- each verified against upstream's
+  reference clone, each dependency- or GUI-bound. The roadmap audit block
+  had claimed "§5 carries them" while §5 carried none of them.
+- **The audit's seventh search divergence is retracted.** Unregistered
+  `@name:` does not sweep as an `all:` text search upstream:
+  `get_user_category_matches` returns the empty set for an unknown name,
+  exactly like cquarry (db/search.py:601-602, :719-721, :907-929 in the
+  reference clone). There is no divergence to record; CLAUDE.md's
+  match-nothing claim was right all along, and the roadmap now says so.
+- **Erratum, tag v1.25.0 vs patchnotes.md.** Commit c03d7dc backticked
+  the `@Name` token in the v1.25.0 entry after the tag was cut (GitHub
+  autolinked the bare token as a mention), so the tag message and this
+  file differ by that one formatting pair. Tags are immutable and stay
+  untouched; the delta is recorded here rather than rewritten.
+
 ## v1.26.0 (2026-10-02)
 
 ### The parity audit's fix wave: every confirmed bug and divergence lands
