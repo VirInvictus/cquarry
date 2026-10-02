@@ -228,9 +228,11 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   fmt/user/order_by/limit filters. Rode one fix: the custom-column link map was
   stashed series-only inside load_custom_column, so custom_column_links answered
   empty for text/enumeration/rating despite its documented promise.
-- [ ] **Ordered-VL-names helper**: promotes the near-identical copies at Carrel
+- [x] **Ordered-VL-names helper**: promotes the near-identical copies at Carrel
   `cps/wings.py:33-47` and Hermitage `app.py:1605-1616` (Calibre sidebar order:
-  stored tab position first, unknown names alphabetical). Size XS.
+  stored tab position first, unknown names alphabetical). Size XS. **Shipped 1.25**
+  as `CalibreDB.ordered_virtual_library_names()`; per the waiver both consumers
+  still carry their private copies, to retire in a future consumer wave.
 - [ ] **Unpiped-author display helper**: retires the nine `replace("|", ",")` copies
   across Carrel-calibre-web and Hermitage. Size XS.
 - [ ] **Tag-membership id-set rollup**: Carrel `cps/categories.py:29-52` builds
