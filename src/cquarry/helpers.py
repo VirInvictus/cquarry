@@ -346,6 +346,21 @@ def author_sort_key(author_sort: str | None, primary_only: bool = False) -> str:
     return key
 
 
+def unpipe_author(name: str | None) -> str:
+    """Resolve Calibre's legacy pipe separator in one author display name.
+
+    Old Calibre stored multi-author strings pipe-joined and migrations left
+    pipes inside single author rows; every consumer display site needs the
+    same ``"|" -> ","`` flattening (the promoted helper, 1.25: the
+    ``replace("|", ",")`` copies across Carrel and Hermitage). Render-identical
+    with those copies -- a bare comma, no space -- so switching call sites is
+    not a visual change. None-safe: "" in, "" out.
+    """
+    if not name:
+        return ""
+    return str(name).replace("|", ",")
+
+
 def detect_series_gaps(indices_str: str, max_index: float | None) -> list[int]:
     """Detect missing entries in a series based on index numbers."""
     if not indices_str or max_index is None:

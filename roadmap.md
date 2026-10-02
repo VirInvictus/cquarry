@@ -233,8 +233,10 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   stored tab position first, unknown names alphabetical). Size XS. **Shipped 1.25**
   as `CalibreDB.ordered_virtual_library_names()`; per the waiver both consumers
   still carry their private copies, to retire in a future consumer wave.
-- [ ] **Unpiped-author display helper**: retires the nine `replace("|", ",")` copies
-  across Carrel-calibre-web and Hermitage. Size XS.
+- [x] **Unpiped-author display helper**: retires the nine `replace("|", ",")` copies
+  across Carrel-calibre-web and Hermitage. Size XS. **Shipped 1.25** as
+  `helpers.unpipe_author` (render-identical: a bare comma, so switching call sites
+  is not a visual change); per the waiver the copies stay until a consumer wave.
 - [ ] **Tag-membership id-set rollup**: Carrel `cps/categories.py:29-52` builds
   `tag_path -> frozenset(book_ids)` privately because `tag_rollup` returns counts only.
   Size S.

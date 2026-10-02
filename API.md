@@ -252,6 +252,7 @@ Utility functions used across the ecosystem. All are importable from `cquarry.he
 | `to_isbn13(raw)` | `str \| None` | ISBN-10 → 13 via the 978 prefix with a recomputed check digit; a 13-digit input passes through; anything else `None`. Deliberately no source check-digit validation (the LibraryThing exporter's contract); pair with `isbn_check_digit_is_valid` for strictness. |
 | `normalize_author_display(authors, primary_only=False)` | `str` | Format an author string (comma-separated or `list[str]`) for display. With `primary_only`, returns only the first author. Returns `"Unknown Author"` for empty input. |
 | `author_sort_key(author_sort, primary_only=False)` | `str` | Generate a lowercase sort key from `author_sort`. With `primary_only`, splits on `&` and uses the first segment. |
+| `unpipe_author(name)` | `str` | Resolve Calibre's legacy pipe separator in one author display name (since 1.25.0): the `"|"` -> `","` flattening, render-identical with the consumer copies it promotes (Carrel/Hermitage). None-safe: `""` in, `""` out. |
 
 #### Series analysis
 

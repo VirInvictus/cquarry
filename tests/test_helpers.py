@@ -22,6 +22,7 @@ from cquarry.helpers import (
     tags_to_tree,
     title_sort,
     to_isbn13,
+    unpipe_author,
 )
 
 
@@ -288,3 +289,17 @@ class TestNormalizeRatingAlias(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnpipeAuthor(unittest.TestCase):
+    """unpipe_author: the promoted pipe-flattening display helper (1.25)."""
+
+    def test_pipes_flatten_to_bare_commas(self):
+        self.assertEqual(unpipe_author("John Smith|Jane Doe"), "John Smith,Jane Doe")
+
+    def test_plain_names_pass_through(self):
+        self.assertEqual(unpipe_author("John Smith"), "John Smith")
+
+    def test_none_safe(self):
+        self.assertEqual(unpipe_author(None), "")
+        self.assertEqual(unpipe_author(""), "")
