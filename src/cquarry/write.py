@@ -2163,6 +2163,122 @@ class WritableCalibreDB:
             (book_id, fmt.upper()),
         )
 
+    # -- FTS queue management (1.24; the Phase 15 ring) --
+    #
+    # The queue is the only FTS surface a stdlib process can write: the
+    # index rows themselves (books_text + the FTS5 tables behind them)
+    # delete through triggers that tokenize with Calibre's custom tokenizer,
+    # which does not exist here, so removing indexed text stays Calibre's
+    # job. These verbs manage the queue only.
+
+    def fts_reindex_book(self, book_id: int, fmts: list[str] | None = None) -> int:
+        """Queue a book's formats for FTS re-extraction and a pages rescan
+        (upstream ``reindex_fts_book`` / ``dirty_book``). Returns how many
+        queue rows were inserted; an already-queued pair is not duplicated,
+        and 0 means "nothing new queued" -- including the missing-sidecar
+        case, where there is no queue to write to. ``fmts=None`` queues
+        every catalogued format the book carries; explicit formats queue
+        verbatim (extraction of a file that turns out to be missing is the
+        worker's finding, not this verb's). Extraction itself stays
+        Calibre's job."""
+        if not self._ensure_fts_attached():
+            return 0
+        self._begin()
+        try:
+            self._require_book(book_id)
+            if fmts is None:
+                rows = self.conn.execute(
+                    "SELECT format FROM data WHERE book = ?", (book_id,)
+                ).fetchall()
+                fmts = [r[0] for r in rows if r[0]]
+            added = 0
+            for fmt in fmts:
+                fmt = str(fmt).strip().upper()
+                if not fmt:
+                    continue
+                before = self.conn.total_changes
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO fts_db.dirtied_formats(book, format) "
+                    "VALUES (?, ?)",
+                    (book_id, fmt),
+                )
+                added += self.conn.total_changes - before
+            if added:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    self.conn.execute(
+                        "UPDATE books_pages_link SET needs_scan = 1 WHERE book = ?",
+                        (book_id,),
+                    )
+            self._commit()
+            return added
+        except BaseException:
+            self._rollback()
+            raise
+
+    def fts_reindex_all(self) -> int:
+        """Queue every catalogued format for FTS re-extraction (upstream's
+        ``dirty_existing`` sweep, the shape ``enable_fts(True)`` uses when
+        nothing is indexed yet). Returns the inserted-row count; 0 when the
+        sidecar is absent. The closer cousin of upstream's
+        delete-the-sidecar ``reindex_fts``: this keeps the index tables
+        untouched and lets Calibre's extraction pool re-write every row
+        through its own triggers at its own pace."""
+        if not self._ensure_fts_attached():
+            return 0
+        self._begin()
+        try:
+            before = self.conn.total_changes
+            self.conn.execute(
+                "INSERT OR IGNORE INTO fts_db.dirtied_formats(book, format) "
+                "SELECT book, format FROM main.data"
+            )
+            added = self.conn.total_changes - before
+            if added:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    self.conn.execute("UPDATE books_pages_link SET needs_scan = 1")
+            self._commit()
+            return added
+        except BaseException:
+            self._rollback()
+            raise
+
+    def fts_queue_clear(
+        self, book_id: int | None = None, fmt: str | None = None
+    ) -> int:
+        """Remove entries from the FTS extraction queue. Returns the number
+        of queue rows removed: everything (no arguments), one book's
+        entries (``book_id``), or one pair (``book_id`` + ``fmt``).
+
+        This is the queue half of upstream's ``fts_unindex`` /
+        ``remove_dirty`` / ``clear_all_dirty``. The index rows themselves
+        are process-bound (see the section note above), so "unindex" in the
+        full upstream sense stays Calibre's job. A ``fmt`` without a
+        ``book_id`` raises: the queue is keyed by pairs."""
+        if book_id is None and fmt is not None:
+            raise ValueError("fmt without book_id is not a queue address")
+        if not self._ensure_fts_attached():
+            return 0
+        self._begin()
+        try:
+            before = self.conn.total_changes
+            if book_id is None:
+                self.conn.execute("DELETE FROM fts_db.dirtied_formats")
+            elif fmt is None:
+                self.conn.execute(
+                    "DELETE FROM fts_db.dirtied_formats WHERE book = ?", (book_id,)
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM fts_db.dirtied_formats WHERE book = ? AND format = ?",
+                    (book_id, str(fmt).strip().upper()),
+                )
+            removed = self.conn.total_changes - before
+            self._commit()
+            return removed
+        except BaseException:
+            self._rollback()
+            raise
+
     def add_format(self, book_id: int, fmt: str, name: str, size: int) -> bool:
         """Register a format row in ``data``. Returns True when inserted.
 

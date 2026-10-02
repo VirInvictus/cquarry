@@ -156,9 +156,15 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   re-answered (find_missing_format_files/find_missing_cover_files own it); the format
   classifier is structural (token extension minus the image/OPF/junk set), not
   upstream's curated BOOK_EXTENSIONS, and POSIX case sensitivity is assumed.
-- [ ] **FTS queue management verbs** (`fts_unindex`, per-book reindex, full reset): pure
+- [x] **FTS queue management verbs** (`fts_unindex`, per-book reindex, full reset): pure
   sidecar SQL against `books_text`/`dirtied_formats` (`cache.py:603-698`,
-  `fts/connect.py:75-92`); extraction itself stays Calibre's. Size S.
+  `fts/connect.py:75-92`); extraction itself stays Calibre's. Size S. **Shipped 1.24**
+  with one boundary named: `fts_reindex_book`/`fts_reindex_all`/`fts_queue_clear` are the
+  queue half (upstream `dirty_book`/`dirty_existing`/`remove_dirty`/`clear_all_dirty`);
+  upstream `fts_unindex`'s index-row deletion is process-bound -- the `books_text`
+  delete triggers tokenize through Calibre's custom FTS5 tokenizer (the schema fact the
+  CLAUDE.md NEVER-delete rule is built on), so removing indexed text stays Calibre's
+  (an O-lane `calibredb fts_unindex` wrap if a consumer asks).
 - [ ] **Typed `set_preference` writer** (the 2026-09-29 automation-set reversal; the
   survey's "needs a recorded decision" note is satisfied by that decision): saved-search
   add/delete/rename (`cache.py:3379-3399`), virtual libraries, user categories, grouped

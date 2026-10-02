@@ -526,6 +526,107 @@ class TestMaintain(unittest.TestCase):
                 wdb.maintain()
 
 
+class TestFtsQueueVerbs(unittest.TestCase):
+    """fts_reindex_book / fts_reindex_all / fts_queue_clear (1.24, Phase
+    15): pure queue SQL against the sidecar; the index rows themselves
+    stay Calibre's."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                timestamp TEXT, last_modified TEXT, path TEXT);
+            CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER,
+                format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE books_pages_link (book INTEGER PRIMARY KEY,
+                pages INTEGER DEFAULT 0 NOT NULL, needs_scan INTEGER NOT NULL DEFAULT 0);
+            INSERT INTO books (id, title, sort) VALUES (1, 'One', 'One'), (2, 'Two', 'Two');
+            INSERT INTO data (book, format, uncompressed_size, name) VALUES
+                (1, 'EPUB', 10, 'One - X'), (1, 'MOBI', 10, 'One - X'),
+                (2, 'EPUB', 10, 'Two - Y');
+            INSERT INTO books_pages_link (book, pages, needs_scan) VALUES (1, 100, 0), (2, 50, 0);
+            """
+        )
+        conn.commit()
+        conn.close()
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        fts.execute(
+            "CREATE TABLE dirtied_formats (id INTEGER PRIMARY KEY,"
+            " book INTEGER NOT NULL, format TEXT NOT NULL COLLATE NOCASE,"
+            " in_progress INTEGER NOT NULL DEFAULT FALSE, UNIQUE(book, format))"
+        )
+        fts.commit()
+        fts.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _fts_rows(self):
+        fts = sqlite3.connect(os.path.join(self.temp_dir, "full-text-search.db"))
+        try:
+            return sorted(fts.execute("SELECT book, format FROM dirtied_formats"))
+        finally:
+            fts.close()
+
+    def test_reindex_book_queues_all_catalogued_formats(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertEqual(wdb.fts_reindex_book(1), 2)
+            self.assertEqual(self._fts_rows(), [(1, "EPUB"), (1, "MOBI")])
+            # Already-queued pairs do not duplicate.
+            self.assertEqual(wdb.fts_reindex_book(1), 0)
+            # needs_scan flips only when something was queued.
+            check = sqlite3.connect(self.db_path)
+            scans = list(check.execute("SELECT book, needs_scan FROM books_pages_link"))
+            check.close()
+            self.assertEqual(scans, [(1, 1), (2, 0)])
+
+    def test_reindex_book_explicit_formats_and_unknown_book(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertEqual(wdb.fts_reindex_book(2, ["epub"]), 1)
+            self.assertEqual(self._fts_rows(), [(2, "EPUB")])
+            with self.assertRaises(ValueError):
+                wdb.fts_reindex_book(99)
+
+    def test_reindex_all_sweeps_the_catalog(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertEqual(wdb.fts_reindex_all(), 3)
+            self.assertEqual(self._fts_rows(), [(1, "EPUB"), (1, "MOBI"), (2, "EPUB")])
+            self.assertEqual(wdb.fts_reindex_all(), 0)
+
+    def test_queue_clear_variants(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.fts_reindex_all()
+            self.assertEqual(wdb.fts_queue_clear(1, "epub"), 1)
+            self.assertEqual(self._fts_rows(), [(1, "MOBI"), (2, "EPUB")])
+            self.assertEqual(wdb.fts_queue_clear(1), 1)
+            self.assertEqual(self._fts_rows(), [(2, "EPUB")])
+            self.assertEqual(wdb.fts_queue_clear(), 1)
+            self.assertEqual(self._fts_rows(), [])
+            self.assertEqual(wdb.fts_queue_clear(), 0)  # honest empty
+            with self.assertRaises(ValueError):
+                wdb.fts_queue_clear(fmt="EPUB")
+
+    def test_missing_sidecar_degrades_to_zero(self):
+        os.unlink(os.path.join(self.temp_dir, "full-text-search.db"))
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertEqual(wdb.fts_reindex_book(1), 0)
+            self.assertEqual(wdb.fts_reindex_all(), 0)
+            self.assertEqual(wdb.fts_queue_clear(), 0)
+
+    def test_queue_writes_roll_back_with_the_batch(self):
+        with (
+            self.assertRaises(ValueError),
+            WritableCalibreDB(self.db_path) as wdb,
+            wdb.batch(),
+        ):
+            wdb.fts_reindex_all()
+            wdb.fts_reindex_book(99)  # unknown book fails the pass
+        self.assertEqual(self._fts_rows(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 
