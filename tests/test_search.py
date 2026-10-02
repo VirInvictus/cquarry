@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 from cquarry.db import CalibreDB
-from cquarry.search import ParseException, SearchEngine, _Parser
+from cquarry.search import DT_BOOL, ParseException, SearchEngine, _Parser
 
 # --- In-memory provider for engine tests -----------------------------------
 
@@ -927,17 +927,42 @@ class TestBooleanKeywords(unittest.TestCase):
 
     def test_checked_and_unchecked(self):
         # The vocabulary lives on bool CUSTOM columns (upstream's tristate
-        # fields); the shared provider has none, so the words raise.
-        self.assertRaises(ParseException, self.s, "#flag:checked")
-        self.assertRaises(ParseException, self.s, "#flag:unchecked")
+        # fields), pinned through a provider registering one. The shared
+        # engine has no bool column, so its #flag queries answer nothing
+        # (unknown locations match nothing) instead of raising.
+        books = {1: {"#flag": 1}, 2: {"#flag": 0}, 3: {"#flag": None}}
+
+        class _BoolP:
+            def all_ids(self):
+                return set(books)
+
+            def field(self, book_id, location):
+                return books[book_id].get(location)
+
+            def vl_expression(self, name):
+                return None
+
+            def saved_search(self, name):
+                return None
+
+            def custom_locations(self):
+                return {"#flag": DT_BOOL}
+
+        e = SearchEngine(_BoolP())
+        # cquarry's documented twostate behavior (spec 5.9): False and
+        # None both answer the false-side vocabulary.
+        self.assertEqual(e.search("#flag:checked"), {1})
+        self.assertEqual(e.search("#flag:unchecked"), {2, 3})
+        self.assertEqual(e.search("#flag:_blank"), {2, 3})
+        self.assertEqual(e.search("#flag:empty"), {2, 3})
 
     def test_blank_and_empty_mean_false(self):
-        self.assertRaises(ParseException, self.s, "#flag:blank")
-        self.assertRaises(ParseException, self.s, "#flag:empty")
+        self.assertRaises(ParseException, self.s, "cover:blank")
+        self.assertRaises(ParseException, self.s, "cover:empty")
 
     def test_underscore_variants(self):
-        self.assertRaises(ParseException, self.s, "#flag:_checked")
-        self.assertRaises(ParseException, self.s, "#flag:_blank")
+        self.assertRaises(ParseException, self.s, "cover:_checked")
+        self.assertRaises(ParseException, self.s, "cover:_blank")
 
     def test_tristate_rating_keywords(self):
         # 1.18 parity pin: numerics take exactly true/false as presence
@@ -1364,9 +1389,12 @@ class TestCoverVocabulary(unittest.TestCase):
         self.assertEqual(self.e.search("cover:false"), {2, 3})
 
     def test_numeric_values_work(self):
+        # cover:0 does NOT match book 3 (no cover key -> None): upstream's
+        # numeric probe skips None, exactly like it skips a null cover.
         self.assertEqual(self.e.search("cover:1"), {1})
-        self.assertEqual(self.e.search("cover:=0"), {2, 3})
+        self.assertEqual(self.e.search("cover:=0"), {2})
         self.assertEqual(self.e.search("cover:>0"), {1})
+        self.assertEqual(self.e.search("cover:false"), {2, 3})
 
     def test_boolean_vocabulary_raises(self):
         with self.assertRaises(ParseException):
