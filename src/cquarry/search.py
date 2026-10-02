@@ -1019,6 +1019,25 @@ class SearchEngine:
         if datatype == DT_IDENTIFIERS:
             return self._match_identifiers(original, query, candidates)
         if datatype == DT_BOOL:
+            if location == "cover":
+                # Upstream's cover branch (DS:273-292): the bool flag is
+                # special-cased for exactly true/false; every other value
+                # routes into the NUMERIC machinery (cover has datatype
+                # 'int' in upstream's field metadata), so `cover:1` works
+                # and `cover:yes` raises. cquarry 1.18-1.25 ran cover
+                # through the full boolean vocabulary instead.
+                ql = query.lower().strip()
+                if ql == "true":
+                    return {
+                        b for b in candidates if bool(self.provider.field(b, "cover"))
+                    }
+                if ql == "false":
+                    return {
+                        b
+                        for b in candidates
+                        if not bool(self.provider.field(b, "cover"))
+                    }
+                return self._match_numeric(location, DT_INT, query, candidates)
             return self._match_bool(location, query, candidates)
         if datatype in (DT_RATING, DT_INT, DT_FLOAT):
             return self._match_numeric(location, datatype, query, candidates)

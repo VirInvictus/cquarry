@@ -912,17 +912,32 @@ class TestBooleanKeywords(unittest.TestCase):
     def setUp(self):
         self.s = lambda q: _engine().search(q)
 
+    def test_cover_takes_true_false_and_numbers_only(self):
+        # The 1.26 audit (D4): upstream types cover as a numeric field with
+        # exactly true/false special-cased -- the 1.18-1.25 behavior ran
+        # cover through the full boolean vocabulary, which upstream never
+        # had. The vocabulary words raise on cover like any non-numeric.
+        self.assertEqual(self.s("cover:true"), {1, 2, 4})
+        self.assertEqual(self.s("cover:false"), {3})
+        self.assertEqual(self.s("cover:1"), {1, 2, 4})
+        self.assertEqual(self.s("cover:0"), {3})
+        for word in ("checked", "unchecked", "blank", "empty", "yes", "_checked"):
+            with self.assertRaises(ParseException):
+                self.s(f"cover:{word}")
+
     def test_checked_and_unchecked(self):
-        self.assertEqual(self.s("cover:checked"), {1, 2, 4})
-        self.assertEqual(self.s("cover:unchecked"), {3})
+        # The vocabulary lives on bool CUSTOM columns (upstream's tristate
+        # fields); the shared provider has none, so the words raise.
+        self.assertRaises(ParseException, self.s, "#flag:checked")
+        self.assertRaises(ParseException, self.s, "#flag:unchecked")
 
     def test_blank_and_empty_mean_false(self):
-        self.assertEqual(self.s("cover:blank"), {3})
-        self.assertEqual(self.s("cover:empty"), {3})
+        self.assertRaises(ParseException, self.s, "#flag:blank")
+        self.assertRaises(ParseException, self.s, "#flag:empty")
 
     def test_underscore_variants(self):
-        self.assertEqual(self.s("cover:_checked"), {1, 2, 4})
-        self.assertEqual(self.s("cover:_blank"), {3})
+        self.assertRaises(ParseException, self.s, "#flag:_checked")
+        self.assertRaises(ParseException, self.s, "#flag:_blank")
 
     def test_tristate_rating_keywords(self):
         # 1.18 parity pin: numerics take exactly true/false as presence
@@ -1313,3 +1328,48 @@ class TestQuotedCustomColumnContains(unittest.TestCase):
         # 'To Read' is book 2's value; 'unread' matches nothing here, the
         # presence test stays word-based.
         self.assertEqual(self.db.search("#reading_status:unread"), set())
+
+
+class TestCoverVocabulary(unittest.TestCase):
+    """cover: is numeric upstream with true/false special-cased (the 1.26
+    audit's D4); 1.18-1.25 ran it through the full boolean vocabulary."""
+
+    def setUp(self):
+        books = {
+            1: {"cover": True},
+            2: {"cover": False},
+            3: {},
+        }
+
+        class _P:
+            def all_ids(self):
+                return set(books)
+
+            def field(self, book_id, location):
+                return books[book_id].get(location)
+
+            def vl_expression(self, name):
+                return None
+
+            def saved_search(self, name):
+                return None
+
+            def custom_locations(self):
+                return {}
+
+        self.e = SearchEngine(_P())
+
+    def test_true_false_special_cases(self):
+        self.assertEqual(self.e.search("cover:true"), {1})
+        self.assertEqual(self.e.search("cover:false"), {2, 3})
+
+    def test_numeric_values_work(self):
+        self.assertEqual(self.e.search("cover:1"), {1})
+        self.assertEqual(self.e.search("cover:=0"), {2, 3})
+        self.assertEqual(self.e.search("cover:>0"), {1})
+
+    def test_boolean_vocabulary_raises(self):
+        with self.assertRaises(ParseException):
+            self.e.search("cover:yes")
+        with self.assertRaises(ParseException):
+            self.e.search("cover:checked")
