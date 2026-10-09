@@ -464,7 +464,6 @@ or ICU-bound).
 
 ### Gaps and improvements (unowned; each needs a lane or a decline)
 
-- `book_storage_for_book` read (the missing half of the schema-v28 table).
 - Snapshot-retry hardening (the logged candidate, now claim-verified with a
   correction: the snapshot path does not surface errors -- it SILENTLY
   degrades to the tear-risk raw copy; `backup_to` propagates. The two paths
@@ -512,14 +511,67 @@ schema v27->v28 -- already ported, with the shape bug above) and zero
 grammar/date/GPM/FTS/annotations/backup changes; everything else is
 in-memory perf the read-only port does not need.
 
+## The Calibre 9.16 watch audit (2026-10-09, parity-watch automation)
+
+The Friday parity-watch automation tripped its schema-search tier on
+v9.16.0 (tagged 2026-10-09; seven parity-surface files moved, the most
+since 9.12). Full read-only audit against cquarry v1.26.1 the same day;
+suite green before (672 tests) and after (674 plus the two new
+regression tests).
+
+- **Schema v27 (`book_storage`) ratified.** Upstream shipped the table
+  cquarry mirrored from master in 1.25: same DDL, same write semantics
+  (bare str->str map, `ensure_ascii=False`, newest-timestamp-wins,
+  INSERT OR REPLACE, format strip+upper), cascade cleanup covered by
+  `remove_book`. The support gate is `user_version > 27`; fresh
+  libraries are born at 28 and the upgrade driver bumps N->N+1 per
+  method, so upgraded libraries land there too (no upstream off-by-one).
+  cquarry's `_require_table` checks the table itself and raises on
+  pre-v27 schemas. The stale gap row for the read half (shipped in
+  af41e52, 1.26.0) is removed from the gaps list above.
+- **ONE divergence family, fixed same day (1.26.2):** upstream's
+  `single_text` adapter now whitespace-collapses single-valued text,
+  series, AND enumeration custom column writes (`' '.join(x.split())`
+  over the stripped string; whitespace-only clears; enums are adapted
+  before validation, so a double-spaced spelling of a listed value
+  normalizes where cquarry raised), and its `multiple_text` adapter has
+  always collapsed each item of multi-valued columns; cquarry stripped
+  ends only and stored the interior verbatim. Mirrored in
+  `_write_pattern_a` (all four branches) and `add_custom_column_values`,
+  with regression tests. Comments deliberately moved to the verbatim
+  `long_text` adapter upstream (its behavior is unchanged: end-strip,
+  empty-to-None).
+- **Search: no action.** The `_match` ASCII fast path (upstream commit
+  412efe1f56) is locale-escaped and falls back to the exact ICU calls
+  the old code made; observable match semantics are unchanged, so
+  SearchEngine parity is unaffected.
+- **Tag browser: no action.** The 327-line categories.py work is a new
+  CategoriesCache (copy-on-read, incremental refresh, quiet rebuilds
+  under a CategoriesInvalidatingLock); per-field content computation is
+  untouched, so get_categories' output contract holds.
+- **Read paths: no action.** The books-table single scan, the
+  data-table max-size rework, and the series sort-key short-circuit are
+  internal mechanics; SizeTable still aggregates MAX (cquarry's SUM
+  deviation is untouched and still documented).
+- **Snapshot-retry candidate reference updated** (the hardening entry
+  below now points at 9.16's 60-second busy-time budget +
+  `can_use_sqlite_in` probe + /tmp fallback, not the 9.15 ten-attempt
+  loop).
+- Consumers: no caller in CalibreQuarry, bindery-cli, Hermitage, or
+  Carrel-calibre-web writes single-valued text/series custom columns
+  through cquarry, so nothing downstream is owed by the 1.26.2 change.
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
-- [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch). Upstream's
-  `_backup_database` retries transient `SQLITE_IOERR`/`SQLITE_IOERR_SHORT_READ` up to
-  ten times during SQLite backup-API steps; cquarry's `SNAPSHOT_LEASH` snapshot
-  fallback and `backup_to()` use the same API in the same concurrent-write scenario
-  with no retry, so a transient step failure surfaces as an error rather than a retry.
-  Trigger: the snapshot path failing in the field. Size S.
+- [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference
+  shape updated 2026-10-09, 9.16 watch). Upstream's `_backup_database` retries
+  transient `SQLITE_IOERR`/`SQLITE_IOERR_SHORT_READ` during SQLite backup-API steps;
+  cquarry's `SNAPSHOT_LEASH` snapshot fallback and `backup_to()` use the same API in
+  the same concurrent-write scenario with no retry, so a transient step failure
+  surfaces as an error rather than a retry. 9.16 reworked the retry into a 60-second
+  busy-time budget (0.05 s sleeps, reset on progress) plus a `can_use_sqlite_in`
+  filesystem-lock probe and a /tmp fallback; THAT is the shape to mirror, not the
+  9.15 ten-attempt loop. Trigger: the snapshot path failing in the field. Size S.
 - [ ] **`find_orphan_custom_column_links`** (design-time waiver, Phase 9 expansion).
   Schema-probing integrity predicate for link rows pointing at purged columns; needs
   its own fixture work. Trigger: an integrity consumer asks (the bindery OPF audits
