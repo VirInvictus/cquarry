@@ -1561,6 +1561,150 @@ class _WriteSideTests:
             ],
         )
 
+    def _add_single_text_column(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_6 (
+                id INTEGER PRIMARY KEY, value TEXT UNIQUE NOT NULL, link TEXT DEFAULT ''
+            );
+            CREATE TABLE books_custom_column_6_link (
+                book INTEGER, value INTEGER, UNIQUE(book, value)
+            );
+            INSERT INTO custom_columns VALUES
+                (6,'shelf','Shelf','text',1,'{}',0,1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def _add_series_column(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_7 (
+                id INTEGER PRIMARY KEY, value TEXT UNIQUE NOT NULL, link TEXT DEFAULT ''
+            );
+            CREATE TABLE books_custom_column_7_link (
+                book INTEGER, value INTEGER, extra REAL, UNIQUE(book, value)
+            );
+            INSERT INTO custom_columns VALUES
+                (7,'myseries','My Series','series',1,'{}',0,1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_single_text_column_collapses_whitespace(self):
+        # Calibre 9.16's single_text adapter (upstream db/write.py) collapses
+        # whitespace runs and reduces a whitespace-only value to None, which
+        # clears; cquarry used to store the caller's bytes verbatim.
+        self._add_single_text_column()
+        with self._wdb() as wdb:
+            self.assertTrue(
+                wdb.set_custom_column(1, "#shelf", "  Hovering\r\n over   the\tTower  ")
+            )
+            # A messier spelling of the stored value is an honest no-op.
+            self.assertFalse(
+                wdb.set_custom_column(1, "#shelf", "Hovering over the Tower")
+            )
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_6"),
+            [("Hovering over the Tower",)],
+        )
+        with self._wdb() as wdb:
+            # "Doe, John" stays one value; single interior spaces survive.
+            self.assertTrue(wdb.set_custom_column(1, "#shelf", "Doe,  John"))
+            self.assertTrue(wdb.set_custom_column(1, "#shelf", "   \n  "))  # clear
+            self.assertFalse(wdb.set_custom_column(1, "#shelf", "\t"))  # already clear
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_6"), [(0,)])
+        self.assertEqual(
+            self._sql2("SELECT COUNT(*) FROM books_custom_column_6_link"), [(0,)]
+        )
+
+    def test_series_column_value_collapses_whitespace(self):
+        self._add_series_column()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#myseries", "The  First   Cycle"))
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_7"), [("The First Cycle",)]
+        )
+        # The series-index seeding rides the same write, untouched.
+        self.assertEqual(
+            self._sql2("SELECT book, extra FROM books_custom_column_7_link"),
+            [(1, 1.0)],
+        )
+
+    def test_enumeration_value_collapses_whitespace(self):
+        # Enumeration rides the same single_text adapter upstream, adapted
+        # BEFORE validation: a double-spaced spelling of a listed value
+        # normalizes and passes, a whitespace-only value clears (None).
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#status", "  To   Read "))
+            self.assertFalse(wdb.set_custom_column(1, "#status", "To Read"))  # no-op
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_1"), [("To Read",)]
+        )
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#status", "   \n"))  # clear
+            self.assertFalse(wdb.set_custom_column(1, "#status", " "))  # already clear
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_1"), [(0,)])
+
+    def _add_multi_text_column(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_8 (
+                id INTEGER PRIMARY KEY, value TEXT UNIQUE NOT NULL, link TEXT DEFAULT ''
+            );
+            CREATE TABLE books_custom_column_8_link (
+                book INTEGER, value INTEGER, UNIQUE(book, value)
+            );
+            INSERT INTO custom_columns VALUES
+                (8,'crowd','Crowd','text',1,'{}',1,1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_multi_valued_column_items_collapse_whitespace(self):
+        # Upstream's multiple_text adapter has always collapsed each item;
+        # cquarry stripped only until 1.26.2. The bare string stays ONE
+        # value, collapsed, never comma-split; set_custom_column is
+        # replace-only, so the final bare-string pass replaces the list.
+        self._add_multi_text_column()
+        with self._wdb() as wdb:
+            self.assertTrue(
+                wdb.set_custom_column(
+                    1, "#crowd", ["  Influencer\r\n Kings ", "Beta   Readers"]
+                )
+            )
+            self.assertFalse(
+                wdb.set_custom_column(
+                    1, "#crowd", ["  Influencer\r\n Kings ", "Beta\tReaders "]
+                )
+            )  # honest no-op: messy spellings collapse to the stored order
+        self.assertEqual(
+            sorted(v for (v,) in self._sql2("SELECT value FROM custom_column_8")),
+            ["Beta Readers", "Influencer Kings"],
+        )
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#crowd", "Doe,  John"))
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_8"), [("Doe, John",)]
+        )
+        # The replaced list's value rows pruned with their links.
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_8"), [(1,)])
+
+    def test_add_custom_column_values_collapses_whitespace(self):
+        self._add_multi_text_column()
+        with self._wdb() as wdb:
+            self.assertEqual(wdb.add_custom_column_values(1, "#crowd", ["  Rin  "]), 1)
+            # A messy spelling of an existing value collapses to it and
+            # dedupes away.
+            self.assertEqual(wdb.add_custom_column_values(1, "#crowd", ["Rin   "]), 0)
+        self.assertEqual(self._sql2("SELECT value FROM custom_column_8"), [("Rin",)])
+
     def test_custom_column_unknown_datatype_raises(self):
         conn = sqlite3.connect(self.db_path)
         conn.executescript(

@@ -2125,7 +2125,17 @@ class WritableCalibreDB:
             self._clear_pattern_a(link_table, value_table, book_id)
             return True
         if datatype == "enumeration":
-            sval = str(value).strip()
+            # Upstream routes enum values through the same single_text
+            # adapter BEFORE validating (9.16 added the whitespace collapse;
+            # the strip is older), so a double-spaced spelling of a listed
+            # value normalizes to the listed spelling, and a whitespace-only
+            # value reduces to None, which clears.
+            sval = " ".join(str(value).split())
+            if not sval:
+                if not old_rows:
+                    return False
+                self._clear_pattern_a(link_table, value_table, book_id)
+                return True
             self._validate_enum(meta, sval)
             new_vals: list[Any] = [sval]
         elif datatype == "rating":
@@ -2144,6 +2154,9 @@ class WritableCalibreDB:
                 return True
             new_vals = [internal]
         elif is_multiple or isinstance(value, (list, tuple)):
+            # Each item collapses like upstream's multiple_text adapter
+            # (' '.join over the stripped item; long-standing upstream
+            # behavior, mirrored since 1.26.2).
             items: list[str] = []
             if isinstance(value, (list, tuple)):
                 for v in value:
@@ -2151,17 +2164,26 @@ class WritableCalibreDB:
                         # A None entry is skipped, never stringified into
                         # the literal 'None'.
                         continue
-                    s = str(v).strip()
+                    s = " ".join(str(v).split())
                     if s:
                         items.append(s)
             else:
                 # A bare string is ONE value: comma-splitting it made
                 # "Last, First" round-trip as two phantom values. Callers
                 # with multiple values pass a list (both writers do).
-                items = [str(value).strip()]
+                items = [" ".join(str(value).split())]
             new_vals = [x for x in items if x]
         else:  # text (single-valued) and series: one text value
-            new_vals = [str(value)]
+            # Upstream's single_text adapter (9.16+: long_text plus
+            # ' '.join(x.split())) collapses whitespace runs and reduces a
+            # whitespace-only value to None, which clears.
+            collapsed = " ".join(str(value).split())
+            if not collapsed:
+                if not old_rows:
+                    return False
+                self._clear_pattern_a(link_table, value_table, book_id)
+                return True
+            new_vals = [collapsed]
         if new_vals == old_rows:
             return False
         self._clear_pattern_a(link_table, value_table, book_id)
@@ -2260,8 +2282,9 @@ class WritableCalibreDB:
         appends: values already on the book are deduped away (the link
         table is ``UNIQUE(book, value)``), duplicates within ``values``
         collapse, only genuinely new ones insert, and the returned count is
-        honest. A no-op append does not bump ``last_modified`` or queue
-        anything.
+        honest. Values are normalized exactly like ``set_custom_column``'s
+        multi branch (per-item whitespace collapse, since 1.26.2). A no-op
+        append does not bump ``last_modified`` or queue anything.
 
         Only ``is_multiple`` Pattern-A (link-table) columns qualify; a
         single-valued column has one value to replace, so it raises with a
@@ -2300,7 +2323,10 @@ class WritableCalibreDB:
             if v is None:
                 # A None entry is skipped, never stringified into 'None'.
                 continue
-            s = str(v).strip()
+            # Same per-item normalization as set_custom_column's multi
+            # branch (upstream multiple_text), so both verbs store rows
+            # that agree.
+            s = " ".join(str(v).split())
             if not s:
                 continue
             if datatype == "enumeration":
