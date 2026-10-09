@@ -1,3 +1,45 @@
+## v1.26.2 (2026-10-09)
+
+### Mirroring Calibre 9.16: the first parity-watch audit lane
+
+Calibre 9.16 shipped on 2026-10-09 and tripped the new parity-watch
+automation's schema-search tier (seven files under `src/calibre/db/`
+moved, the most since 9.12). The full read-only audit against this tree
+found one real divergence and ratified everything else; the per-file
+verdicts live in the roadmap's Calibre 9.16 watch audit section.
+
+- **Custom-column writes now collapse whitespace exactly like upstream's
+  text adapters**: single-valued text, series, and enumeration values go
+  through the `single_text` mirror (`' '.join(x.split())` over the
+  stripped string; a whitespace-only value clears via its empty-to-None
+  rule), and each item of a multi-valued text write collapses like
+  upstream's `multiple_text` adapter has always done -- in both write
+  verbs, `set_custom_column` and `add_custom_column_values`. Enumeration
+  values are adapted BEFORE validation, so a double-spaced spelling of a
+  listed value now normalizes and passes instead of raising. cquarry
+  used to strip ends only and store the interior verbatim, so rows
+  written here and rows written by the 9.16 GUI disagreed for values
+  carrying double spaces or line breaks. Comments columns are
+  unaffected: upstream deliberately moved them to the verbatim
+  `long_text` adapter, so their behavior is unchanged.
+- **Schema v27 ratified.** The `book_storage` table cquarry mirrored
+  from master in 1.25 shipped upstream in 9.16 with the same DDL and
+  write semantics; the audit confirmed the support gate (`user_version
+  > 27`, fresh libraries born at 28, upgrades land there too) and
+  cquarry's `_require_table` ValueError on pre-v27 schemas. No code
+  change was needed; CLAUDE.md's blob-writer bullet now records the
+  shipped fact.
+- **The roadmap records the audit**: the 9.16 verdict per file (the
+  search fast path and the categories cache need no action; the
+  read-path reworks are internal mechanics), the stale gap row for
+  `get_book_storage` (shipped in af41e52) removed, and the
+  snapshot-retry hardening candidate updated to 9.16's 60-second
+  busy-time budget + `can_use_sqlite_in` probe + /tmp fallback
+  reference shape.
+- Nothing is owed downstream: no caller in CalibreQuarry, bindery-cli,
+  Hermitage, or Carrel-calibre-web writes custom columns through
+  cquarry yet.
+
 ## v1.26.1 (2026-10-02)
 
 ### The closing sweep: documentation truth after the audit wave
