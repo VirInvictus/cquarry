@@ -516,8 +516,9 @@ in-memory perf the read-only port does not need.
 The Friday parity-watch automation tripped its schema-search tier on
 v9.16.0 (tagged 2026-10-09; seven parity-surface files moved, the most
 since 9.12). Full read-only audit against cquarry v1.26.1 the same day;
-suite green before (672 tests) and after (674 plus the two new
-regression tests).
+suite green before (672 tests) and after (677 plus the five new
+regression tests; corrected 2026-10-11 -- the tree at v1.26.2 carries
+677, the original "674 plus two" undercounted the wave).
 
 - **Schema v27 (`book_storage`) ratified.** Upstream shipped the table
   cquarry mirrored from master in 1.25: same DDL, same write semantics
