@@ -590,35 +590,36 @@ hand-tuned sort kept, NOCASE reuse, comma-row precedence with the
 orphaned piped variant pruned, add_book over a piped row, and the
 dry-run plan reporting the piped row as existing).
 
-Logged follow-ups (adjacent surfaces verified during the fix's
-code-review; deliberate non-goals for 1.26.3, each needs its own lane):
+Follow-up wave (the three adjacent surfaces the fix's code-review
+verified were left as deliberate non-goals for 1.26.3; Brandon chose
+"all three as one wave" by AskUserQuestion the same day, shipped as
+the v1.27.0 lanes):
 
-- [ ] **Piped-named authors lay out with an underscore directory.**
-  The re-lay machinery takes the first author's STORED name and maps
-  `|` to `_` in `_ascii_filename`, so any book whose first author is
-  stored piped (every comma-created author since 1.26) gets
-  `Leckie_ Ann/Title (id)` where upstream lays out the display form
-  (`Leckie, Ann/...`, since its path inputs are unserialized id-map
-  entries). Verified identical on pre-fix 1.26.2 code: pre-existing,
-  not introduced by the reuse fix, but the fix routes the byline-repair
-  traffic into it. The fix belongs in the path builders (display-form
-  input, upstream tables.py:64 mirror), with a migration question:
-  existing libraries already carry underscore directories.
-- [ ] **Display-form resolution gap on the rest of the author write
-  surface.** `set_author_sort_name`, `rename_entity`'s old-name lookup
-  and merge detection, and `set_link_map(kind="authors")` resolve
-  stored spellings only, so after a reuse a display comma name raises
-  (`No author row matching 'Leckie, Ann'`) where `set_authors` now
-  silently works. Upstream keys ALL author lookups by display form.
-  Extending `_author_row_for_name` to these verbs is the candidate
-  fix; it changes ratified 1.19/1.25 resolution contracts, so it wants
-  its own decision.
-- [ ] **Reverse resolution direction.** A pipe-bearing input
-  (`Leckie| Ann`) against comma-spelled rows matches only its own
-  spelling and INSERTs a duplicate, where upstream's authors write
-  adapter flips incoming pipes to commas first (write.py:184) and
-  reuses. Rare (callers round-tripping raw SQL spellings), but the
-  asymmetry with the comma-input fix is real.
+- [x] **Display-form resolution across the author write surface
+  (v1.27.0, lane 1).** `set_author_sort_name`, `rename_entity` (old
+  name and merge detection), `set_link_map(kind="authors")`, and
+  `remove_entity_everywhere` resolve through `_resolve_author_id`:
+  exact raw spelling, NOCASE raw (lowest id), then the piped display
+  form NOCASE -- the 1.19 exact-first contract preserved with the
+  display-form stage appended, matching upstream's display-form-keyed
+  lookups. A comma new-name in a rename now MERGES into an existing
+  piped row, the survivor keeping its stored name (upstream's replace
+  path; verified in the reference clone, tables.py rename_item).
+- [x] **Display-form layout (v1.27.0, lane 2).** `_first_author_name`
+  flips the legacy pipe to the comma before any path builder, so
+  directories and format stems read `Leckie, Ann/...` for piped-stored
+  authors exactly like upstream (whose path inputs are unserialized
+  id-map entries). Pre-1.27 underscore directories converge on each
+  book's next write; no bulk migration (Calibre itself lays out display
+  forms, so this is convergence toward the canonical shape).
+- [x] **Reverse resolution direction (v1.27.0, lane 3).**
+  `set_authors`/`add_book` display-normalize incoming author names
+  first (pipes become commas, upstream's authors-only write adapter,
+  db/write.py get_adapter), so a pipe-bearing input resolves and stores
+  exactly like its comma form instead of duplicating rows. The other
+  name-taking verbs deliberately do NOT normalize: their raw-first
+  resolution is what lets a caller target a piped row by its stored
+  spelling when both spellings exist.
 
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
