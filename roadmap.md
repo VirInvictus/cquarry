@@ -561,6 +561,64 @@ regression tests).
   Carrel-calibre-web writes single-valued text/series custom columns
   through cquarry, so nothing downstream is owed by the 1.26.2 change.
 
+## The set_authors piped-collision fix (2026-10-11, issue #5)
+
+Live failure during the big-wave library phase 3: `set_authors` with a
+comma-bearing display name (`John William Strutt, Baron Rayleigh`)
+missed the lookup against the raw spelling, and the create path's piped
+INSERT (`name.replace(",", "|")`) then collided with the existing
+pipe-import artifact row `John William Strutt| Baron Rayleigh` --
+UNIQUE(authors.name). The batch machinery rolled the 143-book pass back
+cleanly, so no data was hurt; the crash fires exactly when the comma
+form is the fix for an existing piped form, the author-byline-repair
+case the setter exists for.
+
+Upstream never hits this because its lookup keys author rows through
+the DISPLAY form: `AuthorsTable` unserializes stored pipes back to
+commas when it loads the id map (tables.py), so a comma-name lookup
+already reuses piped rows and the piped INSERT only fires on a true
+miss. cquarry resolves with direct SQL against stored spellings, so the
+fix tries both: raw spelling first (`rename_entity`'s verbatim comma
+rows win), then the piped form, and only a double miss reaches the
+INSERT (`_author_row_for_name`, shared with `_author_sort_keys` so the
+add_book dry-run plan's `new`/`sort` predictions agree with the real
+write). Reuse keeps the row's hand-tuned sort, exactly like raw-name
+reuse always has. Suite green before (677 tests) and after (683 plus
+six new regression tests: set_authors reuse with verbatim spelling and
+hand-tuned sort kept, NOCASE reuse, comma-row precedence with the
+orphaned piped variant pruned, add_book over a piped row, and the
+dry-run plan reporting the piped row as existing).
+
+Logged follow-ups (adjacent surfaces verified during the fix's
+code-review; deliberate non-goals for 1.26.3, each needs its own lane):
+
+- [ ] **Piped-named authors lay out with an underscore directory.**
+  The re-lay machinery takes the first author's STORED name and maps
+  `|` to `_` in `_ascii_filename`, so any book whose first author is
+  stored piped (every comma-created author since 1.26) gets
+  `Leckie_ Ann/Title (id)` where upstream lays out the display form
+  (`Leckie, Ann/...`, since its path inputs are unserialized id-map
+  entries). Verified identical on pre-fix 1.26.2 code: pre-existing,
+  not introduced by the reuse fix, but the fix routes the byline-repair
+  traffic into it. The fix belongs in the path builders (display-form
+  input, upstream tables.py:64 mirror), with a migration question:
+  existing libraries already carry underscore directories.
+- [ ] **Display-form resolution gap on the rest of the author write
+  surface.** `set_author_sort_name`, `rename_entity`'s old-name lookup
+  and merge detection, and `set_link_map(kind="authors")` resolve
+  stored spellings only, so after a reuse a display comma name raises
+  (`No author row matching 'Leckie, Ann'`) where `set_authors` now
+  silently works. Upstream keys ALL author lookups by display form.
+  Extending `_author_row_for_name` to these verbs is the candidate
+  fix; it changes ratified 1.19/1.25 resolution contracts, so it wants
+  its own decision.
+- [ ] **Reverse resolution direction.** A pipe-bearing input
+  (`Leckie| Ann`) against comma-spelled rows matches only its own
+  spelling and INSERTs a duplicate, where upstream's authors write
+  adapter flips incoming pipes to commas first (write.py:184) and
+  reuses. Rare (callers round-tripping raw SQL spellings), but the
+  asymmetry with the comma-input fix is real.
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
 - [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference
