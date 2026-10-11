@@ -2615,6 +2615,21 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
             [("Leckie, Ann/Old Title (1)",)],
         )
 
+    def test_add_book_pipe_author_normalizes_end_to_end(self):
+        # 1.27 round trip: piped input -> display-normalized -> the create
+        # path pipes commas back for storage -> the layout shows display.
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("The Raven Tower", ["Leckie| Ann"])
+        self.assertEqual(book_id, 3)
+        self.assertEqual(
+            self._sql2("SELECT name FROM authors WHERE id = 2"),
+            [("Leckie| Ann",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 3"),
+            [("Leckie, Ann/The Raven Tower (3)",)],
+        )
+
     def test_add_book_failure_removes_rows_and_directory(self):
         # A directory squatting on the format-file path makes the atomic
         # replace fail AFTER the row was inserted: the batch must undo the
@@ -5655,6 +5670,22 @@ class TestAuthorCreationParity(unittest.TestCase):
             n = wdb.rename_entity("authors", "Leckie, Ann", "Ann Leckie")
         self.assertEqual(n, 0)  # book 1 has no links: renamed, nothing re-laid
         self.assertEqual(self._sql("SELECT name FROM authors"), [("Ann Leckie",)])
+
+    def test_pipe_input_normalizes_and_reuses_comma_row(self):
+        # 1.27: a pipe-bearing input is display-normalized first (upstream's
+        # authors write adapter flips pipes to commas), so it reuses the
+        # comma row instead of INSERTing a duplicate.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'Leckie, Ann', 'Leckie, Ann')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie| Ann"])
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [(1,)],
+        )
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM authors"), [(1,)])
 
     def test_set_link_map_resolves_display_form(self):
         conn = sqlite3.connect(self.db_path)

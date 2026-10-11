@@ -1074,9 +1074,12 @@ class WritableCalibreDB:
         Calibre's starting point), relinks in the given order, recomputes
         ``books.author_sort`` from the authors' sort keys joined with " & "
         (upstream's ``authors_to_sort_string`` behavior) and prunes
-        now-orphaned author rows.
+        now-orphaned author rows. Since 1.27 incoming names are
+        display-normalized first (pipes become commas, upstream's
+        authors-only write adapter), so a piped spelling resolves and
+        stores exactly like its comma form instead of duplicating rows.
         """
-        cleaned = [n.strip() for n in names if n and n.strip()]
+        cleaned = [n.strip().replace("|", ",") for n in names if n and n.strip()]
         if not cleaned:
             raise ValueError("Author list must not be empty")
         self._begin()
@@ -3963,7 +3966,10 @@ class WritableCalibreDB:
         title = (title or "").strip() or "Unknown"
         cleaned_authors: list[str] = []
         for name in authors or []:
-            cleaned = name.strip()
+            # Display-normalized like set_authors (1.27, upstream's
+            # authors-only write adapter): pipes become commas before any
+            # resolution, dedupe, or path construction.
+            cleaned = name.strip().replace("|", ",")
             if cleaned and not any(
                 cleaned.lower() == existing.lower() for existing in cleaned_authors
             ):
