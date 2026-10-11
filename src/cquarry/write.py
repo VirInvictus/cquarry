@@ -979,8 +979,9 @@ class WritableCalibreDB:
         unserializes stored pipes back to commas on load), so its comma
         inputs already reuse piped rows; direct SQL sees stored spellings,
         so both forms are tried here to match that for comma inputs
-        (issue #5). Pipe-bearing inputs are NOT display forms and only
-        match their own spelling (the reverse mirror is a logged gap).
+        (issue #5). Pipe-bearing inputs are handled at the set_authors/
+        add_book boundary instead, which normalizes them to display forms
+        exactly like upstream's authors write adapter (1.27).
         """
         for candidate in dict.fromkeys((name, name.replace(",", "|"))):
             row = self.conn.execute(
@@ -990,6 +991,35 @@ class WritableCalibreDB:
             if row is not None:
                 return row
         return None
+
+    def _resolve_author_id(self, name: str) -> int | None:
+        """The author row id for an incoming name, or None.
+
+        The 1.19 resolution contract (exact spelling first, then that
+        spelling NOCASE, lowest id) with 1.27's display-form stage
+        appended: the piped spelling NOCASE. Upstream keys ALL author
+        lookups by the display form, so the name-taking author verbs must
+        reach a piped row from its comma spelling to match.
+        """
+        row = self.conn.execute(
+            "SELECT id FROM authors WHERE name = ?", (name,)
+        ).fetchone()
+        if row is not None:
+            return row["id"]
+        row = self.conn.execute(
+            "SELECT id FROM authors WHERE name = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+            (name,),
+        ).fetchone()
+        if row is not None:
+            return row["id"]
+        piped = name.replace(",", "|")
+        if piped == name:
+            return None
+        row = self.conn.execute(
+            "SELECT id FROM authors WHERE name = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+            (piped,),
+        ).fetchone()
+        return row["id"] if row is not None else None
 
     def _resolve_or_create(self, table: str, name_col: str, name: str) -> int:
         """Find an entity row by (case-insensitive) name, creating it if new.
@@ -1124,11 +1154,15 @@ class WritableCalibreDB:
         """Rename an author, series, publisher, or tag everywhere.
 
         The fix-the-misspelled-name verb (upstream ``rename_items``,
-        cache.py:2758-2862). ``old`` resolves case-insensitively; ``new``
+        cache.py:2758-2862). ``old`` resolves case-insensitively (authors
+        also try the piped display form as a final stage, 1.27); ``new``
         is the row's new spelling. When ``new`` already exists as another
-        row (a case-variant or duplicate spelling) the rows MERGE: the old
+        row (a case-variant or duplicate spelling; for authors, also the
+        piped spelling of the comma form, 1.27) the rows MERGE: the old
         row's links move to the survivor, duplicate links are dropped, and
-        the old row is deleted. Every affected book is touched and queued
+        the old row is deleted (the survivor keeps its stored name,
+        exactly upstream's replace path). Every affected book is touched
+        and queued
         for OPF resync. For authors, ``books.author_sort`` is recomputed
         from the surviving authors' sort keys and each affected book's
         on-disk layout re-lays (the directory carries the author name; the
@@ -1148,19 +1182,32 @@ class WritableCalibreDB:
             raise ValueError("Entity names must not be empty")
         affected: list[int] = []
         with self.batch():
-            # Exact spelling wins; the NOCASE fallback (lowest id) only
-            # fires when no exact match exists, so a library with several
-            # case variants resolves deterministically.
-            row = self.conn.execute(
-                f"SELECT id, {name_col} AS name FROM {table} WHERE {name_col} = ?",
-                (old,),
-            ).fetchone()
-            if row is None:
+            if kind == "authors":
+                # Exact spelling wins; the NOCASE fallback (lowest id) only
+                # fires when no exact match exists, so a library with
+                # several case variants resolves deterministically. 1.27
+                # appends the piped display form as a final stage (upstream
+                # keys author lookups by the display form).
+                oid = self._resolve_author_id(old)
+                row = (
+                    None
+                    if oid is None
+                    else self.conn.execute(
+                        f"SELECT id, {name_col} AS name FROM {table} WHERE id = ?",
+                        (oid,),
+                    ).fetchone()
+                )
+            else:
                 row = self.conn.execute(
-                    f"SELECT id, {name_col} AS name FROM {table} "
-                    f"WHERE {name_col} = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+                    f"SELECT id, {name_col} AS name FROM {table} WHERE {name_col} = ?",
                     (old,),
                 ).fetchone()
+                if row is None:
+                    row = self.conn.execute(
+                        f"SELECT id, {name_col} AS name FROM {table} "
+                        f"WHERE {name_col} = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+                        (old,),
+                    ).fetchone()
             if row is None:
                 raise ValueError(f"No {kind} row matching {old!r}")
             if row["name"] == new:
@@ -1170,6 +1217,19 @@ class WritableCalibreDB:
                 f"AND id != ?",
                 (new, row["id"]),
             ).fetchone()
+            if other is None and kind == "authors":
+                # Merge detection by the display form too (1.27, upstream
+                # compares id_map display forms): renaming to a comma
+                # spelling merges into an existing piped row, whose stored
+                # name the survivor keeps -- exactly upstream's replace
+                # path.
+                piped_new = new.replace(",", "|")
+                if piped_new != new:
+                    other = self.conn.execute(
+                        f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
+                        f"AND id != ?",
+                        (piped_new, row["id"]),
+                    ).fetchone()
             affected = [
                 r["book"]
                 for r in self.conn.execute(
@@ -1245,7 +1305,8 @@ class WritableCalibreDB:
     def remove_entity_everywhere(self, kind: str, name: str) -> int:
         """Remove an author, series, publisher, or tag from every book.
 
-        Resolves ``name`` case-insensitively, deletes the entity's links
+        Resolves ``name`` case-insensitively (authors also try the piped
+        display form, 1.27), deletes the entity's links
         (the fkc_delete_on_* order), then the row itself, and touches +
         queues OPF resync for every affected book. For a series the
         affected books' ``series_index`` is reset to 1.0 too, matching
@@ -1262,15 +1323,25 @@ class WritableCalibreDB:
             raise ValueError("Entity name must not be empty")
         affected: list[int] = []
         with self.batch():
-            row = self.conn.execute(
-                f"SELECT id FROM {table} WHERE {name_col} = ?", (name,)
-            ).fetchone()
-            if row is None:
+            if kind == "authors":
+                aid = self._resolve_author_id(name)
+                row = (
+                    None
+                    if aid is None
+                    else self.conn.execute(
+                        f"SELECT id FROM {table} WHERE id = ?", (aid,)
+                    ).fetchone()
+                )
+            else:
                 row = self.conn.execute(
-                    f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
-                    f"ORDER BY id LIMIT 1",
-                    (name,),
+                    f"SELECT id FROM {table} WHERE {name_col} = ?", (name,)
                 ).fetchone()
+                if row is None:
+                    row = self.conn.execute(
+                        f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
+                        f"ORDER BY id LIMIT 1",
+                        (name,),
+                    ).fetchone()
             if row is None:
                 return 0
             affected = [
@@ -1327,7 +1398,10 @@ class WritableCalibreDB:
         ``author_sort``).
 
         The author resolves exact-spelling-first with a lowest-id NOCASE
-        fallback, ``authors.sort`` stores ``sort`` verbatim, and every book
+        fallback and, since 1.27, the piped display form as a final stage
+        (upstream keys author lookups by the display form, so a comma name
+        reaches a piped row), ``authors.sort`` stores ``sort`` verbatim,
+        and every book
         of the author recomputes ``books.author_sort`` as its authors' sort
         keys joined " & " in link order -- the same computation
         :meth:`set_authors` performs -- touched and queued for OPF resync.
@@ -1346,15 +1420,14 @@ class WritableCalibreDB:
             raise ValueError("Author name must not be empty")
         affected: list[int] = []
         with self.batch():
-            row = self.conn.execute(
-                "SELECT id, sort FROM authors WHERE name = ?", (name,)
-            ).fetchone()
-            if row is None:
-                row = self.conn.execute(
-                    "SELECT id, sort FROM authors WHERE name = ? COLLATE NOCASE "
-                    "ORDER BY id LIMIT 1",
-                    (name,),
+            aid = self._resolve_author_id(name)
+            row = (
+                None
+                if aid is None
+                else self.conn.execute(
+                    "SELECT id, sort FROM authors WHERE id = ?", (aid,)
                 ).fetchone()
+            )
             if row is None:
                 raise ValueError(f"No author row matching {name!r}")
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(authors)")}
@@ -1412,7 +1485,9 @@ class WritableCalibreDB:
         This is the column cquarry could read but never edit before: the
         ``link`` URL beside author (and publisher/series/tag) rows, and the
         per-value ``link`` column of normalized custom-column value tables.
-        Names resolve exact-spelling-first with a NOCASE fallback; unknown
+        Names resolve exact-spelling-first with a NOCASE fallback; author
+        names also try the piped display form as a final stage (1.27,
+        upstream keys author lookups by the display form); unknown
         values raise (upstream skips them silently -- a link targeted at a
         misspelled name should fail loudly, not vanish). ``None`` clears a
         link; ``only_set_if_no_existing_link`` leaves values that already
@@ -1444,16 +1519,28 @@ class WritableCalibreDB:
                 value = value.strip() if isinstance(value, str) else ""
                 if not value:
                     raise ValueError("Entity values must not be empty")
-                row = self.conn.execute(
-                    f"SELECT id, link FROM {table} WHERE {name_col} = ?",
-                    (value,),
-                ).fetchone()
-                if row is None:
+                if table == "authors":
+                    # 1.27: the display-form stage too (upstream keys
+                    # author lookups by the display form).
+                    vid = self._resolve_author_id(value)
+                    row = (
+                        None
+                        if vid is None
+                        else self.conn.execute(
+                            f"SELECT id, link FROM {table} WHERE id = ?", (vid,)
+                        ).fetchone()
+                    )
+                else:
                     row = self.conn.execute(
-                        f"SELECT id, link FROM {table} WHERE {name_col} = ? "
-                        "COLLATE NOCASE ORDER BY id LIMIT 1",
+                        f"SELECT id, link FROM {table} WHERE {name_col} = ?",
                         (value,),
                     ).fetchone()
+                    if row is None:
+                        row = self.conn.execute(
+                            f"SELECT id, link FROM {table} WHERE {name_col} = ? "
+                            "COLLATE NOCASE ORDER BY id LIMIT 1",
+                            (value,),
+                        ).fetchone()
                 if row is None:
                     raise ValueError(f"No {kind} row matching {value!r}")
                 if only_set_if_no_existing_link and row["link"]:

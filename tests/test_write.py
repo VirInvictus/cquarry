@@ -5524,3 +5524,123 @@ class TestAuthorCreationParity(unittest.TestCase):
         self.assertEqual(
             self._sql("SELECT id, name FROM authors"), [(1, "Leckie, Ann")]
         )
+
+    def test_set_author_sort_name_resolves_display_form(self):
+        # 1.27: the comma spelling reaches a piped row (the 1.26.3-era trap).
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES (1, 'Leckie| Ann', 'Wrong, Sort');
+            INSERT INTO books_authors_link VALUES (1, 1, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.set_author_sort_name("Leckie, Ann", "Leckie, Ann")
+        self.assertEqual(n, 1)
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Leckie| Ann", "Leckie, Ann")],
+        )
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_remove_entity_resolves_display_form(self):
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)  # the books INSERT trigger calls title_sort/uuid4
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES
+                (1, 'Leckie| Ann', 'Leckie, Ann'), (2, 'Solo', 'Solo');
+            INSERT INTO books (id, title, sort, author_sort) VALUES
+                (2, 'Second', 'Second', 'x');
+            INSERT INTO books_authors_link VALUES (1, 1, 1), (2, 2, 2);
+            INSERT INTO authors VALUES (3, 'Zed', 'Zed');
+            INSERT INTO books_authors_link VALUES (3, 2, 3);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.remove_entity_everywhere("authors", "Leckie, Ann")
+        self.assertEqual(n, 1)
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM authors"), [(2,)])
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [],
+        )
+        # Book 1 has no remaining authors: author_sort joins to ''.
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"), [("",)]
+        )
+
+    def test_rename_entity_resolves_display_form_and_merges_piped_target(self):
+        # Renaming a misspelled author to the comma display form of an
+        # existing piped row MERGES into it (the survivor keeps its stored
+        # piped name, exactly upstream's replace path).
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES
+                (1, 'Leckie| Ann', 'Leckie, Ann'),
+                (2, 'Leckie, Anne', 'Anne, Leckie');
+            INSERT INTO books_authors_link VALUES (1, 1, 2);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.rename_entity("authors", "Leckie, Anne", "Leckie, Ann")
+        self.assertEqual(n, 1)
+        self.assertEqual(
+            self._sql("SELECT id, name FROM authors"), [(1, "Leckie| Ann")]
+        )
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [(1,)],
+        )
+        # The merge recomputed the book's author_sort from the survivor.
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_rename_entity_resolves_piped_old_name(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'Leckie| Ann', 'Leckie, Ann')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.rename_entity("authors", "Leckie, Ann", "Ann Leckie")
+        self.assertEqual(n, 0)  # book 1 has no links: renamed, nothing re-laid
+        self.assertEqual(self._sql("SELECT name FROM authors"), [("Ann Leckie",)])
+
+    def test_set_link_map_resolves_display_form(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_columns (
+                id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT,
+                is_multiple TEXT NOT NULL DEFAULT '', editable BOOL,
+                display TEXT DEFAULT '{}', normalized BOOL NOT NULL DEFAULT 0,
+                mark_for_delete BOOL NOT NULL DEFAULT 0
+            );
+            ALTER TABLE authors ADD COLUMN link TEXT DEFAULT '';
+            INSERT INTO authors (id, name, sort, link) VALUES
+                (1, 'Leckie| Ann', 'Leckie, Ann', '');
+            INSERT INTO books_authors_link VALUES (1, 1, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.set_link_map("authors", {"Leckie, Ann": "https://example.com/ann"})
+        self.assertEqual(n, 1)
+        self.assertEqual(
+            self._sql("SELECT link FROM authors WHERE id = 1"),
+            [("https://example.com/ann",)],
+        )
