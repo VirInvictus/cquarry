@@ -2543,6 +2543,41 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
         self.assertEqual(plan["predicted_id"], first + 1)
         self.assertEqual(second, first + 1)
 
+    def test_add_book_comma_author_reuses_piped_row(self):
+        # Issue #5 at the add_book surface: an existing piped spelling
+        # (the create path's own storage form) is linked, not collided
+        # with at INSERT.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (2, 'Leckie| Ann', 'Leckie, Ann', '')")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("The Raven Tower", ["Leckie, Ann"])
+        self.assertEqual(book_id, 3)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM authors"), 2)
+        self.assertEqual(
+            self._sql2("SELECT author FROM books_authors_link WHERE book = 3"),
+            [(2,)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 3"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_add_book_dry_run_reports_piped_row_as_existing(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO authors VALUES (2, 'Leckie| Ann', 'Custom, Sort', '')"
+        )
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            plan = wdb.add_book("The Raven Tower", ["Leckie, Ann"], dry_run=True)
+        self.assertEqual(
+            plan["authors"],
+            [{"name": "Leckie, Ann", "sort": "Custom, Sort", "new": False}],
+        )
+
     def test_add_book_failure_removes_rows_and_directory(self):
         # A directory squatting on the format-file path makes the atomic
         # replace fail AFTER the row was inserted: the batch must undo the
@@ -5411,4 +5446,81 @@ class TestAuthorCreationParity(unittest.TestCase):
         self.assertEqual(
             self._sql("SELECT name, sort FROM authors"),
             [("Ann Leckie", "Leckie, Ann")],
+        )
+
+    def test_comma_name_reuses_existing_piped_row(self):
+        # Issue #5: the pipe-import artifact exists as the create path
+        # stores names; the comma display form must resolve to it instead
+        # of colliding with it at INSERT.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'Leckie| Ann', 'Leckie, Ann')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT id, name, sort FROM authors"),
+            [(1, "Leckie| Ann", "Leckie, Ann")],
+        )
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [(1,)],
+        )
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_piped_reuse_keeps_hand_tuned_sort(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO authors VALUES (1, 'Leckie| Ann', 'Hand Tuned, Sort')"
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Leckie| Ann", "Hand Tuned, Sort")],
+        )
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Hand Tuned, Sort",)],
+        )
+
+    def test_piped_reuse_is_case_insensitive(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'LECKIE| ANN', 'Leckie, Ann')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT id, name FROM authors"),
+            [(1, "LECKIE| ANN")],  # reuse never rewrites the stored spelling
+        )
+
+    def test_comma_row_wins_over_piped_variant(self):
+        # Both spellings exist (rename_entity leaves comma rows verbatim):
+        # the raw-form match takes precedence and the piped row is left
+        # untouched.
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES (1, 'Leckie, Ann', 'Leckie, Ann');
+            INSERT INTO authors VALUES (2, 'Leckie| Ann', 'Leckie, Ann');
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [(1,)],
+        )
+        # The relink orphaned the piped variant; the standard prune takes it.
+        self.assertEqual(
+            self._sql("SELECT id, name FROM authors"), [(1, "Leckie, Ann")]
         )

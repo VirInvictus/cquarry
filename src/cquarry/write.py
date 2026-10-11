@@ -970,6 +970,27 @@ class WritableCalibreDB:
         "languages": False,
     }
 
+    def _author_row_for_name(self, name: str) -> sqlite3.Row | None:
+        """The authors row an incoming display name resolves to, or None.
+
+        The raw spelling wins (rename_entity stores comma forms verbatim);
+        failing that, the piped form the create path stores. Upstream
+        resolves comma-name lookups against display-form keys (AuthorsTable
+        unserializes stored pipes back to commas on load), so its comma
+        inputs already reuse piped rows; direct SQL sees stored spellings,
+        so both forms are tried here to match that for comma inputs
+        (issue #5). Pipe-bearing inputs are NOT display forms and only
+        match their own spelling (the reverse mirror is a logged gap).
+        """
+        for candidate in dict.fromkeys((name, name.replace(",", "|"))):
+            row = self.conn.execute(
+                "SELECT id, sort FROM authors WHERE name = ? COLLATE NOCASE",
+                (candidate,),
+            ).fetchone()
+            if row is not None:
+                return row
+        return None
+
     def _resolve_or_create(self, table: str, name_col: str, name: str) -> int:
         """Find an entity row by (case-insensitive) name, creating it if new.
 
@@ -977,10 +998,13 @@ class WritableCalibreDB:
         the column — Calibre's own starting point — leaving manual sort edits
         untouched on existing rows.
         """
-        row = self.conn.execute(
-            f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE",
-            (name,),
-        ).fetchone()
+        if table == "authors":
+            row = self._author_row_for_name(name)
+        else:
+            row = self.conn.execute(
+                f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE",
+                (name,),
+            ).fetchone()
         if row is not None:
             return row["id"]
         if table == "authors":
@@ -4139,13 +4163,15 @@ class WritableCalibreDB:
         """Resolve author names to (name, sort, is_new) without writing.
 
         Existing rows keep their hand-tuned ``sort``; new ones default it
-        to the display name, Calibre's starting point.
+        to the display name, Calibre's starting point. Resolution matches
+        ``_resolve_or_create``, so an existing piped row is reported as
+        ``new: False`` with its stored sort instead of a phantom new
+        author (issue #5); the display-default sort for genuinely new
+        authors predates this and is the plan's documented shape.
         """
         resolved: list[tuple[str, str, bool]] = []
         for name in names:
-            row = self.conn.execute(
-                "SELECT sort FROM authors WHERE name = ? COLLATE NOCASE", (name,)
-            ).fetchone()
+            row = self._author_row_for_name(name)
             if row is None:
                 resolved.append((name, name, True))
             else:
