@@ -1,3 +1,55 @@
+## v1.26.3 (2026-10-11)
+
+### set_authors resolves piped author rows instead of colliding with them (issue #5)
+
+Live failure on 2026-10-11 (big-wave library phase 3, book 10083): the
+author row existed as the pipe-import artifact `John William Strutt|
+Baron Rayleigh` and the caller called `set_authors(10083, ['John
+William Strutt, Baron Rayleigh'])`. The lookup tried the raw comma
+spelling only, missed, and the create path's INSERT
+(`name.replace(",", "|")`) died on UNIQUE(authors.name) against the
+piped row it was about to duplicate. The batch machinery rolled the
+143-book pass back cleanly, so no data was hurt, but the crash fires
+exactly when the comma form is the repair for an existing piped form,
+which is the author-byline-repair case the setter exists for.
+
+- **Author resolution now tries both spellings.** `set_authors` and
+  `add_book` resolve incoming display names through
+  `_author_row_for_name`: the raw spelling first (so `rename_entity`'s
+  verbatim comma rows keep winning), then the piped form the create
+  path would store, and only a double miss reaches the INSERT. This is
+  upstream's observable behavior: Calibre keys its author lookups by
+  the display form (AuthorsTable unserializes stored pipes back to
+  commas on load), so a comma-name lookup there already reuses piped
+  rows; cquarry's direct SQL needed both spellings tried explicitly.
+- **Reuse semantics are unchanged**: an existing row keeps its
+  hand-tuned `sort`, the stored spelling is never rewritten, a raw
+  comma match outranks a piped variant, and the orphaned piped
+  duplicate then falls to the setter's standard prune. To fix a reused
+  piped row's sort afterward, pass `set_author_sort_name` the STORED
+  piped spelling (the display comma name raises there; that verb still
+  resolves stored spellings only -- see the logged follow-ups).
+- **The add_book dry-run plan stays truthful for the reuse case**:
+  `_author_sort_keys` shares the same resolution, so a plan over a
+  comma name with an existing piped row reports `new: False` and the
+  row's stored sort instead of predicting a phantom new author.
+- **Logged follow-ups (adjacent surfaces this fix deliberately does not
+  touch**, each recorded in the roadmap's issue #5 section with
+  upstream citations): the on-disk layout for piped-named authors lays
+  out with the pipe mapped to an underscore (`Leckie_ Ann/`) where
+  upstream uses the display form -- pre-existing since the 1.26
+  creation shape, identical before and after this fix, and now on
+  record; the reverse resolution direction (a pipe-bearing input
+  against comma-spelled rows) still creates a second row where
+  upstream's write adapter would reuse; and `set_author_sort_name`/
+  `rename_entity`/`set_link_map` still resolve stored spellings only,
+  so display names raise where reuse now silently works.
+- No schema, read-path, or search changes; nothing else in the write
+  module resolved-and-inserted different spellings of the same name.
+  Six regression tests cover set_authors reuse, hand-tuned sorts,
+  NOCASE, comma-row precedence, add_book over a piped row, and the
+  dry-run plan.
+
 ## v1.26.2 (2026-10-09)
 
 ### Mirroring Calibre 9.16: the first parity-watch audit lane
