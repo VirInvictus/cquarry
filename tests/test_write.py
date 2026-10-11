@@ -2578,6 +2578,43 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
             [{"name": "Leckie, Ann", "sort": "Custom, Sort", "new": False}],
         )
 
+    def test_add_book_comma_author_lays_out_display_form(self):
+        # 1.27: the layout shows the display form (upstream's path inputs
+        # are unserialized id-map entries); 1.26 laid out `Leckie_ Ann/`.
+        source = self._epub()
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("The Raven Tower", ["Leckie, Ann"], formats=[source])
+        self.assertEqual(book_id, 3)
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 3"),
+            [("Leckie, Ann/The Raven Tower (3)",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT name FROM data WHERE book = 3"),
+            [("The Raven Tower - Leckie, Ann",)],
+        )
+        self.assertTrue(os.path.isdir(os.path.join(self.temp_dir, "Leckie, Ann")))
+        self.assertFalse(os.path.isdir(os.path.join(self.temp_dir, "Leckie_ Ann")))
+
+    def test_set_authors_reuse_relays_underscore_layout_to_display(self):
+        # The issue-#5 shape over a 1.26-era path column: the reuse write
+        # re-lays the stored path to the display-form directory.
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES (2, 'Leckie| Ann', 'Leckie, Ann', '');
+            UPDATE books SET path = 'Leckie_ Ann/Old Title (1)' WHERE id = 1;
+            """
+        )
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 1"),
+            [("Leckie, Ann/Old Title (1)",)],
+        )
+
     def test_add_book_failure_removes_rows_and_directory(self):
         # A directory squatting on the format-file path makes the atomic
         # replace fail AFTER the row was inserted: the batch must undo the

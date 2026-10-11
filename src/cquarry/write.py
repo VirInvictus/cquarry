@@ -740,9 +740,14 @@ class WritableCalibreDB:
             raise
 
     def _first_author_name(self, book_id: int) -> str:
-        """The book's first author (link order), '' when authorless -- the
-        same input ``add_book`` uses for the path components. Schemas
-        predating the link tables degrade to '' (the path's Unknown rule)."""
+        """The book's first author (link order) in the DISPLAY form, ''
+        when authorless -- the same input ``add_book`` uses for the path
+        components. Upstream's path builders take display forms (their
+        inputs are unserialized id-map entries, tables.py's authors-only
+        pipe flip), so the stored pipe separator is flipped to the comma
+        here; before 1.27 a piped first author laid out with the pipe
+        mapped to an underscore. Schemas predating the link tables
+        degrade to '' (the path's Unknown rule)."""
         try:
             row = self.conn.execute(
                 "SELECT a.name FROM books_authors_link bal JOIN authors a "
@@ -751,7 +756,11 @@ class WritableCalibreDB:
             ).fetchone()
         except sqlite3.OperationalError:
             return ""  # schema predates the author link tables
-        return row["name"] if row is not None else ""
+        if row is None:
+            return ""
+        # Legacy: authors.name stores commas as pipes; the layout shows
+        # the display form (authors-only flip, exactly upstream's).
+        return row["name"].replace("|", ",")
 
     def add_tag(self, book_id: int, tag: str) -> bool:
         """Attach a tag to a book. Returns True if a link was created.
