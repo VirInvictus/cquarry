@@ -39,7 +39,7 @@ incoming pipes to commas before anything else.
   INSERTing a duplicate. The other name-taking verbs deliberately do
   NOT normalize: their raw-first resolution is what lets a caller
   target a piped row by its stored spelling when both spellings exist.
-- Thirteen new regression tests across the three lanes (resolution
+- Nine new regression tests across the three lanes (resolution
   reaching piped rows through every verb, the display-form merge,
   layout assertions for directories and format stems, the
   underscore-to-display re-lay, and the piped-input round trip: input
