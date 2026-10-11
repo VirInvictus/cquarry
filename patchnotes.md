@@ -1,3 +1,52 @@
+## v1.27.0 (2026-10-11)
+
+### The author display-form parity wave (the three issue #5 follow-ups)
+
+The 1.26.3 collision fix (issue #5, earlier today) made `set_authors`
+reuse an existing piped author row; its review verified three adjacent
+surfaces still resolving stored spellings only, each logged as a
+deliberate non-goal. Brandon chose to ship all three as one wave the
+same day. Together they complete the author display-form parity story:
+upstream keys EVERY author lookup by the display form (AuthorsTable
+unserializes stored pipes back to commas when it loads the id map,
+tables.py -- an authors-only flip), and its authors write adapter flips
+incoming pipes to commas before anything else.
+
+- **Lane 1, resolution (write surface).** `set_author_sort_name`,
+  `rename_entity` (old-name lookup AND merge detection),
+  `set_link_map(kind="authors")`, and `remove_entity_everywhere` now
+  resolve author names through `_resolve_author_id`: exact raw
+  spelling first, then that spelling NOCASE (lowest id, the ratified
+  1.19 contract untouched), then the piped display form NOCASE. A
+  comma name reaches a piped row instead of raising, and renaming to a
+  comma spelling whose piped form already exists MERGES into it, the
+  survivor keeping its stored name -- exactly upstream's replace path.
+- **Lane 2, layout.** `_first_author_name` (the single input every
+  path builder shares) now shows the display form, so directories and
+  format stems read `Leckie, Ann/...` for piped-stored authors where
+  1.26 laid out `Leckie_ Ann/` (the pipe hit `_ascii_filename`'s
+  illegal-character map). This is convergence, not a new divergence:
+  Calibre's own layout inputs are unserialized display forms.
+  Pre-1.27 underscore directories linger untouched until each book is
+  next written, then move -- the same shape as any layout correction;
+  no bulk migration, and `find_book_by_path`/`format_path_index` match
+  stored paths, so read-side matching is unaffected.
+- **Lane 3, inputs.** `set_authors` and `add_book` display-normalize
+  incoming author names before any resolution, dedupe, or path
+  construction (pipes become commas, upstream's authors-only write
+  adapter), so a pipe-bearing input resolves and stores exactly like
+  its comma form instead of matching only its own spelling and
+  INSERTing a duplicate. The other name-taking verbs deliberately do
+  NOT normalize: their raw-first resolution is what lets a caller
+  target a piped row by its stored spelling when both spellings exist.
+- Thirteen new regression tests across the three lanes (resolution
+  reaching piped rows through every verb, the display-form merge,
+  layout assertions for directories and format stems, the
+  underscore-to-display re-lay, and the piped-input round trip: input
+  pipes -> normalized -> stored piped -> layout display). Suite 683 to
+  692; spec.md, CLAUDE.md, API.md, and the roadmap's issue #5 section
+  document the completed surface.
+
 ## v1.26.3 (2026-10-11)
 
 ### set_authors resolves piped author rows instead of colliding with them (issue #5)
