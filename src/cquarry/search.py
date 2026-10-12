@@ -52,7 +52,7 @@ Deliberate, documented deviations from Calibre (dependency-bound):
     ``ondevice``, ``in_tag_browser``) are not implemented.
   - ``tags:`` uses cquarry's anchored hierarchical match (``Foo`` matches ``Foo``
     and ``Foo.*``) rather than Calibre's raw substring default. This is a
-    long-standing cquarry invariant; see the project's CLAUDE.md.
+    long-standing cquarry invariant; see the project's AGENTS.md.
 """
 
 import re
