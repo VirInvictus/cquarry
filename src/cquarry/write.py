@@ -763,10 +763,16 @@ class WritableCalibreDB:
         return row["name"].replace("|", ",")
 
     def add_tag(self, book_id: int, tag: str) -> bool:
-        """Attach a tag to a book. Returns True if a link was created.
+        """Attach a tag to a book. Returns True if stored state changed.
 
-        Follows Calibre's sequence: INSERT OR IGNORE into ``tags``, resolve the
-        id, link via ``books_tags_link``, bump ``last_modified``.
+        Follows Calibre's sequence: find-or-INSERT into ``tags``, link via
+        ``books_tags_link``, bump ``last_modified``. Since 1.28 the tag row
+        resolves NOCASE when the exact spelling is missing, and a
+        case-different hit is re-cased to the requested spelling (upstream
+        ``change_case``) with every linked book touched -- the old shape
+        INSERTed a duplicate case-variant row instead, fragmenting the tag
+        exactly like issue #6's publishers. True therefore also covers a
+        re-case with the link already present.
         """
         tag = tag.strip()
         if not tag:
@@ -775,14 +781,33 @@ class WritableCalibreDB:
         self._begin()
         try:
             self._require_book(book_id)
-            if (
-                cur.execute("SELECT 1 FROM tags WHERE name = ?", (tag,)).fetchone()
-                is None
-            ):
+            row = cur.execute(
+                "SELECT id, name FROM tags WHERE name = ?", (tag,)
+            ).fetchone()
+            recased = False
+            if row is None:
+                row = cur.execute(
+                    "SELECT id, name FROM tags WHERE name = ? COLLATE NOCASE "
+                    "ORDER BY id LIMIT 1",
+                    (tag,),
+                ).fetchone()
+            if row is None:
                 cur.execute("INSERT INTO tags(name) VALUES (?)", (tag,))
-            tag_id = cur.execute(
-                "SELECT id FROM tags WHERE name = ?", (tag,)
-            ).fetchone()["id"]
+                tag_id = cur.execute(
+                    "SELECT id FROM tags WHERE name = ?", (tag,)
+                ).fetchone()["id"]
+            else:
+                tag_id = row["id"]
+                if row["name"] != tag:
+                    self.conn.execute(
+                        "UPDATE tags SET name = ? WHERE id = ?", (tag, tag_id)
+                    )
+                    recased = True
+                    for r in cur.execute(
+                        "SELECT book FROM books_tags_link WHERE tag = ? ORDER BY book",
+                        (tag_id,),
+                    ).fetchall():
+                        self._touch_book(r["book"])
             already = cur.execute(
                 "SELECT 1 FROM books_tags_link WHERE book = ? AND tag = ?",
                 (book_id, tag_id),
@@ -793,10 +818,10 @@ class WritableCalibreDB:
                     "INSERT INTO books_tags_link(book, tag) VALUES (?, ?)",
                     (book_id, tag_id),
                 )
-            if changed:
+            if changed or recased:
                 self._touch_book(book_id)
             self._commit()
-            return changed
+            return changed or recased
         except BaseException:
             self._rollback()
             raise
@@ -805,13 +830,22 @@ class WritableCalibreDB:
         """Detach a tag from a book. Returns True if a link was removed.
 
         Cleans the link table first, then prunes an orphaned tag row — the
-        order required by the fkc_delete_on_tags trigger.
+        order required by the fkc_delete_on_tags trigger. The exact
+        spelling resolves first and the NOCASE lowest-id match is the
+        fallback (1.28), so removing ``"roc"`` reaches a ``ROC`` row
+        instead of failing honestly-but-uselessly against the case.
         """
         tag = tag.strip()
         cur = self.conn.cursor()
         self._begin()
         try:
             row = cur.execute("SELECT id FROM tags WHERE name = ?", (tag,)).fetchone()
+            if row is None:
+                row = cur.execute(
+                    "SELECT id FROM tags WHERE name = ? COLLATE NOCASE "
+                    "ORDER BY id LIMIT 1",
+                    (tag,),
+                ).fetchone()
             if row is None:
                 self._rollback()
                 return False
@@ -991,10 +1025,17 @@ class WritableCalibreDB:
         (issue #5). Pipe-bearing inputs are handled at the set_authors/
         add_book boundary instead, which normalizes them to display forms
         exactly like upstream's authors write adapter (1.27).
+
+        The row carries its stored ``name`` so the caller can detect a
+        case-only hit (the 1.28 change_case re-case); NOCASE hits resolve
+        lowest-id-first so a table holding several case variants (legacy
+        fragmentation this library no longer creates) renames
+        deterministically.
         """
         for candidate in dict.fromkeys((name, name.replace(",", "|"))):
             row = self.conn.execute(
-                "SELECT id, sort FROM authors WHERE name = ? COLLATE NOCASE",
+                "SELECT id, sort, name FROM authors WHERE name = ? COLLATE NOCASE "
+                "ORDER BY id LIMIT 1",
                 (candidate,),
             ).fetchone()
             if row is not None:
@@ -1030,22 +1071,75 @@ class WritableCalibreDB:
         ).fetchone()
         return row["id"] if row is not None else None
 
-    def _resolve_or_create(self, table: str, name_col: str, name: str) -> int:
+    def _resolve_or_create(
+        self, table: str, name_col: str, name: str, *, case_change: bool = True
+    ) -> tuple[int, list[int]]:
         """Find an entity row by (case-insensitive) name, creating it if new.
 
         New rows default ``sort`` to the display value on tables that carry
         the column — Calibre's own starting point — leaving manual sort edits
         untouched on existing rows.
+
+        Since 1.28 a NOCASE hit whose stored spelling differs only by case
+        is re-cased to the requested spelling before reuse (upstream's
+        ``change_case``, db/write.py: the ``allow_case_change=True`` default
+        of the new-API write path), and the books linked to the renamed row
+        are returned so the caller can touch them — every one of them shows
+        the entity under the new spelling now. Author rows are compared and
+        re-cased in the display form (stored pipes flip to commas); the
+        row's ``sort`` is deliberately NOT recomputed, matching upstream's
+        persisted shape (``change_case`` writes only the name column -- the
+        recomputation it shows lives in session memory and reverts on
+        reopen -- so a hand-tuned sort survives a case fix, and
+        :meth:`set_author_sort_name` remains the way to re-key a row).
+        ``case_change=False`` keeps the old reuse-as-is shape for entities
+        whose names are canonical codes (languages), matching upstream's
+        exact-keyed lookup for them.
         """
+        renamed_books: list[int] = []
         if table == "authors":
             row = self._author_row_for_name(name)
         else:
             row = self.conn.execute(
-                f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE",
+                f"SELECT id, {name_col} AS name FROM {table} "
+                f"WHERE {name_col} = ? COLLATE NOCASE ORDER BY id LIMIT 1",
                 (name,),
             ).fetchone()
         if row is not None:
-            return row["id"]
+            if case_change:
+                stored = row["name"]
+                if table == "authors":
+                    # Compare in the display form (upstream's id_map holds
+                    # unserialized names); the new spelling stores verbatim.
+                    stored_display = stored.replace("|", ",")
+                    differs = stored_display != name and (
+                        stored_display.lower() == name.lower()
+                    )
+                else:
+                    differs = stored != name and stored.lower() == name.lower()
+                if differs:
+                    # Name only: the sort column is untouched, upstream's
+                    # persisted shape (hand-tuned sorts survive; the
+                    # asort_map recompute upstream shows is session memory
+                    # that reverts on reopen).
+                    self.conn.execute(
+                        f"UPDATE {table} SET {name_col} = ? WHERE id = ?",
+                        (name, row["id"]),
+                    )
+                    fk = next(
+                        fk
+                        for _kind, (t, _nc, fk) in self._ENTITY_NAME_TABLES.items()
+                        if t == table
+                    )
+                    renamed_books = [
+                        r["book"]
+                        for r in self.conn.execute(
+                            f"SELECT book FROM books_{table}_link WHERE {fk} = ? "
+                            f"ORDER BY book",
+                            (row["id"],),
+                        )
+                    ]
+            return row["id"], renamed_books
         if table == "authors":
             # Upstream's creation path (db/write.py get_db_id): the name
             # stores with commas as the legacy | separator and the sort is
@@ -1065,7 +1159,7 @@ class WritableCalibreDB:
             cur = self.conn.execute(
                 f"INSERT INTO {table} ({name_col}) VALUES (?)", (name,)
             )
-        return cur.lastrowid
+        return cur.lastrowid, []
 
     def set_authors(self, book_id: int, names: list[str]) -> bool:
         """Replace the book's author list. Returns True when state changed.
@@ -1078,6 +1172,13 @@ class WritableCalibreDB:
         display-normalized first (pipes become commas, upstream's
         authors-only write adapter), so a piped spelling resolves and
         stores exactly like its comma form instead of duplicating rows.
+        Since 1.28 a case-different spelling re-cases the shared author
+        row (upstream ``change_case``; the row's own ``sort`` is
+        untouched, so a hand-tuned sort survives the re-case): every book
+        linked to the row is touched and re-laid, its ``author_sort``
+        updated only when it matched the string recomputed from the
+        stored sorts modulo case (upstream's strcmp rule), and the call
+        reports True even when this book's own list did not change.
         """
         cleaned = [n.strip().replace("|", ",") for n in names if n and n.strip()]
         if not cleaned:
@@ -1087,8 +1188,37 @@ class WritableCalibreDB:
             self._require_book(book_id)
             new_ids: list[int] = []
             sorts: list[str] = []
+            recased_other_books: list[int] = []
+            renamed_any = False
             for name in cleaned:
-                aid = self._resolve_or_create("authors", "name", name)
+                aid, recased = self._resolve_or_create("authors", "name", name)
+                for other in recased:
+                    renamed_any = True
+                    if other == book_id:
+                        continue
+                    recomputed = " & ".join(
+                        r["s"] or r["name"]
+                        for r in self.conn.execute(
+                            "SELECT a.sort AS s, a.name AS name "
+                            "FROM books_authors_link bal JOIN authors a "
+                            "ON a.id = bal.author WHERE bal.book = ? "
+                            "ORDER BY bal.id",
+                            (other,),
+                        )
+                    )
+                    cur_sort = self.conn.execute(
+                        "SELECT author_sort FROM books WHERE id = ?", (other,)
+                    ).fetchone()
+                    if (
+                        cur_sort is not None
+                        and cur_sort["author_sort"] is not None
+                        and cur_sort["author_sort"].lower() == recomputed.lower()
+                    ):
+                        self.conn.execute(
+                            "UPDATE books SET author_sort = ? WHERE id = ?",
+                            (recomputed, other),
+                        )
+                    recased_other_books.append(other)
                 if aid in new_ids:
                     raise ValueError(f"Duplicate author: {name}")
                 new_ids.append(aid)
@@ -1112,6 +1242,7 @@ class WritableCalibreDB:
                 current == new_ids
                 and old_sort_row is not None
                 and old_sort_row["author_sort"] == new_sort
+                and not renamed_any
             ):
                 self._rollback()
                 return False
@@ -1138,6 +1269,18 @@ class WritableCalibreDB:
                 title_row["title"] or "",
                 self._first_author_name(book_id),
             )
+            for other in recased_other_books:
+                # The re-cased row's other books: same touch + re-lay as
+                # this book, riding the same deferred-relayout machinery.
+                self._touch_book(other)
+                other_title = self.conn.execute(
+                    "SELECT title FROM books WHERE id = ?", (other,)
+                ).fetchone()
+                self._relayout_book_path(
+                    other,
+                    other_title["title"] or "",
+                    self._first_author_name(other),
+                )
             self._commit()
             if not self._batch_depth:
                 # Same post-commit flush rule as update_title.
@@ -1657,7 +1800,11 @@ class WritableCalibreDB:
         ``books.series_index`` to 1.0 -- the column is NOT NULL in real
         libraries (``REAL NOT NULL DEFAULT 1.0``) and Calibre's state for a
         book that never had a series is index 1.0 with no link row;
-        orphaned series rows are pruned.
+        orphaned series rows are pruned. Since 1.28 a name matching an
+        existing row only by case re-cases the shared row (upstream's
+        ``allow_case_change=True`` write default) and touches every linked
+        book; indexes are untouched by a re-case, exactly like an in-place
+        ``rename_entity``.
         """
         self._begin()
         try:
@@ -1694,7 +1841,9 @@ class WritableCalibreDB:
                 self._commit()
                 return True
 
-            sid = self._resolve_or_create("series", "name", name.strip())
+            sid, recased = self._resolve_or_create("series", "name", name.strip())
+            for other in recased:
+                self._touch_book(other)
             if index is not None:
                 new_index = float(index)
             elif old is not None and old["series"] == sid:
@@ -1702,7 +1851,8 @@ class WritableCalibreDB:
             else:
                 new_index = 1.0
             if (
-                old is not None
+                not recased
+                and old is not None
                 and old["series"] == sid
                 and _current_index() == new_index
             ):
@@ -1775,7 +1925,12 @@ class WritableCalibreDB:
         """Replace (or clear, with ``name=None``) the book's publisher.
 
         Returns True when stored state changed; orphaned publisher rows are
-        pruned.
+        pruned. Since 1.28 a name matching an existing row only by case
+        re-cases the shared row to the requested spelling (upstream's
+        ``allow_case_change=True`` write default) and touches every book
+        linked to it, so ``set_publisher(id, "DAW Books")`` on a
+        ``Daw Books`` row is a real consolidation, not a silent no-op
+        (issue #6).
         """
         self._begin()
         try:
@@ -1792,8 +1947,13 @@ class WritableCalibreDB:
                     "DELETE FROM books_publishers_link WHERE book = ?", (book_id,)
                 )
             else:
-                pid = self._resolve_or_create("publishers", "name", name.strip())
-                if old is not None and old["publisher"] == pid:
+                pid, recased = self._resolve_or_create(
+                    "publishers", "name", name.strip()
+                )
+                if recased:
+                    for other in recased:
+                        self._touch_book(other)
+                elif old is not None and old["publisher"] == pid:
                     self._rollback()
                     return False
                 self.conn.execute(
@@ -1925,7 +2085,12 @@ class WritableCalibreDB:
             else:
                 new_ids: list[int] = []
                 for code in cleaned:
-                    lid = self._resolve_or_create("languages", "lang_code", code)
+                    # Language codes are canonical spellings, not display
+                    # names: upstream's writer keys them exactly (no case
+                    # changes), so an odd-case stored row is reused as-is.
+                    lid, _recased = self._resolve_or_create(
+                        "languages", "lang_code", code, case_change=False
+                    )
                     if lid not in new_ids:
                         new_ids.append(lid)
                 if new_ids == old_ids:
@@ -2279,8 +2444,12 @@ class WritableCalibreDB:
         elif is_multiple or isinstance(value, (list, tuple)):
             # Each item collapses like upstream's multiple_text adapter
             # (' '.join over the stripped item; long-standing upstream
-            # behavior, mirrored since 1.26.2).
+            # behavior, mirrored since 1.26.2), and items dedupe
+            # case-insensitively keeping the first spelling (upstream
+            # many_many's uniq(vals, kmap) -- so ["ya", "YA"] stores one
+            # "ya" row instead of fighting over the re-case).
             items: list[str] = []
+            lowered: set[str] = set()
             if isinstance(value, (list, tuple)):
                 for v in value:
                     if v is None:
@@ -2288,13 +2457,16 @@ class WritableCalibreDB:
                         # the literal 'None'.
                         continue
                     s = " ".join(str(v).split())
-                    if s:
+                    if s and s.lower() not in lowered:
                         items.append(s)
+                        lowered.add(s.lower())
             else:
                 # A bare string is ONE value: comma-splitting it made
                 # "Last, First" round-trip as two phantom values. Callers
                 # with multiple values pass a list (both writers do).
-                items = [" ".join(str(value).split())]
+                s = " ".join(str(value).split())
+                if s:
+                    items = [s]
             new_vals = [x for x in items if x]
         else:  # text (single-valued) and series: one text value
             # Upstream's single_text adapter (9.16+: long_text plus
@@ -2315,8 +2487,33 @@ class WritableCalibreDB:
         }
         for val in new_vals:
             vrow = self.conn.execute(
-                f"SELECT id FROM {value_table} WHERE value = ?", (val,)
+                f"SELECT id, value FROM {value_table} WHERE value = ?", (val,)
             ).fetchone()
+            if (
+                vrow is None and datatype not in ("enumeration", "rating")
+                # Upstream's enum writer hardcodes allow_case_change=False
+                # (and exact membership was validated above); ratings are
+                # numeric, so the NOCASE re-case is text-family only.
+            ):
+                vrow = self.conn.execute(
+                    f"SELECT id, value FROM {value_table} "
+                    f"WHERE value = ? COLLATE NOCASE",
+                    (val,),
+                ).fetchone()
+                if vrow is not None and vrow["value"] != val:
+                    # 1.28: re-case the shared value row (upstream
+                    # many_one/many_many change_case) and touch every book
+                    # that shows it.
+                    self.conn.execute(
+                        f"UPDATE {value_table} SET value = ? WHERE id = ?",
+                        (val, vrow["id"]),
+                    )
+                    linked = self.conn.execute(
+                        f"SELECT book FROM {link_table} WHERE value = ? ORDER BY book",
+                        (vrow["id"],),
+                    ).fetchall()
+                    for r in linked:
+                        self._touch_book(r["book"])
             vid = (
                 vrow["id"]
                 if vrow is not None
@@ -2442,6 +2639,7 @@ class WritableCalibreDB:
                 "is rejected"
             )
         items: list[str] = []
+        lowered: set[str] = set()
         for v in values:
             if v is None:
                 # A None entry is skipped, never stringified into 'None'.
@@ -2454,8 +2652,12 @@ class WritableCalibreDB:
                 continue
             if datatype == "enumeration":
                 self._validate_enum(meta, s)
-            if s not in items:
+            # Case-insensitive within-call dedupe, first spelling wins
+            # (upstream many_many's uniq(vals, kmap); the exact-spelling
+            # form predates 1.28).
+            if s not in items and s.lower() not in lowered:
                 items.append(s)
+                lowered.add(s.lower())
         cid = int(meta["id"])  # f-string SQL below; never interpolate raw ids
         link_table = f"books_custom_column_{cid}_link"
         value_table = f"custom_column_{cid}"
@@ -2470,20 +2672,43 @@ class WritableCalibreDB:
         try:
             self._require_book(book_id)
             existing = {
-                r["v"]
+                r["v"]: r["vid"]
                 for r in self.conn.execute(
-                    f"SELECT c.value AS v FROM {link_table} l "
+                    f"SELECT c.value AS v, c.id AS vid FROM {link_table} l "
                     f"JOIN {value_table} c ON c.id = l.value WHERE l.book = ?",
                     (book_id,),
                 ).fetchall()
             }
+            existing_ids = set(existing.values())
             added = 0
             for val in items:
-                if val in existing:
-                    continue
                 vrow = self.conn.execute(
-                    f"SELECT id FROM {value_table} WHERE value = ?", (val,)
+                    f"SELECT id, value FROM {value_table} WHERE value = ?", (val,)
                 ).fetchone()
+                if vrow is None and datatype not in ("enumeration", "rating"):
+                    vrow = self.conn.execute(
+                        f"SELECT id, value FROM {value_table} "
+                        f"WHERE value = ? COLLATE NOCASE",
+                        (val,),
+                    ).fetchone()
+                    if vrow is not None and vrow["value"] != val:
+                        # 1.28: re-case the shared value row (upstream
+                        # change_case) and touch every book that shows it;
+                        # this book may already link it under the old
+                        # spelling, which the id-dedupe below absorbs.
+                        # Exclusions match _write_pattern_a: enums are
+                        # validated exact (upstream hardcodes case changes
+                        # off) and ratings are numeric.
+                        self.conn.execute(
+                            f"UPDATE {value_table} SET value = ? WHERE id = ?",
+                            (val, vrow["id"]),
+                        )
+                        for r in self.conn.execute(
+                            f"SELECT book FROM {link_table} WHERE value = ? "
+                            f"ORDER BY book",
+                            (vrow["id"],),
+                        ).fetchall():
+                            self._touch_book(r["book"])
                 vid = (
                     vrow["id"]
                     if vrow is not None
@@ -2491,11 +2716,13 @@ class WritableCalibreDB:
                         f"INSERT INTO {value_table} (value) VALUES (?)", (val,)
                     ).lastrowid
                 )
+                if vid in existing_ids:
+                    continue
                 self.conn.execute(
                     f"INSERT INTO {link_table} (book, value) VALUES (?, ?)",
                     (book_id, vid),
                 )
-                existing.add(val)
+                existing_ids.add(vid)
                 added += 1
             if added:
                 self._touch_book(book_id)

@@ -1409,7 +1409,11 @@ class _WriteSideTests:
     def test_set_publisher_roundtrip(self):
         with self._wdb() as wdb:
             self.assertTrue(wdb.set_publisher(1, "Orbit"))
-            self.assertFalse(wdb.set_publisher(1, "orbit"))  # NOCASE match
+            # 1.28 (issue #6): a case-different spelling re-cases the shared
+            # row (upstream allow_case_change=True), it is not a no-op.
+            self.assertTrue(wdb.set_publisher(1, "orbit"))
+            self.assertFalse(wdb.set_publisher(1, "orbit"))
+            self.assertEqual(self._sql2("SELECT name FROM publishers"), [("orbit",)])
             self.assertTrue(wdb.set_publisher(1, None))
         self.assertEqual(
             self._sql2("SELECT COUNT(*) FROM publishers"), [(0,)]
@@ -2490,10 +2494,19 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
         path = self._sql2("SELECT path FROM books WHERE id = ?", (book_id,))[0][0]
         self.assertEqual(path, "Ann Leckie/_nicode T_st (3)")
 
-    def test_add_book_existing_author_reuses_sort_nocase(self):
+    def test_add_book_existing_author_recases_to_incoming_spelling(self):
+        # 1.28 (upstream change_case): an author spelling differing only by
+        # case re-cases the shared row instead of silently reusing it; the
+        # row's own sort is untouched (upstream's change_case writes only
+        # the name column), so the book-level sort recomputes from the
+        # stored sort key, not from the new spelling.
         with self._wdb() as wdb:
             wdb.add_book("The Fifth Head of Data", ["zed a. writer"])
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM authors"), [(1,)])
+        self.assertEqual(
+            self._sql2("SELECT name, sort FROM authors"),
+            [("zed a. writer", "Writer, Zed A.")],
+        )
         self.assertEqual(
             self._sql2("SELECT author_sort FROM books WHERE id = 3"),
             [("Writer, Zed A.",)],
@@ -5541,7 +5554,10 @@ class TestAuthorCreationParity(unittest.TestCase):
             [("Hand Tuned, Sort",)],
         )
 
-    def test_piped_reuse_is_case_insensitive(self):
+    def test_piped_row_recases_to_display_form(self):
+        # 1.28 (upstream change_case): a case-different display input
+        # re-cases the shared row; the stored all-caps pipe spelling gives
+        # way to the incoming display form and the sort recomputes from it.
         conn = sqlite3.connect(self.db_path)
         conn.execute("INSERT INTO authors VALUES (1, 'LECKIE| ANN', 'Leckie, Ann')")
         conn.commit()
@@ -5549,8 +5565,8 @@ class TestAuthorCreationParity(unittest.TestCase):
         with WritableCalibreDB(self.db_path) as wdb:
             wdb.set_authors(1, ["Leckie, Ann"])
         self.assertEqual(
-            self._sql("SELECT id, name FROM authors"),
-            [(1, "LECKIE| ANN")],  # reuse never rewrites the stored spelling
+            self._sql("SELECT id, name, sort FROM authors"),
+            [(1, "Leckie, Ann", "Leckie, Ann")],
         )
 
     def test_comma_row_wins_over_piped_variant(self):
@@ -5712,3 +5728,223 @@ class TestAuthorCreationParity(unittest.TestCase):
             self._sql("SELECT link FROM authors WHERE id = 1"),
             [("https://example.com/ann",)],
         )
+
+
+class TestCaseChangeParity(_WriteSideFixture, unittest.TestCase):
+    """1.28 (issue #6): the name-taking setters re-case a shared entity row
+    when the requested spelling differs only by case -- upstream's
+    ``allow_case_change=True`` write default (``set_field`` ->
+    ``get_db_id``/``change_case``, db/write.py), replacing the
+    reuse-as-is shape spec §5 deviation 12 used to document. Every book
+    linked to the renamed row is touched and queued for OPF resync; authors
+    additionally recompute sorts and re-lay their books' on-disk layout."""
+
+    def _seed_publisher(self, name: str = "Daw Books") -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO publishers VALUES (1, ?, 'Daw Books', '')", (name,))
+        conn.execute("INSERT INTO books_publishers_link VALUES (1, 1, 1)")
+        conn.execute("INSERT INTO books_publishers_link VALUES (2, 2, 1)")
+        conn.commit()
+        conn.close()
+
+    def test_set_publisher_case_variant_recases_shared_row(self):
+        # The issue's live scenario: DAW Books vs Daw Books.
+        self._seed_publisher()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_publisher(1, "DAW Books"))
+        self.assertEqual(
+            self._sql2("SELECT id, name FROM publishers"), [(1, "DAW Books")]
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM books_publishers_link ORDER BY book"),
+            [(1,), (2,)],
+        )
+        # Both books show the new spelling; both queue for OPF resync.
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_set_series_case_variant_recases_and_keeps_indexes(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO series VALUES (1, 'imperial radch', 'radch, imperial', '')"
+        )
+        conn.execute("INSERT INTO books_series_link VALUES (1, 1, 1)")
+        conn.execute("INSERT INTO books_series_link VALUES (2, 2, 1)")
+        conn.execute("UPDATE books SET series_index = 3.0 WHERE id = 1")
+        conn.execute("UPDATE books SET series_index = 5.0 WHERE id = 2")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_series(1, "Imperial Radch"))
+        self.assertEqual(
+            self._sql2("SELECT id, name FROM series"), [(1, "Imperial Radch")]
+        )
+        # A re-case is an in-place rename: every index stays.
+        self.assertEqual(
+            self._sql2("SELECT id, series_index FROM books ORDER BY id"),
+            [(1, 3.0), (2, 5.0)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_set_authors_case_variant_updates_stale_sorts_only(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE authors SET name = 'zed a. writer' WHERE id = 1")
+        # Book 1 is the calling book (recomputes unconditionally); book 2's
+        # stored sort is a stale all-caps variant of the recomputed one;
+        # book 3's is hand-tuned beyond case and must survive the re-case.
+        # The recompute flows from the row's stored sort ("Writer, Zed
+        # A."), which the re-case deliberately does not rewrite.
+        conn.execute("UPDATE books SET author_sort = 'WRITER, ZED A.' WHERE id = 2")
+        conn.execute("UPDATE books SET path = 'zed a. writer/Other (2)' WHERE id = 2")
+        conn.execute(
+            "INSERT INTO books (id, title, sort, author_sort) "
+            "VALUES (3, 'Third', 'Third', 'W., Zed')"
+        )
+        conn.execute("INSERT INTO books_authors_link VALUES (3, 3, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_authors(1, ["Zed A. Writer"]))
+        self.assertEqual(
+            self._sql2("SELECT id, name, sort FROM authors"),
+            [(1, "Zed A. Writer", "Writer, Zed A.")],
+        )
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 1"),
+            [("Writer, Zed A.",)],
+        )
+        # The stale variant on the other book follows the re-case...
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 2"),
+            [("Writer, Zed A.",)],
+        )
+        # ...its directory re-lays to the new spelling...
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 2"),
+            [("Zed A. Writer/Other (2)",)],
+        )
+        # ...and the hand-tuned sort on book 3 survives untouched (upstream's
+        # strcmp rule), though the book is still touched and queued.
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 3"),
+            [("W., Zed",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,), (3,)],
+        )
+
+    def test_add_tag_case_variant_recases_shared_row(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO tags VALUES (1, 'sci-fi', '')")
+        conn.execute("INSERT INTO books_tags_link VALUES (1, 1, 1)")
+        conn.execute("INSERT INTO books_tags_link VALUES (2, 2, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.add_tag(1, "Sci-Fi"))
+        self.assertEqual(self._sql2("SELECT id, name FROM tags"), [(1, "Sci-Fi")])
+        self.assertEqual(
+            self._sql2("SELECT COUNT(*) FROM books_tags_link WHERE tag = 1"), [(2,)]
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_add_tag_case_variant_already_linked_returns_true(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO tags VALUES (1, 'sci-fi', '')")
+        conn.execute("INSERT INTO books_tags_link VALUES (1, 1, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            # The link exists; the re-case is the change.
+            self.assertTrue(wdb.add_tag(1, "Sci-Fi"))
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(1,)])
+
+    def test_remove_tag_case_variant_removes(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO tags VALUES (1, 'ROC', '')")
+        conn.execute("INSERT INTO books_tags_link VALUES (1, 1, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.remove_tag(1, "roc"))
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM tags"), [(0,)])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(0,)])
+
+    def test_set_custom_column_case_variant_recases_shared_value(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO custom_column_3 VALUES (1, 'ya', '')")
+        conn.execute("INSERT INTO books_custom_column_3_link VALUES (1, 1)")
+        conn.execute("INSERT INTO books_custom_column_3_link VALUES (2, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "audience", ["YA"]))
+        self.assertEqual(
+            self._sql2("SELECT id, value FROM custom_column_3"), [(1, "YA")]
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_add_custom_column_values_case_variant_no_duplicate_link(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO custom_column_3 VALUES (1, 'ya', '')")
+        conn.execute("INSERT INTO books_custom_column_3_link VALUES (1, 1)")
+        conn.execute("INSERT INTO books_custom_column_3_link VALUES (2, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            # The book already links the row under the old spelling: zero
+            # links added, but the re-case still lands and touches everyone.
+            self.assertEqual(wdb.add_custom_column_values(1, "audience", ["YA"]), 0)
+        self.assertEqual(
+            self._sql2("SELECT id, value FROM custom_column_3"), [(1, "YA")]
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM books_custom_column_3_link ORDER BY book"),
+            [(1,), (2,)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_set_custom_column_case_variant_items_dedupe(self):
+        # Within one call, case-variant items collapse to the first
+        # spelling (upstream many_many's uniq(vals, kmap)); no UNIQUE fight.
+        with self._wdb() as wdb:
+            wdb.set_custom_column(1, "audience", ["ya", "YA", "YA"])
+        self.assertEqual(self._sql2("SELECT value FROM custom_column_3"), [("ya",)])
+
+    def test_language_codes_reuse_without_recasing(self):
+        # Language codes are canonical spellings, not display names: an
+        # odd-case stored row is reused as-is (upstream keys them exactly).
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO languages VALUES (1, 'ENG', '')")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_languages(1, ["eng"]))
+        self.assertEqual(
+            self._sql2("SELECT id, lang_code FROM languages"), [(1, "ENG")]
+        )
+
+    def test_batch_rollback_undoes_case_rename(self):
+        self._seed_publisher()
+        with self._wdb() as wdb, self.assertRaises(RuntimeError), wdb.batch():
+            wdb.set_publisher(1, "DAW Books")
+            raise RuntimeError("boom")
+        self.assertEqual(
+            self._sql2("SELECT id, name FROM publishers"), [(1, "Daw Books")]
+        )
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])
