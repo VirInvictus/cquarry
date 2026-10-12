@@ -621,6 +621,60 @@ the v1.27.0 lanes):
   resolution is what lets a caller target a piped row by its stored
   spelling when both spellings exist.
 
+## The entity case-change wave (2026-10-11, issue #6)
+
+Third live occurrence of the same trap in Brandon's library (ABRAMS/Abrams
+2026-10-04, Daw Books/DAW Books and ROC/Roc 2026-10-11): a case-variant
+target spelling resolved NOCASE to the existing row and the setter
+reported already-so, silently no-oping the consolidation until a
+`rename_entity` sweep caught it. Filed as issue #6 with two suggested
+shapes; the fix is the parity one, and it turned out the spec had been
+defending a misreading.
+
+- [x] **The spec premise corrected.** §5.12 (2026-09-12) claimed upstream's
+  write default was `allow_case_change=False`, citing `get_db_id`. The
+  flag actually flows from `many_one`/`many_many`, whose callers default
+  it True (`Writer.set_books` db/write.py:558, `set_field` cache.py:1970
+  -- the path the GUI's metadata edits ride); only the retired legacy
+  `db.py` API wrapped False. `change_case` rewrites the row name and
+  dirties every linked book. Same error class as the two sentences the
+  v1.25.0 audit rewrote.
+- [x] **Case-change parity across the name-taking setters (v1.28.0).**
+  `set_publisher`, `set_series`, `set_authors` (hence `add_book` and the
+  trash restore, which funnel through the setters), and `add_tag`
+  re-case a NOCASE hit that differs only by case to the requested
+  spelling, touch + queue every book linked to the row, and report True.
+  Authors: display-form comparison and storage, the row's sort
+  deliberately NOT rewritten (upstream's `change_case` writes only the
+  name column; its asort_map recompute is session memory that reverts
+  on reopen, so hand-tuned passthrough sorts survive and
+  `set_author_sort_name` stays the re-keying verb), each linked book's
+  `author_sort` updated only when it matched modulo case (upstream's
+  strcmp rule), paths re-laid through the deferred machinery. Series:
+  in-place rename, indexes untouched.
+- [x] **The tag duplicate-row divergence fixed in the same pass.**
+  `add_tag` resolved EXACTLY and INSERTed a second row for a
+  case-variant spelling -- the only cquarry path that could create
+  case-duplicate rows (which upstream's `fix_case_duplicates` collapses
+  on its next write; cquarry now never creates them and deliberately
+  does not heal pre-existing ones -- `rename_entity`'s merge is the
+  tool). `remove_tag` gained the NOCASE fallback so a case-spelled
+  removal cannot miss. `add_custom_column_values` dedupes by row id now,
+  so a case-variant append re-cases instead of colliding with
+  UNIQUE(book, value).
+- [x] **Custom-column text family included; exclusions named.** Pattern-A
+  text/series/multi-text value rows re-case like the builtin entities
+  (same upstream writer); enums are excluded because upstream's enum
+  writer hardcodes `allow_case_change=False`, languages because upstream
+  keys them exactly (odd-case rows reuse as-is), ratings because they
+  are numeric. Multi-valued items dedupe case-insensitively keeping the
+  first spelling (upstream's `uniq(vals, kmap)`), so `["ya", "YA"]`
+  stores one row instead of fighting over the re-case.
+- [x] **rename_entity / remove_entity_everywhere untouched.** Their
+  exact-spelling-first resolution is the ratified 1.19 contract and they
+  are the rename/removal verbs, not state setters; the issue's own
+  workaround keeps working verbatim.
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
 - [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference
