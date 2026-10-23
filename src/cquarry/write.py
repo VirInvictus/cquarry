@@ -403,6 +403,25 @@ def _place_bytes(data: bytes, dest: str) -> None:
         os.close(dfd)
 
 
+# Breaking whitespace is everything str.split() treats as whitespace EXCEPT
+# the three non-breaking spaces (NO-BREAK SPACE, FIGURE SPACE, NARROW
+# NO-BREAK SPACE): 9.16's plain ' '.join(x.split()) collapse silently turned
+# them into regular spaces, which upstream reverted as a regression in 9.17.
+_BREAKING_WHITESPACE_PAT = re.compile(r"[^\S\xa0\u2007\u202f]+")
+
+
+def _normalize_ws(value: str) -> str:
+    """The composite every upstream text adapter applies: strip the ends,
+    then collapse runs of breaking whitespace into one space, preserving the
+    three non-breaking spaces (upstream 9.17 normalize_whitespace; every
+    caller -- long_text-then-single_text, the multiple_text items -- strips
+    the ends first, so the composite is mirrored here)."""
+    x = value.strip()
+    if x.isascii() or not any(c in x for c in ("\xa0", "\u2007", "\u202f")):
+        return " ".join(x.split())
+    return _BREAKING_WHITESPACE_PAT.sub(" ", x).strip(" ")
+
+
 class WritableCalibreDB:
     """Explicitly opt-in read/write handle for metadata.db.
 
@@ -2415,10 +2434,11 @@ class WritableCalibreDB:
         if datatype == "enumeration":
             # Upstream routes enum values through the same single_text
             # adapter BEFORE validating (9.16 added the whitespace collapse;
-            # the strip is older), so a double-spaced spelling of a listed
-            # value normalizes to the listed spelling, and a whitespace-only
-            # value reduces to None, which clears.
-            sval = " ".join(str(value).split())
+            # the strip is older; 9.17 made it NBSP-preserving), so a
+            # double-spaced spelling of a listed value normalizes to the
+            # listed spelling, and a whitespace-only value reduces to None,
+            # which clears.
+            sval = _normalize_ws(str(value))
             if not sval:
                 if not old_rows:
                     return False
@@ -2442,10 +2462,11 @@ class WritableCalibreDB:
                 return True
             new_vals = [internal]
         elif is_multiple or isinstance(value, (list, tuple)):
-            # Each item collapses like upstream's multiple_text adapter
-            # (' '.join over the stripped item; long-standing upstream
-            # behavior, mirrored since 1.26.2), and items dedupe
-            # case-insensitively keeping the first spelling (upstream
+            # Each item normalizes like upstream's multiple_text adapter
+            # (strip the ends, collapse breaking whitespace, preserve the
+            # non-breaking spaces; mirrored since 1.26.2, NBSP-preserving
+            # since 1.28.1 after upstream's fix landed in 9.17), and items
+            # dedupe case-insensitively keeping the first spelling (upstream
             # many_many's uniq(vals, kmap) -- so ["ya", "YA"] stores one
             # "ya" row instead of fighting over the re-case).
             items: list[str] = []
@@ -2456,7 +2477,7 @@ class WritableCalibreDB:
                         # A None entry is skipped, never stringified into
                         # the literal 'None'.
                         continue
-                    s = " ".join(str(v).split())
+                    s = _normalize_ws(str(v))
                     if s and s.lower() not in lowered:
                         items.append(s)
                         lowered.add(s.lower())
@@ -2464,15 +2485,15 @@ class WritableCalibreDB:
                 # A bare string is ONE value: comma-splitting it made
                 # "Last, First" round-trip as two phantom values. Callers
                 # with multiple values pass a list (both writers do).
-                s = " ".join(str(value).split())
+                s = _normalize_ws(str(value))
                 if s:
                     items = [s]
             new_vals = [x for x in items if x]
         else:  # text (single-valued) and series: one text value
-            # Upstream's single_text adapter (9.16+: long_text plus
-            # ' '.join(x.split())) collapses whitespace runs and reduces a
-            # whitespace-only value to None, which clears.
-            collapsed = " ".join(str(value).split())
+            # Upstream's single_text adapter (9.16's collapse, 9.17's
+            # NBSP preservation) collapses breaking whitespace runs and
+            # reduces a whitespace-only value to None, which clears.
+            collapsed = _normalize_ws(str(value))
             if not collapsed:
                 if not old_rows:
                     return False
@@ -2645,9 +2666,9 @@ class WritableCalibreDB:
                 # A None entry is skipped, never stringified into 'None'.
                 continue
             # Same per-item normalization as set_custom_column's multi
-            # branch (upstream multiple_text), so both verbs store rows
-            # that agree.
-            s = " ".join(str(v).split())
+            # branch (upstream multiple_text, NBSP-preserving since 9.17),
+            # so both verbs store rows that agree.
+            s = _normalize_ws(str(v))
             if not s:
                 continue
             if datatype == "enumeration":
@@ -3540,11 +3561,27 @@ class WritableCalibreDB:
                     break
                 num += 1
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        if isinstance(data, (str, os.PathLike)):
-            shutil.copy2(os.fspath(data), dest)
-        else:
-            with open(dest, "wb") as f:
-                f.write(data)
+        # Write through a temp file + atomic replace: opening dest directly
+        # truncated an existing file whenever the source read or the write
+        # failed part way (upstream 9.17's add_extra_file fix).
+        tmp = dest + ".cquarry-tmp"
+        try:
+            if isinstance(data, (str, os.PathLike)):
+                with open(os.fspath(data), "rb") as fsrc, open(tmp, "wb") as fdst:
+                    shutil.copyfileobj(fsrc, fdst)
+                    fdst.flush()
+                    os.fsync(fdst.fileno())
+                shutil.copystat(os.fspath(data), tmp)  # as copy2() did
+            else:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.replace(tmp, dest)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
         return os.path.relpath(dest, data_dir).replace(os.sep, "/")
 
     def _book_data_dir(self, book_id: int) -> str | None:

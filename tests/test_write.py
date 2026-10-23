@@ -1639,6 +1639,52 @@ class _WriteSideTests:
             [(1, 1.0)],
         )
 
+    def test_single_text_preserves_non_breaking_spaces(self):
+        # Calibre 9.17 reverted 9.16's plain str.split() collapse: the three
+        # non-breaking spaces survive interior runs, ends still strip.
+        self._add_single_text_column()
+        with self._wdb() as wdb:
+            self.assertTrue(
+                wdb.set_custom_column(
+                    1, "#shelf", "  Hovering\r\n over\xa0 the\tTower  "
+                )
+            )
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_6"),
+            [("Hovering over\xa0 the Tower",)],
+        )
+        with self._wdb() as wdb:
+            # Figure space and narrow no-break space survive too; a trailing
+            # NBSP is end whitespace and strips away.
+            self.assertTrue(wdb.set_custom_column(1, "#shelf", "A\u2007B\u202fC\xa0"))
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_6"), [("A\u2007B\u202fC",)]
+        )
+
+    def test_enumeration_non_breaking_space_normalizes_before_validating(self):
+        # Adapt-before-validate with 9.17's NBSP preservation: breaking
+        # whitespace normalizes onto the listed value, but an NBSP spelling
+        # matches no listed value and still raises.
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#status", "  To   Read "))
+            with self.assertRaises(ValueError):
+                wdb.set_custom_column(1, "#status", "To\xa0 Read")
+
+    def test_multi_valued_items_preserve_non_breaking_spaces(self):
+        self._add_multi_text_column()
+        with self._wdb() as wdb:
+            self.assertTrue(
+                wdb.set_custom_column(1, "#crowd", ["Beta\xa0 Readers", "  Rin  "])
+            )
+        values = sorted(v for (v,) in self._sql2("SELECT value FROM custom_column_8"))
+        self.assertEqual(values, ["Beta\xa0 Readers", "Rin"])
+        # An end-NBSP spelling of an existing value collapses onto it and
+        # dedupes away (both write verbs normalize identically).
+        with self._wdb() as wdb:
+            self.assertEqual(
+                wdb.add_custom_column_values(1, "#crowd", ["Beta\xa0 Readers "]), 0
+            )
+
     def test_enumeration_value_collapses_whitespace(self):
         # Enumeration rides the same single_text adapter upstream, adapted
         # BEFORE validation: a double-spaced spelling of a listed value
@@ -4945,6 +4991,33 @@ class TestDataFiles(_WriteSideFixture, unittest.TestCase):
         with CalibreDB(self.db_path) as db:
             self.assertEqual(db.get_data_file(1, "docs/readme.txt"), b"inline")
             self.assertEqual(db.get_data_file(1, "copy.bin"), b"from disk")
+
+    def test_failed_source_copy_leaves_destination_intact(self):
+        # Upstream 9.17's add_extra_file fix: writes go through a temp file
+        # + atomic replace, so a failure part way cannot truncate an
+        # existing file and no temp orphan survives.
+        from pathlib import Path
+        from unittest import mock
+
+        self._book_dir()
+        src = os.path.join(self.temp_dir, "src.bin")
+        with open(src, "wb") as f:
+            f.write(b"replacement")
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertEqual(wdb.add_data_file(1, "a.txt", b"original"), "a.txt")
+            data_file = next(Path(self.temp_dir).rglob("data/a.txt"))
+            with (
+                mock.patch(
+                    "shutil.copyfileobj", side_effect=RuntimeError("mid-copy failure")
+                ),
+                self.assertRaises(RuntimeError),
+            ):
+                wdb.add_data_file(1, "a.txt", src, replace=True)
+            self.assertEqual(data_file.read_bytes(), b"original")
+            self.assertEqual(list(data_file.parent.glob("*.cquarry-tmp")), [])
+            # The happy path still replaces, atomically.
+            self.assertEqual(wdb.add_data_file(1, "a.txt", src, replace=True), "a.txt")
+            self.assertEqual(data_file.read_bytes(), b"replacement")
 
     def test_add_conflict_semantics(self):
         self._book_dir()
