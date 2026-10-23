@@ -675,6 +675,52 @@ defending a misreading.
   are the rename/removal verbs, not state setters; the issue's own
   workaround keeps working verbatim.
 
+## The Calibre 9.17 watch audit (2026-10-23, parity-watch automation)
+
+The watch's second schema-search trip (v9.17.0, tagged 2026-10-23; the
+verdict file was `notes/connect.py`, which is out of cquarry's scope by
+contract). The skim's commit list was what mattered: upstream spent the
+release fixing a regression in the exact adapter 1.26.2 mirrored. Full
+read-only audit against this tree (then v1.28.0); suite 703 -> 707 with
+four new regression tests; fixes shipped same day as v1.28.1.
+
+- **The NBSP regression, mirrored and fixed (1.28.1).** 9.16's
+  `' '.join(x.split())` collapse -- enshrined by 1.26.2 -- silently turned
+  the three non-breaking spaces (U+00A0, U+2007, U+202F) into regular
+  spaces (`str.split()` treats them as whitespace); users hit it in text
+  and comments columns and upstream reverted it in 9.17
+  (`75dffc72e7`, `948bd17197`) with `normalize_whitespace`, applied to
+  `single_text` AND per-item `multiple_text`. cquarry mirrors it as
+  `_normalize_ws` (strip ends, collapse breaking runs, preserve the three
+  code points) across all four `_write_pattern_a` branches and
+  `add_custom_column_values`. The builtin comments field also now routes
+  through the whitespace-preserving adapter upstream -- cquarry's
+  `set_comments` was always a verbatim upsert, so that half needs nothing.
+- **Extra-file write atomicity, mirrored and fixed (1.28.1).** Upstream's
+  `add_extra_file` used to open the destination directly, truncating an
+  existing file when the source read or write failed part way
+  (`6be01ad3fa`); it now writes through a temp file + atomic replace.
+  cquarry's `add_data_file` had the same shape; it now writes through a
+  `.cquarry-tmp` + fsync + `os.replace` with temp cleanup on failure, and
+  a regression test pins the intact-destination behavior.
+- **Audited, no action:** `247f690889` (upstream's restore_original_format
+  used to leave an empty placeholder where the current format lived before
+  renaming over it -- cquarry reads the ORIGINAL bytes into memory first
+  and places them atomically after the rows commit, so the destroy
+  window never existed here); `d0e97cd8d5` (upstream trash moves are
+  copy_tree with partial-copy data loss on failure -- cquarry's trash move
+  is a same-filesystem `shutil.move`, atomic by construction, and the
+  rows-first ordering means a failed move leaves the files in place);
+  `81bf49a733` (upstream atomic format replacement -- `set_format`'s file
+  swap stays the caller's atomic-replace job by documented contract, and
+  cquarry's own byte placement is already atomic); `7c73d6d2a1` and
+  `508cc1eb49` (in-memory field-cache coherence fixes with no cquarry
+  counterpart); the notes-sidecar work (`b88b83a6c7`, `401f81c01b`,
+  `5c58ba46ce`, `notes/connect.py` itself) and the annotations fix are out
+  of scope by the recorded declines.
+- **Snapshot-retry candidate unchanged** -- 9.17 did not touch the backup
+  path; the 9.16 reference shape stands.
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
 - [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference
