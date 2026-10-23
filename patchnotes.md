@@ -1,3 +1,42 @@
+## v1.28.1 (2026-10-23)
+
+### The Calibre 9.17 watch audit: NBSP preservation and an atomic extra-file write
+
+The Friday parity-watch automation's second schema-search trip (v9.17.0,
+tagged 2026-10-23) turned out to be upstream fixing a regression in the
+exact adapter cquarry mirrored in 1.26.2. The full read-only audit against
+this tree found two fixes to make and verified the rest of the release is
+either out of cquarry's scope or already safe by construction; the per-file
+verdicts live in the roadmap's Calibre 9.17 watch audit section.
+
+- **The whitespace collapse now preserves the three non-breaking spaces**
+  (NO-BREAK SPACE, FIGURE SPACE, NARROW NO-BREAK SPACE), exactly like
+  upstream 9.17's `normalize_whitespace`. 9.16's plain `' '.join(x.split())`
+  -- mirrored by 1.26.2 -- silently turned them into regular spaces because
+  Python's `str.split()` treats them as whitespace, and upstream reverted
+  that as a regression in 9.17 after users hit it in text and comments
+  columns. All four `_write_pattern_a` branches and
+  `add_custom_column_values` normalize through the same helper; ends still
+  strip, breaking runs still collapse, and a trailing NBSP still strips away
+  with the ends (upstream's composite behavior).
+- **`add_data_file` writes through a temp file + atomic replace** (upstream
+  9.17's `add_extra_file` fix): opening the destination directly truncated
+  an existing file whenever the source read or the write failed part way.
+  A failed copy now leaves the old file intact and no temp orphan behind.
+- **Audited, no action**: `restore_original_format` cannot destroy the
+  current format on failure (cquarry reads the ORIGINAL bytes into memory
+  first and places them atomically after the rows commit -- upstream's
+  empty-placeholder bug never existed here); the trash move is a
+  same-filesystem atomic rename (`.caltrash` lives inside the library), so
+  the partial-copy data-loss class upstream fixed does not apply;
+  `set_format`'s file swap stays the caller's atomic-replace job by
+  contract; the remaining 9.17 work is notes-sidecar, in-memory cache, and
+  GUI-facing robustness that cquarry does not mirror.
+- 707 tests pass (four new: NBSP preservation for single-valued text, the
+  enum adapt-then-validate order with NBSP spellings, NBSP preservation in
+  multi-valued items and appends, and the failed-copy intact-destination
+  pin).
+
 ## v1.28.0 (2026-10-11)
 
 ### The entity case-change wave (issue #6)
