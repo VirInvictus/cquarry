@@ -721,6 +721,45 @@ four new regression tests; fixes shipped same day as v1.28.1.
 - **Snapshot-retry candidate unchanged** -- 9.17 did not touch the backup
   path; the 9.16 reference shape stands.
 
+## The set_format extension-name guard (2026-10-29, issue #9)
+
+A live incident on book 11305 (the 2026-10-28 supersede swap): a repair
+session passed the FILENAME ("`<stem>.epub`") to `set_format`'s `name`
+argument, which stores verbatim, so `data.name` carried the extension and
+every consumer that resolves the file as `<name>.<fmt.lower()>` (cquarry's
+`get_format_path`, CalibreQuarry's `reconcile_file_metadata.py`, Carrel's
+download-link path) then built `<stem>.epub.epub` and reported the book
+unreadable while the real file sat fine on disk. Upstream never accepts a
+caller-supplied stem at all (`cache.add_format` reuses the stored name and
+`backend.add_format` derives the filename from title/author), so the
+low-level cquarry surface is the only place the two halves can
+desynchronize, and the fix is validation, not behavior change:
+
+- **Both format-row setters refuse the format's own extension
+  (1.28.2).** `add_format` and `set_format` raise `ValueError` when
+  `name` ends (case-insensitively) with `.<fmt.lower()>`, with the message
+  naming the stem to pass instead. Refusal over auto-strip: the repo's
+  style is loud errors over silent correction (the `set_link_map`
+  precedent), and auto-strip would churn the `True`/`False` return
+  contract. Legitimate dotted stems (`Anon.2023`) pass; only the format's
+  own extension is refused, so `ORIGINAL_<FMT>` rows refuse
+  `.original_<ext>` spellings. Pre-existing corrupted rows surface the
+  same way through the row-derived internal callers
+  (`move_format_from_trash`, save/restore_original_format): the guard
+  fires exactly where the corruption would propagate, which is the
+  incident's own remedy (fix the stem first).
+- **Suite 707 -> 708** (one regression test over both setters, the
+  case-insensitive refusal, the dotted-stem pass, and the
+  `ORIGINAL_<FMT>` suffix shape).
+- **Downstream sweep (six call sites across the four consumer repos):**
+  only CalibreQuarry's free-text `--add-format`/TUI entry can legitimately
+  feed an extension-suffixed name (user error, which the guard is for);
+  the `integrate.py` sites and bindery-cli's `install_format` all pass
+  data-row or `Path.stem` values that the guard passes on healthy
+  libraries, and bindery already catches `ValueError` and fails soft.
+  Hermitage and Carrel-calibre-web never import `WritableCalibreDB`.
+  CalibreQuarry owes the floor bump (its issue #35 precedent).
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
 - [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference
