@@ -1,3 +1,47 @@
+## v1.28.2 (2026-10-29)
+
+### The set_format extension-name guard (issue #9)
+
+A live incident on book 11305 (the 2026-10-28 supersede swap) exposed a
+silent desynchronization in the format-row writers: a repair session
+passed the FILENAME (`<stem>.epub`) to `set_format`'s `name` argument,
+which stores verbatim, so `data.name` carried the extension. Every
+consumer that resolves a format file as `<name>.<fmt.lower()>` --
+cquarry's `get_format_path`, CalibreQuarry's `reconcile_file_metadata.py`,
+Carrel's download-link path -- then built `<stem>.epub.epub`, failed to
+find it, and reported the book unreadable while the real file sat fine on
+disk; the discrepancy cost a debug cycle before a row diff named it.
+Upstream never accepts a caller-supplied stem at all (`cache.add_format`
+reuses the stored name and `backend.add_format` derives the filename from
+title and author), so cquarry's low-level surface is the only place the
+row and the file can drift this way, and the fix is validation, not
+behavior change.
+
+- **`add_format` and `set_format` refuse a `name` carrying the format's
+  own extension.** A `ValueError` fires when the name ends
+  case-insensitively with `.<fmt.lower()>`, and the message names the stem
+  to pass instead. Refusal over auto-strip: cquarry's style is loud errors
+  over silent correction (the `set_link_map` precedent), and a
+  flag-or-strip result would churn the `True`/`False` return contract.
+  Legitimate dotted stems (`Anon.2023`) pass; `ORIGINAL_<FMT>` rows refuse
+  their own `.original_<ext>` spelling.
+- **Already-corrupted rows surface through the internal callers the same
+  way.** `move_format_from_trash` and the save/restore-original pair feed
+  row-derived stems into these setters, so a pre-existing double-extended
+  row now raises exactly where the corruption would propagate -- the
+  incident's own remedy was fixing the stem first.
+- **Downstream sweep, six call sites across the four consumer repos:**
+  only CalibreQuarry's free-text `--add-format`/TUI entry can legitimately
+  feed an extension-suffixed name (user error, the case the guard exists
+  for); CalibreQuarry's `integrate.py` and bindery-cli's `install_format`
+  pass data-row or `Path.stem` values that stay legal on healthy
+  libraries (bindery already catches `ValueError` and fails soft), and
+  Hermitage and Carrel-calibre-web never import `WritableCalibreDB`.
+  CalibreQuarry owes the floor bump in its next dependency wave.
+- 708 tests pass (one new regression test: the refusal on both setters,
+  the case-insensitive match, the dotted-stem pass, and the
+  `ORIGINAL_<FMT>` suffix shape).
+
 ## v1.28.1 (2026-10-23)
 
 ### The Calibre 9.17 watch audit: NBSP preservation and an atomic extra-file write
