@@ -1873,6 +1873,29 @@ class _WriteSideTests:
             self.assertFalse(wdb.set_has_cover(1, True))
             self.assertTrue(wdb.set_has_cover(1, False))
 
+    def test_format_name_carrying_extension_raises(self):
+        # Issue #9, live case 11305: set_format(1, "EPUB", "<stem>.epub")
+        # stored the double-extended row, so reconcile-style readers built
+        # "<stem>.epub.epub" and reported the book unreadable. data.name is
+        # the stem; both row setters refuse the format's own extension.
+        with self._wdb() as wdb:
+            with self.assertRaises(ValueError):
+                wdb.add_format(1, "EPUB", "oldtitle.epub", 1024)
+            with self.assertRaises(ValueError):
+                wdb.set_format(1, "EPUB", "OldTitle - Author.epub", 1024)
+            with self.assertRaises(ValueError):
+                wdb.set_format(1, "epub", "oldtitle.EPUB", 1024)
+            # A dotted stem that is not the format's extension stays legal.
+            self.assertTrue(wdb.add_format(1, "EPUB", "Anon.2023", 1024))
+            # ORIGINAL_<FMT> rows refuse their own .original_<ext> spelling.
+            with self.assertRaises(ValueError):
+                wdb.add_format(1, "ORIGINAL_EPUB", "oldtitle.original_epub", 1)
+            self.assertTrue(wdb.add_format(1, "ORIGINAL_EPUB", "Anon.2023", 1))
+        self.assertEqual(
+            self._sql2("SELECT format, name FROM data WHERE book = 1 ORDER BY format"),
+            [("EPUB", "Anon.2023"), ("ORIGINAL_EPUB", "Anon.2023")],
+        )
+
 
 class TestWriteSideExpansion(_WriteSideFixture, _WriteSideTests, unittest.TestCase):
     """The phase-6 expansion tests, run once against the plain fixture."""

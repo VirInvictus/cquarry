@@ -368,6 +368,24 @@ def _construct_file_name(title: str, author: str, extlen: int) -> str:
     return name
 
 
+def _reject_extension_name(fmt: str, name: str) -> None:
+    """Refuse a format-row ``name`` that carries the format's own extension.
+
+    ``data.name`` is the filename stem: every consumer resolves the format
+    file as ``<name>.<fmt.lower()>`` (``db.get_format_path``, Calibre's own
+    ``format_abspath``), so a name passed whole ("Title.epub") stored a
+    double-extended row and the book then read as missing on disk (issue
+    #9, live case 11305). Legitimate dotted stems ("Anon.2023") pass; only
+    the format's own extension is refused."""
+    if name.lower().endswith("." + fmt.lower()):
+        stem = name[: -len(fmt) - 1]
+        raise ValueError(
+            f"name must be the filename stem, not the filename: {name!r} "
+            f"carries the .{fmt.lower()} extension; pass {stem!r} (the row "
+            f"resolves its file as <name>.{fmt.lower()})"
+        )
+
+
 def _place_stream(src: str, dest: str) -> int:
     """Copy a file into place atomically; returns the bytes on disk.
 
@@ -2944,12 +2962,15 @@ class WritableCalibreDB:
         ``name`` is the filename stem (Calibre's ``data.name``) and ``size``
         the uncompressed byte size; the file itself is the caller's
         responsibility - cquarry never touches files. Raises ValueError if
-        the book already carries that format.
+        the book already carries that format, or if ``name`` carries the
+        format's own extension (the stem is stored verbatim and every
+        consumer resolves the file as ``<name>.<fmt.lower()>``).
         """
         fmt = fmt.strip().upper()
         name = name.strip()
         if not fmt or not name:
             raise ValueError("Format and name must not be empty")
+        _reject_extension_name(fmt, name)
         if size < 0:
             raise ValueError(f"Format size must not be negative, got {size}")
         # ATTACH must precede the transaction (see _ensure_fts_attached).
@@ -3025,12 +3046,14 @@ class WritableCalibreDB:
         truthful. The replacement is queued for FTS re-extraction and a
         pages rescan when the sidecar exists, so Calibre's content index
         and page counts follow the repaired file. Raises ValueError on a
-        negative size or empty fmt/name, exactly like :meth:`add_format`.
+        negative size, an empty fmt/name, or a name carrying the format's
+        extension, exactly like :meth:`add_format`.
         """
         fmt = fmt.strip().upper()
         name = name.strip()
         if not fmt or not name:
             raise ValueError("Format and name must not be empty")
+        _reject_extension_name(fmt, name)
         if size < 0:
             raise ValueError(f"Format size must not be negative, got {size}")
         size = int(size)  # uncompressed_size stores integers, like add_format
