@@ -760,6 +760,51 @@ desynchronize, and the fix is validation, not behavior change:
   Hermitage and Carrel-calibre-web never import `WritableCalibreDB`.
   CalibreQuarry owes the floor bump (its issue #35 precedent).
 
+## The cover.jpg-only fix (2026-11-01, issue #10)
+
+The 2026-11-01 CofD batch (9 PDFs) made it visible: covers rendered by
+`pdftoppm -png` and passed to `set_cover` landed as `cover.png` files with
+`has_cover=1`, so every programmatic check passed, yet Calibre's GUI showed
+nothing. Upstream reads ONLY `COVER_FILE_NAME` = `'cover.jpg'`
+(`db/constants.py`; zero `cover.png` references in the backend), so a
+`cover.png` is invisible in the GUI, device pushes, and every cover query.
+Both cquarry halves diverged: the write side (PNG source to `cover.png`)
+and the read side's `cover.png` fallback, which is what masked it. The
+ground truth came straight from the calibre clone before anything was
+written:
+
+- **Write side always `cover.jpg` (1.28.3).** `set_cover` and
+  `add_book`'s cover seed (plus the dry-run plan's `cover` field) name the
+  file `cover.jpg` unconditionally; sniff-or-raise stays as validation and
+  the bytes land verbatim, PNG included -- upstream's own
+  `no_processing=True` shape. Upstream's default path re-encodes PNG to
+  JPEG via PIL (`save_cover_data_to`, quality 90); no stdlib JPEG encoder
+  exists, so the verbatim bytes are the recorded deviation (spec §5.18),
+  and every upstream reader content-sniffs, so display is unaffected. A
+  stale `cover.png` is swept on every write (legacy rows heal on their
+  next `set_cover`).
+- **Read side `cover.jpg` only (1.28.3).** `get_cover_path` /
+  `get_cover_bytes` / `get_cover_last_modified` drop the `cover.png`
+  fallback: legacy png-only books read as coverless (the GUI's answer) and
+  surface in `find_missing_cover_files`; one `set_cover` call heals a
+  book. `remove_cover` still sweeps both names; `check_library_disk`
+  keeps `cover.png` as a tolerated normal (legacy dirs; nothing writes
+  one anymore); `move_book_from_trash` still catalogs a cover over either
+  file's presence (the audit predicates then tell the truth about
+  visibility).
+- **Suite 708 -> 710** (the png-naming pins rewritten to the new
+  contract, a legacy-stale-png sweep case and a copy-verb
+  png-only-source case added, the read-side fallback pins flipped to
+  None).
+- **Downstream sweep (the four consumer repos):** Carrel-calibre-web has
+  one test pinning the png fallback
+  (`test_cover_route_serves_png_primary_covers`) that needs the same
+  update; CalibreQuarry (the heaviest PNG writer: the cover-source
+  ladder's pdftoppm renders are PNG by construction -- the incident's own
+  path) and Hermitage (placeholder degradation, two stale doc comments)
+  need awareness only; bindery-cli never touches cover APIs. Issues filed
+  in the three trackers.
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
 - [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference
