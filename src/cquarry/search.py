@@ -52,7 +52,7 @@ Deliberate, documented deviations from Calibre (dependency-bound):
     ``ondevice``, ``in_tag_browser``) are not implemented.
   - ``tags:`` uses cquarry's anchored hierarchical match (``Foo`` matches ``Foo``
     and ``Foo.*``) rather than Calibre's raw substring default. This is a
-    long-standing cquarry invariant; see the project's CLAUDE.md.
+    long-standing cquarry invariant; see the project's AGENTS.md.
 """
 
 import re
@@ -1019,6 +1019,25 @@ class SearchEngine:
         if datatype == DT_IDENTIFIERS:
             return self._match_identifiers(original, query, candidates)
         if datatype == DT_BOOL:
+            if location == "cover":
+                # Upstream's cover branch (DS:273-292): the bool flag is
+                # special-cased for exactly true/false; every other value
+                # routes into the NUMERIC machinery (cover has datatype
+                # 'int' in upstream's field metadata), so `cover:1` works
+                # and `cover:yes` raises. cquarry 1.18-1.25 ran cover
+                # through the full boolean vocabulary instead.
+                ql = query.lower().strip()
+                if ql == "true":
+                    return {
+                        b for b in candidates if bool(self.provider.field(b, "cover"))
+                    }
+                if ql == "false":
+                    return {
+                        b
+                        for b in candidates
+                        if not bool(self.provider.field(b, "cover"))
+                    }
+                return self._match_numeric(location, DT_INT, query, candidates)
             return self._match_bool(location, query, candidates)
         if datatype in (DT_RATING, DT_INT, DT_FLOAT):
             return self._match_numeric(location, datatype, query, candidates)
@@ -1169,21 +1188,37 @@ class SearchEngine:
             for loc, dt in self._custom.items()
             if dt in (DT_TEXT, DT_TEXT_MULTI, DT_HIER)
         ]
-        # The bare true/false presence branch (upstream DS:849-855): with
+        # The bare true/false presence branch (upstream DS:849-866): with
         # contains semantics, exactly these words test field PRESENCE across
         # the sweep instead of matching text. The sweep's identifiers store
-        # and cover flag live only here -- a bare term never text-matches
-        # identifier keys or values (DS:808-818), and a non-empty identifier
-        # dict or a set cover flag counts as present.
+        # and cover flag live only here -- a non-empty identifier dict or a
+        # set cover flag counts as present. (The old comment here claimed
+        # upstream never text-matches identifier keys in the sweep: wrong --
+        # the 1.26 audit traced upstream's chain and its matcher iterates
+        # the identifiers dict, i.e. the keys. The text loop below now does
+        # the same; only the VALUES stay unswept.)
         ql = q.lower()
         if kind == CONTAINS and ql in ("true", "false"):
-            probe = fields + ["identifiers", "cover"]
-            found = {
-                b
-                for b in candidates
-                if any(_present(self.provider.field(b, loc)) for loc in probe)
-            }
-            return found if ql == "true" else (candidates - found)
+            # Upstream's sequential loop (DS:848-866): per swept location,
+            # the still-standing candidates are probed and the pool shrinks
+            # by everything matched so far. `true` accumulates the present
+            # (any-field-present, as 1.18-1.25 answered); `false`
+            # accumulates the still-standing ABSENT -- i.e. books missing
+            # AT LEAST ONE swept field, which is nearly every book. The
+            # 1.18-1.25 `false` answer (missing every swept field, i.e.
+            # almost nothing) was an over-simplification of this loop; the
+            # 1.26 audit corrected it (single-field `X:false` already
+            # agreed and is unchanged).
+            matches: set[int] = set()
+            current = set(candidates)
+            for loc in fields + ["identifiers", "cover"]:
+                current -= matches
+                present = {b for b in current if _present(self.provider.field(b, loc))}
+                if ql == "true":
+                    matches |= present
+                else:
+                    matches |= current - present
+            return matches
         # Bare terms reach numeric fields as exact-equality probes (upstream
         # parity); languages are canonicalized in the sweep like any other
         # path.
@@ -1207,6 +1242,14 @@ class SearchEngine:
                     out.add(b)
                     break
             else:
+                # The loop completed unmatched: identifier KEYS join the
+                # text sweep (upstream: the identifiers dict iterates as
+                # its keys -- DS:73-75 over fields.py:637-642); values
+                # stay unswept. Then the numeric exact-equality probes.
+                ids = self.provider.field(b, "identifiers") or {}
+                if any(_match_text(q, [k], kind) for k in ids):
+                    out.add(b)
+                    continue
                 if n is not None:
                     for loc in self._ALL_NUMERIC_FIELDS:
                         val = self.provider.field(b, loc)

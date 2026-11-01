@@ -233,21 +233,27 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   stored tab position first, unknown names alphabetical). Size XS. **Shipped 1.25**
   as `CalibreDB.ordered_virtual_library_names()`; per the waiver both consumers
   still carry their private copies, to retire in a future consumer wave.
+  **Retired 2026-10-02**: the consumer wave shipped (Carrel 0.6.43,
+  Hermitage 1.8.6) and both private copies are gone.
 - [x] **Unpiped-author display helper**: retires the nine `replace("|", ",")` copies
   across Carrel-calibre-web and Hermitage. Size XS. **Shipped 1.25** as
   `helpers.unpipe_author` (render-identical: a bare comma, so switching call sites
   is not a visual change); per the waiver the copies stay until a consumer wave.
+  **Retired 2026-10-02** in the consumer wave (Carrel 0.6.43: seven code sites,
+  thirteen template lines through a Jinja filter; Hermitage 1.8.6).
 - [x] **Tag-membership id-set rollup**: Carrel `cps/categories.py:29-52` builds
   `tag_path -> frozenset(book_ids)` privately because `tag_rollup` returns counts only.
   Size S. **Shipped 1.25** as `CalibreDB.tag_rollup_ids(ids=None)`; the counts-only
   helper stays for count consumers, and Carrel's private copy retires in a consumer
-  wave per the waiver.
+  wave per the waiver. **Retired 2026-10-02** (Carrel 0.6.43 adopts it).
 - [x] **Identifier-link helper, Open Library canonical** (Brandon's 2026-09-29 call):
   ISBN links resolve to `openlibrary.org/isbn/`; Carrel's WorldCat mapping
   (`quarry_grid.py:581`) switches; Hermitage's mapping is already the canonical shape
   (`codex.py:124-138`). Size XS. **Shipped 1.25** as `helpers.IDENTIFIER_LINKS` +
   `identifier_link()` (Hermitage's table verbatim, unknown types None); Carrel's
-  WorldCat switch is its consumer wave's business.
+  WorldCat switch is its consumer wave's business. **Switched 2026-10-02** in the
+  consumer wave (Carrel 0.6.43 adopts the canonical table and drops WorldCat;
+  Hermitage 1.8.6 retires its now-redundant private copy).
 
 ### Phase 17: Write-side extras
 
@@ -321,22 +327,495 @@ every item: a cquarry ship is not done until the named consumers adopt or waive.
   Environments -> pypi -> Deployment branches and tags); the REST API creates
   branch-type policies only, and any branch policy rejects tag deployments outright
   (the v1.22.0 erratum). Apply if and when GitHub ships REST/UI parity.
-- [ ] **Hermitage's Flatpak side** (that repo's gate, recorded here for the trigger map):
-  the pip-floor policy decision (`requires-python >=3.14` vs the 3.13-capable compat
-  branch) and the forward-only tag the manifest's `hermitage` module pins. cquarry's
-  half is verified end to end. This is the program's first Hermitage item.
+- [x] **Hermitage's Flatpak side** (that repo's gate, recorded here for the trigger map):
+  the pip-floor policy decision and the forward-only tag the manifest's `hermitage`
+  module pins. **Decided and landed 2026-10-02** (Brandon): the install floor drops
+  to 3.13+ and the manifest repins cquarry to `v1.25.0+py313.1` -- the compat-py313
+  branch synced forward through the 1.25 line (90-commit merge; bare except-groups
+  re-parenthesized; one genuine fix: a TYPE_CHECKING annotation 3.13 evaluates
+  eagerly, quoted; the 3.13.15 suite green, 653 tests; the publish trigger stays
+  defused). Hermitage 1.8.6 shipped with the decision.
 - [x] **Dependabot's two open major-bump PRs** (actions/checkout 4 -> 7,
   actions/setup-python 5 -> 7): resolved 2026-09-30, both merged and CI green
   (#3 setup-python 5.6.0 -> 7.0.0, #4 checkout 4.4.0 -> 7.0.1).
 
+## The v1.25.0 parity audit (2026-10-02, four-agent review + claim verification)
+
+Four review agents (read surface, write path, search/categories, schema/drift)
+against the reference clone at v9.15.0+128 master commits, then two bug-hunt
+agents and an independent claim-verification pass (8/8 top claims confirmed,
+zero refuted). Findings below are the durable record; dispositions are boxes
+because each needs either a fix lane or a recorded decision.
+
+### Confirmed bugs (shipped code) -- ALL FIXED in 1.26.0
+
+Every box below shipped in the 1.26.0 fix wave (2026-10-02, same day as the
+audit): the book_storage shape + its missing read half
+(`get_book_storage`), the remove_book stranding cleanup, the
+get_categories rule + identifiers category + expression escaping, the
+compat-branch erratum commit, the bare-term identifier-key sweep, the
+custom-series index writer (`set_custom_series_index` + the 1.0 seed),
+the all:false loop, cover's numeric vocabulary, the creation-time author
+flip + comma->pipe, remove_format's needs_scan, always-JSON plugin data,
+the conversion-options frame (with the copy path unwrapping framed
+sources), and the honest sort-writer no-op + update_books=False. Recorded
+as spec §5 entries 14-17 rather than changed (2026-10-02): the enum
+count-operator gap, negative `Ndaysago`, `dayago` singular, `loc:="X"`'s
+contains-vs-exact degradation, the translated date vocabulary, and the
+search-behavior prefs (each is dependency-bound or GUI-state-bound; §5
+carries them). The audit's seventh search item, the unregistered-`@name:`
+all: sweep, was RETRACTED against the upstream reference clone
+(db/search.py:601-602, :719-721, get_user_category_matches:907-929):
+upstream returns the empty set for an unregistered `@name:`, same as
+cquarry -- no divergence to record, and CLAUDE.md's match-nothing claim
+was right all along. Also recorded, not adopted: upstream's
+localized language node names, ICU sort keys, avg_rating's 0-vs-None
+default, and the popularity/first-letter sort parameters (presentational
+or ICU-bound).
+
+- [x] **`set_book_storage` writes the wrong column shape** (round-trip corrupt;
+  claim-verified): cquarry stores `json.dumps({"timestamp", "data"})` in the
+  `data` column where upstream stores ONLY `json.dumps(entry['data'])` (the
+  timestamp is its own REAL column), and upstream's reader validates every data
+  key/value as a str -- every cquarry-written row raises InvalidBookStorage and
+  is dropped with a stderr print. The shipped test asserts the wrong shape; the
+  spec §3.6 and API.md text describing "upstream's JSON entry shape" is wrong
+  about upstream. Also missing vs upstream: the newer-timestamp-wins guard, the
+  1 MiB UTF-16 cap, str-only validation. The `book_storage` READ half never
+  shipped at all (roadmap Phase 17's "reads exist for all three tables" was
+  false for it).
+- [x] **`remove_book` strands `books_pages_link` (and `book_storage`) rows**
+  (claim-verified): cquarry's write connection never sets `PRAGMA
+  foreign_keys=ON`; upstream relies on those two tables' `ON DELETE CASCADE`
+  (its `books_delete_trg` does not cover them), so cquarry's manual cleanup
+  misses both. `books_pages_link.book` is the table's PRIMARY KEY with a
+  create-trigger inserting a row per books INSERT, so a later
+  `move_book_from_trash` (re-inserting the original id) aborts with
+  IntegrityError: the remove-to-trash-to-restore round trip is broken on any
+  library with page rows.
+- [x] **`get_categories` emits engine-unparseable expressions** for bool custom
+  columns (`#x:="1"` -> the boolean matcher raises; it lowercases the `=`
+  prefix), datetime custom columns (the ISO time component breaks the date
+  parser's int() call), and any value containing a double quote (never
+  escaped). Violates the node/search-expression agreement guarantee; the
+  sweep test's fixture only has enum+int columns.
+- [x] **The compat branch's tagged record needs an erratum** (v1.25.0+py313.1):
+  its entry says "413 collected ... green" where the actual final 3.13.15 run
+  was 653 collected, green (413 was the pre-fix intermediate that FAILED on
+  test_write import); the branch's own `## v1.18.0+py313.1` entry was dropped
+  from patchnotes.md in the merge (the pushed tag keeps it, but the house
+  convention is entries never leave the file); spec.md §2's body line still
+  says "Python 3.14+ standard library" against the branch's 3.13 floor, and
+  so does the README line and the classifiers.
+
+### Parity divergences (confirmed; fix or record in spec §5)
+
+- [x] **Bare-term sweep never text-matches identifier KEYS; upstream does**
+  (claim-verified): upstream's identifiers field is a searchable text field
+  whose searchable values are dicts, and the matcher iterates the dict (its
+  keys) -- bare `isbn` matches key-holding books upstream. spec §3.2's "the
+  code now matches upstream instead of the claim" is factually wrong about
+  upstream (the 1.18 change replaced a true claim with a false one). Fix the
+  sweep, then rewrite the sentence.
+- [x] **Custom series columns have no index writer**: upstream writes `extra`
+  (default 1.0) on series-column assignment and ships a `custom_series_index`
+  setter; cquarry's `_write_pattern_a` inserts (book, value) only, so its own
+  writes leave `#label_index` NULL and permanently unset. **NEW DECISION NEEDED** (the
+  survey never surfaced it).
+- [x] **`all:false` computes missing-ALL-fields; upstream computes
+  missing-AT-LEAST-ONE** (claim-verified; single-field `false` agrees). Also
+  upstream's sweep probes datetime/bool customs in the presence branch and
+  sweeps numeric customs in the numeric probe; cquarry probes four builtin
+  numerics only.
+- [x] **`cover:` is numeric upstream** (int 0/1; `cover:yes` RAISES) vs bool
+  in cquarry (`cover:1` raises); spec §5.9's "full yes/no vocabulary" claim
+  overstates for cover specifically.
+- [x] **New-author sort at row creation** (claim-verified): upstream applies
+  `author_to_author_sort` at creation on writer paths; spec §3.6's "runs on
+  GUI metadata edits, not row creation" is factually wrong, and cquarry's
+  unflipped default is a real divergence. Related, same code path: upstream
+  stores author names containing commas with the comma as `|`; cquarry stores
+  verbatim (the render-side unpipe convention implies the storage one).
+- [x] **`remove_format` never sets `needs_scan`** where upstream's
+  remove_formats queues a pages rescan.
+- [x] **`set_plugin_data` stores plain strings unquoted** where upstream
+  json.dumps everything (upstream's reader json.loads -- unquoted strings
+  fail to the default, row invisible to Calibre); datetime/bytearray envelope
+  serialization also differs.
+- [x] **`set_conversion_options` omits upstream's 10-byte pickle envelope**
+  (protocol-2 frame; fresh cquarry-written rows are undecodable by Calibre's
+  reader; only copied-from-upstream blobs round-trip). Documented as
+  passthrough, but the envelope is 10 bytes of stdlib struct and the failure
+  mode was understated.
+- [x] **get_categories vs upstream categories.py**, beyond the recorded
+  subset: upstream has an IDENTIFIERS category (one node per identifier key);
+  upstream's is_category rule is `normalized` (int/float/bool/datetime
+  customs are NOT categories -- cquarry over-includes them); languages nodes
+  carry localized names vs cquarry's raw codes; sort keys differ (ICU
+  sort_key with hierarchy handling vs plain .lower(); the
+  categories_using_hierarchy pref is unread); avg_rating defaults 0 vs None.
+- [x] **copy_book_from_library**: maps series index 0.0 to 1.0 (falsy-or),
+  and its author-sort postprocess recomputes every destination book of the
+  author where upstream passes update_books=False (existing books rewritten
+  + OPF-queued).
+- [x] **`set_author_sort_name`'s documented honest no-op does not exist** (an
+  equal sort still touches and queues every book of the author; the test
+  enshrines the opposite of the docstring).
+
+### Gaps and improvements (unowned; each needs a lane or a decline)
+
+- Snapshot-retry hardening (the logged candidate, now claim-verified with a
+  correction: the snapshot path does not surface errors -- it SILENTLY
+  degrades to the tear-risk raw copy; `backup_to` propagates. The two paths
+  need different fixes).
+- `refresh_format_sizes`, `move_library_to` (pure shutil; the Declined list
+  covers clone/restore/export but not move), bulk `needs_scan` verbs,
+  `delete_custom_book_data` whole-name erase, `rename_items`/
+  `remove_items` restrict_to_book_ids, `update_path`, `set_uuid`,
+  `newly_added_book_ids`, `last_modified` mtime read, `tags_older_than`
+  (companion of the unowned news lane), per-field sort direction in
+  list_books, `author_sort_from_authors` as a public read, `has_format`,
+  custom-column VALUE-id resolution (G8/G9 family).
+- `reindex_annotations` + `vacuum(rebuild_annotations_fts=True)` are
+  PORTABLE: the annotations FTS tables use standard unicode61/porter
+  tokenizers, not the custom one -- the recorded P-boundary argument does
+  not apply to them (corrects an assumption, does not reverse a decline).
+- add_book upstream side effects not reproduced or documented:
+  `new_book_tags` pref application and custom-column `default_value` fills.
+- spec §5 additions from the search audit: RECORDED 2026-10-02 as spec
+  §5 entries 14-17 -- enum-multi count operator unavailable, negative
+  `Ndaysago` accepted upstream (and `dayago` singular only in cquarry),
+  `loc:="X"` degrades to CONTAINS upstream (drops the =) vs exact in
+  cquarry (§5.10's "mis-lexes" understated a result-set difference),
+  translated date vocabulary, the search-behavior prefs
+  (case_sensitive, use_primary_find_in_search, limit_search_columns)
+  outside §5.4's GUI-state list. The seventh (unregistered `@name:`
+  sweeping the literal as an all: text search) was retracted the same
+  day: upstream's reference clone matches nothing, same as cquarry.
+
+### Confirmed parity (the audits' positive findings)
+
+~20 read behaviors verified exactly matching (the series-number preference
+algorithm branch-for-branch, last-read-position filters, the inverse
+user-category map shape, format_metadata, trash family, identifier
+cleaning line-for-line); series-reset-to-1.0, the FTS queue half, and
+metadata_dirtied hygiene verified across every metadata setter; the
+exact-match component semantics, candidate-set boolean evaluation, and
+super-quote machinery verified implementation-vs-implementation; the
+schema facts (link-table asymmetry, the \n\x1f\n annotation join,
+identifiers UNIQUE(book,type)) re-verified against the DDL; the trigger/UDF
+fidelity question closed with proof (no unregistered SQL function is
+reachable from any cquarry write; filtered views and meta never selected).
+Upstream drift since v9.15.0: exactly one schema change (book_storage,
+schema v27->v28 -- already ported, with the shape bug above) and zero
+grammar/date/GPM/FTS/annotations/backup changes; everything else is
+in-memory perf the read-only port does not need.
+
+## The Calibre 9.16 watch audit (2026-10-09, parity-watch automation)
+
+The Friday parity-watch automation tripped its schema-search tier on
+v9.16.0 (tagged 2026-10-09; seven parity-surface files moved, the most
+since 9.12). Full read-only audit against cquarry v1.26.1 the same day;
+suite green before (672 tests) and after (677 plus the five new
+regression tests; corrected 2026-10-11 -- the tree at v1.26.2 carries
+677, the original "674 plus two" undercounted the wave).
+
+- **Schema v27 (`book_storage`) ratified.** Upstream shipped the table
+  cquarry mirrored from master in 1.25: same DDL, same write semantics
+  (bare str->str map, `ensure_ascii=False`, newest-timestamp-wins,
+  INSERT OR REPLACE, format strip+upper), cascade cleanup covered by
+  `remove_book`. The support gate is `user_version > 27`; fresh
+  libraries are born at 28 and the upgrade driver bumps N->N+1 per
+  method, so upgraded libraries land there too (no upstream off-by-one).
+  cquarry's `_require_table` checks the table itself and raises on
+  pre-v27 schemas. The stale gap row for the read half (shipped in
+  af41e52, 1.26.0) is removed from the gaps list above.
+- **ONE divergence family, fixed same day (1.26.2):** upstream's
+  `single_text` adapter now whitespace-collapses single-valued text,
+  series, AND enumeration custom column writes (`' '.join(x.split())`
+  over the stripped string; whitespace-only clears; enums are adapted
+  before validation, so a double-spaced spelling of a listed value
+  normalizes where cquarry raised), and its `multiple_text` adapter has
+  always collapsed each item of multi-valued columns; cquarry stripped
+  ends only and stored the interior verbatim. Mirrored in
+  `_write_pattern_a` (all four branches) and `add_custom_column_values`,
+  with regression tests. Comments deliberately moved to the verbatim
+  `long_text` adapter upstream (its behavior is unchanged: end-strip,
+  empty-to-None).
+- **Search: no action.** The `_match` ASCII fast path (upstream commit
+  412efe1f56) is locale-escaped and falls back to the exact ICU calls
+  the old code made; observable match semantics are unchanged, so
+  SearchEngine parity is unaffected.
+- **Tag browser: no action.** The 327-line categories.py work is a new
+  CategoriesCache (copy-on-read, incremental refresh, quiet rebuilds
+  under a CategoriesInvalidatingLock); per-field content computation is
+  untouched, so get_categories' output contract holds.
+- **Read paths: no action.** The books-table single scan, the
+  data-table max-size rework, and the series sort-key short-circuit are
+  internal mechanics; SizeTable still aggregates MAX (cquarry's SUM
+  deviation is untouched and still documented).
+- **Snapshot-retry candidate reference updated** (the hardening entry
+  below now points at 9.16's 60-second busy-time budget +
+  `can_use_sqlite_in` probe + /tmp fallback, not the 9.15 ten-attempt
+  loop).
+- Consumers: no caller in CalibreQuarry, bindery-cli, Hermitage, or
+  Carrel-calibre-web writes single-valued text/series custom columns
+  through cquarry, so nothing downstream is owed by the 1.26.2 change.
+
+## The set_authors piped-collision fix (2026-10-11, issue #5)
+
+Live failure during the big-wave library phase 3: `set_authors` with a
+comma-bearing display name (`John William Strutt, Baron Rayleigh`)
+missed the lookup against the raw spelling, and the create path's piped
+INSERT (`name.replace(",", "|")`) then collided with the existing
+pipe-import artifact row `John William Strutt| Baron Rayleigh` --
+UNIQUE(authors.name). The batch machinery rolled the 143-book pass back
+cleanly, so no data was hurt; the crash fires exactly when the comma
+form is the fix for an existing piped form, the author-byline-repair
+case the setter exists for.
+
+Upstream never hits this because its lookup keys author rows through
+the DISPLAY form: `AuthorsTable` unserializes stored pipes back to
+commas when it loads the id map (tables.py), so a comma-name lookup
+already reuses piped rows and the piped INSERT only fires on a true
+miss. cquarry resolves with direct SQL against stored spellings, so the
+fix tries both: raw spelling first (`rename_entity`'s verbatim comma
+rows win), then the piped form, and only a double miss reaches the
+INSERT (`_author_row_for_name`, shared with `_author_sort_keys` so the
+add_book dry-run plan's `new`/`sort` predictions agree with the real
+write). Reuse keeps the row's hand-tuned sort, exactly like raw-name
+reuse always has. Suite green before (677 tests) and after (683 plus
+six new regression tests: set_authors reuse with verbatim spelling and
+hand-tuned sort kept, NOCASE reuse, comma-row precedence with the
+orphaned piped variant pruned, add_book over a piped row, and the
+dry-run plan reporting the piped row as existing).
+
+Follow-up wave (the three adjacent surfaces the fix's code-review
+verified were left as deliberate non-goals for 1.26.3; Brandon chose
+"all three as one wave" by AskUserQuestion the same day, shipped as
+the v1.27.0 lanes):
+
+- [x] **Display-form resolution across the author write surface
+  (v1.27.0, lane 1).** `set_author_sort_name`, `rename_entity` (old
+  name and merge detection), `set_link_map(kind="authors")`, and
+  `remove_entity_everywhere` resolve through `_resolve_author_id`:
+  exact raw spelling, NOCASE raw (lowest id), then the piped display
+  form NOCASE -- the 1.19 exact-first contract preserved with the
+  display-form stage appended, matching upstream's display-form-keyed
+  lookups. A comma new-name in a rename now MERGES into an existing
+  piped row, the survivor keeping its stored name (upstream's replace
+  path; verified in the reference clone, tables.py rename_item).
+- [x] **Display-form layout (v1.27.0, lane 2).** `_first_author_name`
+  flips the legacy pipe to the comma before any path builder, so
+  directories and format stems read `Leckie, Ann/...` for piped-stored
+  authors exactly like upstream (whose path inputs are unserialized
+  id-map entries). Pre-1.27 underscore directories converge on each
+  book's next write; no bulk migration (Calibre itself lays out display
+  forms, so this is convergence toward the canonical shape).
+- [x] **Reverse resolution direction (v1.27.0, lane 3).**
+  `set_authors`/`add_book` display-normalize incoming author names
+  first (pipes become commas, upstream's authors-only write adapter,
+  db/write.py get_adapter), so a pipe-bearing input resolves and stores
+  exactly like its comma form instead of duplicating rows. The other
+  name-taking verbs deliberately do NOT normalize: their raw-first
+  resolution is what lets a caller target a piped row by its stored
+  spelling when both spellings exist.
+
+## The entity case-change wave (2026-10-11, issue #6)
+
+Third live occurrence of the same trap in Brandon's library (ABRAMS/Abrams
+2026-10-04, Daw Books/DAW Books and ROC/Roc 2026-10-11): a case-variant
+target spelling resolved NOCASE to the existing row and the setter
+reported already-so, silently no-oping the consolidation until a
+`rename_entity` sweep caught it. Filed as issue #6 with two suggested
+shapes; the fix is the parity one, and it turned out the spec had been
+defending a misreading.
+
+- [x] **The spec premise corrected.** §5.12 (2026-09-12) claimed upstream's
+  write default was `allow_case_change=False`, citing `get_db_id`. The
+  flag actually flows from `many_one`/`many_many`, whose callers default
+  it True (`Writer.set_books` db/write.py:558, `set_field` cache.py:1970
+  -- the path the GUI's metadata edits ride); only the retired legacy
+  `db.py` API wrapped False. `change_case` rewrites the row name and
+  dirties every linked book. Same error class as the two sentences the
+  v1.25.0 audit rewrote.
+- [x] **Case-change parity across the name-taking setters (v1.28.0).**
+  `set_publisher`, `set_series`, `set_authors` (hence `add_book` and the
+  trash restore, which funnel through the setters), and `add_tag`
+  re-case a NOCASE hit that differs only by case to the requested
+  spelling, touch + queue every book linked to the row, and report True.
+  Authors: display-form comparison and storage, the row's sort
+  deliberately NOT rewritten (upstream's `change_case` writes only the
+  name column; its asort_map recompute is session memory that reverts
+  on reopen, so hand-tuned passthrough sorts survive and
+  `set_author_sort_name` stays the re-keying verb), each linked book's
+  `author_sort` updated only when it matched modulo case (upstream's
+  strcmp rule), paths re-laid through the deferred machinery. Series:
+  in-place rename, indexes untouched.
+- [x] **The tag duplicate-row divergence fixed in the same pass.**
+  `add_tag` resolved EXACTLY and INSERTed a second row for a
+  case-variant spelling -- the only cquarry path that could create
+  case-duplicate rows (which upstream's `fix_case_duplicates` collapses
+  on its next write; cquarry now never creates them and deliberately
+  does not heal pre-existing ones -- `rename_entity`'s merge is the
+  tool). `remove_tag` gained the NOCASE fallback so a case-spelled
+  removal cannot miss. `add_custom_column_values` dedupes by row id now,
+  so a case-variant append re-cases instead of colliding with
+  UNIQUE(book, value).
+- [x] **Custom-column text family included; exclusions named.** Pattern-A
+  text/series/multi-text value rows re-case like the builtin entities
+  (same upstream writer); enums are excluded because upstream's enum
+  writer hardcodes `allow_case_change=False`, languages because upstream
+  keys them exactly (odd-case rows reuse as-is), ratings because they
+  are numeric. Multi-valued items dedupe case-insensitively keeping the
+  first spelling (upstream's `uniq(vals, kmap)`), so `["ya", "YA"]`
+  stores one row instead of fighting over the re-case.
+- [x] **rename_entity / remove_entity_everywhere untouched.** Their
+  exact-spelling-first resolution is the ratified 1.19 contract and they
+  are the rename/removal verbs, not state setters; the issue's own
+  workaround keeps working verbatim.
+
+## The Calibre 9.17 watch audit (2026-10-23, parity-watch automation)
+
+The watch's second schema-search trip (v9.17.0, tagged 2026-10-23; the
+verdict file was `notes/connect.py`, which is out of cquarry's scope by
+contract). The skim's commit list was what mattered: upstream spent the
+release fixing a regression in the exact adapter 1.26.2 mirrored. Full
+read-only audit against this tree (then v1.28.0); suite 703 -> 707 with
+four new regression tests; fixes shipped same day as v1.28.1.
+
+- **The NBSP regression, mirrored and fixed (1.28.1).** 9.16's
+  `' '.join(x.split())` collapse -- enshrined by 1.26.2 -- silently turned
+  the three non-breaking spaces (U+00A0, U+2007, U+202F) into regular
+  spaces (`str.split()` treats them as whitespace); users hit it in text
+  and comments columns and upstream reverted it in 9.17
+  (`75dffc72e7`, `948bd17197`) with `normalize_whitespace`, applied to
+  `single_text` AND per-item `multiple_text`. cquarry mirrors it as
+  `_normalize_ws` (strip ends, collapse breaking runs, preserve the three
+  code points) across all four `_write_pattern_a` branches and
+  `add_custom_column_values`. The builtin comments field also now routes
+  through the whitespace-preserving adapter upstream -- cquarry's
+  `set_comments` was always a verbatim upsert, so that half needs nothing.
+- **Extra-file write atomicity, mirrored and fixed (1.28.1).** Upstream's
+  `add_extra_file` used to open the destination directly, truncating an
+  existing file when the source read or write failed part way
+  (`6be01ad3fa`); it now writes through a temp file + atomic replace.
+  cquarry's `add_data_file` had the same shape; it now writes through a
+  `.cquarry-tmp` + fsync + `os.replace` with temp cleanup on failure, and
+  a regression test pins the intact-destination behavior.
+- **Audited, no action:** `247f690889` (upstream's restore_original_format
+  used to leave an empty placeholder where the current format lived before
+  renaming over it -- cquarry reads the ORIGINAL bytes into memory first
+  and places them atomically after the rows commit, so the destroy
+  window never existed here); `d0e97cd8d5` (upstream trash moves are
+  copy_tree with partial-copy data loss on failure -- cquarry's trash move
+  is a same-filesystem `shutil.move`, atomic by construction, and the
+  rows-first ordering means a failed move leaves the files in place);
+  `81bf49a733` (upstream atomic format replacement -- `set_format`'s file
+  swap stays the caller's atomic-replace job by documented contract, and
+  cquarry's own byte placement is already atomic); `7c73d6d2a1` and
+  `508cc1eb49` (in-memory field-cache coherence fixes with no cquarry
+  counterpart); the notes-sidecar work (`b88b83a6c7`, `401f81c01b`,
+  `5c58ba46ce`, `notes/connect.py` itself) and the annotations fix are out
+  of scope by the recorded declines.
+- **Snapshot-retry candidate unchanged** -- 9.17 did not touch the backup
+  path; the 9.16 reference shape stands.
+
+## The set_format extension-name guard (2026-10-29, issue #9)
+
+A live incident on book 11305 (the 2026-10-28 supersede swap): a repair
+session passed the FILENAME ("`<stem>.epub`") to `set_format`'s `name`
+argument, which stores verbatim, so `data.name` carried the extension and
+every consumer that resolves the file as `<name>.<fmt.lower()>` (cquarry's
+`get_format_path`, CalibreQuarry's `reconcile_file_metadata.py`, Carrel's
+download-link path) then built `<stem>.epub.epub` and reported the book
+unreadable while the real file sat fine on disk. Upstream never accepts a
+caller-supplied stem at all (`cache.add_format` reuses the stored name and
+`backend.add_format` derives the filename from title/author), so the
+low-level cquarry surface is the only place the two halves can
+desynchronize, and the fix is validation, not behavior change:
+
+- **Both format-row setters refuse the format's own extension
+  (1.28.2).** `add_format` and `set_format` raise `ValueError` when
+  `name` ends (case-insensitively) with `.<fmt.lower()>`, with the message
+  naming the stem to pass instead. Refusal over auto-strip: the repo's
+  style is loud errors over silent correction (the `set_link_map`
+  precedent), and auto-strip would churn the `True`/`False` return
+  contract. Legitimate dotted stems (`Anon.2023`) pass; only the format's
+  own extension is refused, so `ORIGINAL_<FMT>` rows refuse
+  `.original_<ext>` spellings. Pre-existing corrupted rows surface the
+  same way through the row-derived internal callers
+  (`move_format_from_trash`, save/restore_original_format): the guard
+  fires exactly where the corruption would propagate, which is the
+  incident's own remedy (fix the stem first).
+- **Suite 707 -> 708** (one regression test over both setters, the
+  case-insensitive refusal, the dotted-stem pass, and the
+  `ORIGINAL_<FMT>` suffix shape).
+- **Downstream sweep (six call sites across the four consumer repos):**
+  only CalibreQuarry's free-text `--add-format`/TUI entry can legitimately
+  feed an extension-suffixed name (user error, which the guard is for);
+  the `integrate.py` sites and bindery-cli's `install_format` all pass
+  data-row or `Path.stem` values that the guard passes on healthy
+  libraries, and bindery already catches `ValueError` and fails soft.
+  Hermitage and Carrel-calibre-web never import `WritableCalibreDB`.
+  CalibreQuarry owes the floor bump (its issue #35 precedent).
+
+## The cover.jpg-only fix (2026-11-01, issue #10)
+
+The 2026-11-01 CofD batch (9 PDFs) made it visible: covers rendered by
+`pdftoppm -png` and passed to `set_cover` landed as `cover.png` files with
+`has_cover=1`, so every programmatic check passed, yet Calibre's GUI showed
+nothing. Upstream reads ONLY `COVER_FILE_NAME` = `'cover.jpg'`
+(`db/constants.py`; zero `cover.png` references in the backend), so a
+`cover.png` is invisible in the GUI, device pushes, and every cover query.
+Both cquarry halves diverged: the write side (PNG source to `cover.png`)
+and the read side's `cover.png` fallback, which is what masked it. The
+ground truth came straight from the calibre clone before anything was
+written:
+
+- **Write side always `cover.jpg` (1.28.3).** `set_cover` and
+  `add_book`'s cover seed (plus the dry-run plan's `cover` field) name the
+  file `cover.jpg` unconditionally; sniff-or-raise stays as validation and
+  the bytes land verbatim, PNG included -- upstream's own
+  `no_processing=True` shape. Upstream's default path re-encodes PNG to
+  JPEG via PIL (`save_cover_data_to`, quality 90); no stdlib JPEG encoder
+  exists, so the verbatim bytes are the recorded deviation (spec §5.18),
+  and every upstream reader content-sniffs, so display is unaffected. A
+  stale `cover.png` is swept on every write (legacy rows heal on their
+  next `set_cover`).
+- **Read side `cover.jpg` only (1.28.3).** `get_cover_path` /
+  `get_cover_bytes` / `get_cover_last_modified` drop the `cover.png`
+  fallback: legacy png-only books read as coverless (the GUI's answer) and
+  surface in `find_missing_cover_files`; one `set_cover` call heals a
+  book. `remove_cover` still sweeps both names; `check_library_disk`
+  keeps `cover.png` as a tolerated normal (legacy dirs; nothing writes
+  one anymore); `move_book_from_trash` still catalogs a cover over either
+  file's presence (the audit predicates then tell the truth about
+  visibility).
+- **Suite 708 -> 710** (the png-naming pins rewritten to the new
+  contract, a legacy-stale-png sweep case and a copy-verb
+  png-only-source case added, the read-side fallback pins flipped to
+  None).
+- **Downstream sweep (the four consumer repos):** Carrel-calibre-web has
+  one test pinning the png fallback
+  (`test_cover_route_serves_png_primary_covers`) that needs the same
+  update; CalibreQuarry (the heaviest PNG writer: the cover-source
+  ladder's pdftoppm renders are PNG by construction -- the incident's own
+  path) and Hermitage (placeholder degradation, two stale doc comments)
+  need awareness only; bindery-cli never touches cover APIs. Issues filed
+  in the three trackers.
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
-- [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch). Upstream's
-  `_backup_database` retries transient `SQLITE_IOERR`/`SQLITE_IOERR_SHORT_READ` up to
-  ten times during SQLite backup-API steps; cquarry's `SNAPSHOT_LEASH` snapshot
-  fallback and `backup_to()` use the same API in the same concurrent-write scenario
-  with no retry, so a transient step failure surfaces as an error rather than a retry.
-  Trigger: the snapshot path failing in the field. Size S.
+- [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference
+  shape updated 2026-10-09, 9.16 watch). Upstream's `_backup_database` retries
+  transient `SQLITE_IOERR`/`SQLITE_IOERR_SHORT_READ` during SQLite backup-API steps;
+  cquarry's `SNAPSHOT_LEASH` snapshot fallback and `backup_to()` use the same API in
+  the same concurrent-write scenario with no retry, so a transient step failure
+  surfaces as an error rather than a retry. 9.16 reworked the retry into a 60-second
+  busy-time budget (0.05 s sleeps, reset on progress) plus a `can_use_sqlite_in`
+  filesystem-lock probe and a /tmp fallback; THAT is the shape to mirror, not the
+  9.15 ten-attempt loop. Trigger: the snapshot path failing in the field. Size S.
 - [ ] **`find_orphan_custom_column_links`** (design-time waiver, Phase 9 expansion).
   Schema-probing integrity predicate for link rows pointing at purged columns; needs
   its own fixture work. Trigger: an integrity consumer asks (the bindery OPF audits
@@ -369,15 +848,16 @@ the queue. cquarry's half of every item is phased above.
   (`backup-metadata`, `restore-database`, `clone`, `fts-index`, catalog plugin builds,
   `customize`, the calibre-debug subset, the ebook-device USBMS wrapper) and adopts
   `get_dirtied_formats()` when Phase 14 ships it.
-- **Hermitage**: adopts `get_annotations_decoded()` in `codex.py:_annotation_line`
-  (`codex.py:201-226`; cquarry side shipped 1.23.0); optionally grows
-  `strip_html(keep_paragraphs=True)` (would ride Phase 16 if Codex wants one HTML
-  definition in the family); adopts the ordered-VL-names and unpiped-author helpers in
-  Phase 16; its Flatpak pip-floor decision gates the program's install story.
-- **Carrel-calibre-web**: its roadmap (created 2026-09-29) carries the `preserve_order`
-  retirement via `list_books(sort="ids")` (shipped 1.21.0), the two raw custom-column
-  reads to `load_custom_column()`, the ORM residuals, and the Phase 16 helper
-  adoptions including the Open Library ISBN switch.
+- **Hermitage**: ADOPTED 2026-10-02 in 1.8.6 (get_annotations_decoded,
+  ordered-VL-names, unpipe_author, the canonical identifier table); the optional
+  `strip_html(keep_paragraphs=True)` growth was DECLINED for now (the local
+  `_clean_html` keeps its v1.7.0 render-parity waiver); the pip-floor decision
+  landed with 1.8.6.
+- **Carrel-calibre-web**: the Phase 16 helper adoptions (including the Open Library
+  ISBN switch) are DONE in 0.6.43 (2026-10-02; CI pin moved to v1.25.0). Its roadmap
+  still carries the `preserve_order` retirement via `list_books(sort="ids")`
+  (shipped 1.21.0), the two raw custom-column reads to `load_custom_column()`, and
+  the ORM residuals for its own lanes.
 - **Stats-metrics tripwire** (Carrel spec §12.3): unchanged; a FOURTH library-metrics
   consumer triggers the headless metrics-layer promotion. Three lanes exist today
   (CalibreQuarry `--analytics`, Hermitage Insights, Carrel `stats.py`).

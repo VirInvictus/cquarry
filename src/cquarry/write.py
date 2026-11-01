@@ -47,7 +47,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Self
 from xml.etree import ElementTree
 
-from cquarry.helpers import sniff_image_format, title_sort
+from cquarry.helpers import author_to_author_sort, sniff_image_format, title_sort
 from cquarry.search import BOOL_FALSE_WORDS, BOOL_TRUE_WORDS
 
 if TYPE_CHECKING:
@@ -296,6 +296,22 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 _FILENAME_ILLEGAL = frozenset('\\|?*<>":+/') | {chr(i) for i in range(32)}
 
 
+def _unframe_conversion_blob(blob: bytes) -> bytes:
+    """Strip upstream's protocol-2 BINSTRING frame from a stored
+    conversion-options blob (b'\x80\x02T' + 4-byte LE length + payload +
+    b'.'), returning the inner payload. A blob that does not carry a
+    self-consistent frame returns verbatim -- pre-1.26 cquarry rows and
+    hand-written payloads are stored raw."""
+    if (
+        len(blob) > 8
+        and blob[:3] == b"\x80\x02T"
+        and blob[-1:] == b"."
+        and int.from_bytes(blob[3:7], "little") == len(blob) - 8
+    ):
+        return blob[7:-1]
+    return blob
+
+
 def _ascii_filename(text: str, substitute: str = "_") -> str:
     """Sanitize one path component the way upstream's ``ascii_filename`` +
     ``sanitize_file_name`` chain does, with the plain ASCII fold."""
@@ -352,6 +368,24 @@ def _construct_file_name(title: str, author: str, extlen: int) -> str:
     return name
 
 
+def _reject_extension_name(fmt: str, name: str) -> None:
+    """Refuse a format-row ``name`` that carries the format's own extension.
+
+    ``data.name`` is the filename stem: every consumer resolves the format
+    file as ``<name>.<fmt.lower()>`` (``db.get_format_path``, Calibre's own
+    ``format_abspath``), so a name passed whole ("Title.epub") stored a
+    double-extended row and the book then read as missing on disk (issue
+    #9, live case 11305). Legitimate dotted stems ("Anon.2023") pass; only
+    the format's own extension is refused."""
+    if name.lower().endswith("." + fmt.lower()):
+        stem = name[: -len(fmt) - 1]
+        raise ValueError(
+            f"name must be the filename stem, not the filename: {name!r} "
+            f"carries the .{fmt.lower()} extension; pass {stem!r} (the row "
+            f"resolves its file as <name>.{fmt.lower()})"
+        )
+
+
 def _place_stream(src: str, dest: str) -> int:
     """Copy a file into place atomically; returns the bytes on disk.
 
@@ -385,6 +419,25 @@ def _place_bytes(data: bytes, dest: str) -> None:
         os.fsync(dfd)
     finally:
         os.close(dfd)
+
+
+# Breaking whitespace is everything str.split() treats as whitespace EXCEPT
+# the three non-breaking spaces (NO-BREAK SPACE, FIGURE SPACE, NARROW
+# NO-BREAK SPACE): 9.16's plain ' '.join(x.split()) collapse silently turned
+# them into regular spaces, which upstream reverted as a regression in 9.17.
+_BREAKING_WHITESPACE_PAT = re.compile(r"[^\S\xa0\u2007\u202f]+")
+
+
+def _normalize_ws(value: str) -> str:
+    """The composite every upstream text adapter applies: strip the ends,
+    then collapse runs of breaking whitespace into one space, preserving the
+    three non-breaking spaces (upstream 9.17 normalize_whitespace; every
+    caller -- long_text-then-single_text, the multiple_text items -- strips
+    the ends first, so the composite is mirrored here)."""
+    x = value.strip()
+    if x.isascii() or not any(c in x for c in ("\xa0", "\u2007", "\u202f")):
+        return " ".join(x.split())
+    return _BREAKING_WHITESPACE_PAT.sub(" ", x).strip(" ")
 
 
 class WritableCalibreDB:
@@ -724,9 +777,14 @@ class WritableCalibreDB:
             raise
 
     def _first_author_name(self, book_id: int) -> str:
-        """The book's first author (link order), '' when authorless -- the
-        same input ``add_book`` uses for the path components. Schemas
-        predating the link tables degrade to '' (the path's Unknown rule)."""
+        """The book's first author (link order) in the DISPLAY form, ''
+        when authorless -- the same input ``add_book`` uses for the path
+        components. Upstream's path builders take display forms (their
+        inputs are unserialized id-map entries, tables.py's authors-only
+        pipe flip), so the stored pipe separator is flipped to the comma
+        here; before 1.27 a piped first author laid out with the pipe
+        mapped to an underscore. Schemas predating the link tables
+        degrade to '' (the path's Unknown rule)."""
         try:
             row = self.conn.execute(
                 "SELECT a.name FROM books_authors_link bal JOIN authors a "
@@ -735,13 +793,23 @@ class WritableCalibreDB:
             ).fetchone()
         except sqlite3.OperationalError:
             return ""  # schema predates the author link tables
-        return row["name"] if row is not None else ""
+        if row is None:
+            return ""
+        # Legacy: authors.name stores commas as pipes; the layout shows
+        # the display form (authors-only flip, exactly upstream's).
+        return row["name"].replace("|", ",")
 
     def add_tag(self, book_id: int, tag: str) -> bool:
-        """Attach a tag to a book. Returns True if a link was created.
+        """Attach a tag to a book. Returns True if stored state changed.
 
-        Follows Calibre's sequence: INSERT OR IGNORE into ``tags``, resolve the
-        id, link via ``books_tags_link``, bump ``last_modified``.
+        Follows Calibre's sequence: find-or-INSERT into ``tags``, link via
+        ``books_tags_link``, bump ``last_modified``. Since 1.28 the tag row
+        resolves NOCASE when the exact spelling is missing, and a
+        case-different hit is re-cased to the requested spelling (upstream
+        ``change_case``) with every linked book touched -- the old shape
+        INSERTed a duplicate case-variant row instead, fragmenting the tag
+        exactly like issue #6's publishers. True therefore also covers a
+        re-case with the link already present.
         """
         tag = tag.strip()
         if not tag:
@@ -750,14 +818,33 @@ class WritableCalibreDB:
         self._begin()
         try:
             self._require_book(book_id)
-            if (
-                cur.execute("SELECT 1 FROM tags WHERE name = ?", (tag,)).fetchone()
-                is None
-            ):
+            row = cur.execute(
+                "SELECT id, name FROM tags WHERE name = ?", (tag,)
+            ).fetchone()
+            recased = False
+            if row is None:
+                row = cur.execute(
+                    "SELECT id, name FROM tags WHERE name = ? COLLATE NOCASE "
+                    "ORDER BY id LIMIT 1",
+                    (tag,),
+                ).fetchone()
+            if row is None:
                 cur.execute("INSERT INTO tags(name) VALUES (?)", (tag,))
-            tag_id = cur.execute(
-                "SELECT id FROM tags WHERE name = ?", (tag,)
-            ).fetchone()["id"]
+                tag_id = cur.execute(
+                    "SELECT id FROM tags WHERE name = ?", (tag,)
+                ).fetchone()["id"]
+            else:
+                tag_id = row["id"]
+                if row["name"] != tag:
+                    self.conn.execute(
+                        "UPDATE tags SET name = ? WHERE id = ?", (tag, tag_id)
+                    )
+                    recased = True
+                    for r in cur.execute(
+                        "SELECT book FROM books_tags_link WHERE tag = ? ORDER BY book",
+                        (tag_id,),
+                    ).fetchall():
+                        self._touch_book(r["book"])
             already = cur.execute(
                 "SELECT 1 FROM books_tags_link WHERE book = ? AND tag = ?",
                 (book_id, tag_id),
@@ -768,10 +855,10 @@ class WritableCalibreDB:
                     "INSERT INTO books_tags_link(book, tag) VALUES (?, ?)",
                     (book_id, tag_id),
                 )
-            if changed:
+            if changed or recased:
                 self._touch_book(book_id)
             self._commit()
-            return changed
+            return changed or recased
         except BaseException:
             self._rollback()
             raise
@@ -780,13 +867,22 @@ class WritableCalibreDB:
         """Detach a tag from a book. Returns True if a link was removed.
 
         Cleans the link table first, then prunes an orphaned tag row — the
-        order required by the fkc_delete_on_tags trigger.
+        order required by the fkc_delete_on_tags trigger. The exact
+        spelling resolves first and the NOCASE lowest-id match is the
+        fallback (1.28), so removing ``"roc"`` reaches a ``ROC`` row
+        instead of failing honestly-but-uselessly against the case.
         """
         tag = tag.strip()
         cur = self.conn.cursor()
         self._begin()
         try:
             row = cur.execute("SELECT id FROM tags WHERE name = ?", (tag,)).fetchone()
+            if row is None:
+                row = cur.execute(
+                    "SELECT id FROM tags WHERE name = ? COLLATE NOCASE "
+                    "ORDER BY id LIMIT 1",
+                    (tag,),
+                ).fetchone()
             if row is None:
                 self._rollback()
                 return False
@@ -954,20 +1050,144 @@ class WritableCalibreDB:
         "languages": False,
     }
 
-    def _resolve_or_create(self, table: str, name_col: str, name: str) -> int:
+    def _author_row_for_name(self, name: str) -> sqlite3.Row | None:
+        """The authors row an incoming display name resolves to, or None.
+
+        The raw spelling wins (rename_entity stores comma forms verbatim);
+        failing that, the piped form the create path stores. Upstream
+        resolves comma-name lookups against display-form keys (AuthorsTable
+        unserializes stored pipes back to commas on load), so its comma
+        inputs already reuse piped rows; direct SQL sees stored spellings,
+        so both forms are tried here to match that for comma inputs
+        (issue #5). Pipe-bearing inputs are handled at the set_authors/
+        add_book boundary instead, which normalizes them to display forms
+        exactly like upstream's authors write adapter (1.27).
+
+        The row carries its stored ``name`` so the caller can detect a
+        case-only hit (the 1.28 change_case re-case); NOCASE hits resolve
+        lowest-id-first so a table holding several case variants (legacy
+        fragmentation this library no longer creates) renames
+        deterministically.
+        """
+        for candidate in dict.fromkeys((name, name.replace(",", "|"))):
+            row = self.conn.execute(
+                "SELECT id, sort, name FROM authors WHERE name = ? COLLATE NOCASE "
+                "ORDER BY id LIMIT 1",
+                (candidate,),
+            ).fetchone()
+            if row is not None:
+                return row
+        return None
+
+    def _resolve_author_id(self, name: str) -> int | None:
+        """The author row id for an incoming name, or None.
+
+        The 1.19 resolution contract (exact spelling first, then that
+        spelling NOCASE, lowest id) with 1.27's display-form stage
+        appended: the piped spelling NOCASE. Upstream keys ALL author
+        lookups by the display form, so the name-taking author verbs must
+        reach a piped row from its comma spelling to match.
+        """
+        row = self.conn.execute(
+            "SELECT id FROM authors WHERE name = ?", (name,)
+        ).fetchone()
+        if row is not None:
+            return row["id"]
+        row = self.conn.execute(
+            "SELECT id FROM authors WHERE name = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+            (name,),
+        ).fetchone()
+        if row is not None:
+            return row["id"]
+        piped = name.replace(",", "|")
+        if piped == name:
+            return None
+        row = self.conn.execute(
+            "SELECT id FROM authors WHERE name = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+            (piped,),
+        ).fetchone()
+        return row["id"] if row is not None else None
+
+    def _resolve_or_create(
+        self, table: str, name_col: str, name: str, *, case_change: bool = True
+    ) -> tuple[int, list[int]]:
         """Find an entity row by (case-insensitive) name, creating it if new.
 
         New rows default ``sort`` to the display value on tables that carry
         the column — Calibre's own starting point — leaving manual sort edits
         untouched on existing rows.
+
+        Since 1.28 a NOCASE hit whose stored spelling differs only by case
+        is re-cased to the requested spelling before reuse (upstream's
+        ``change_case``, db/write.py: the ``allow_case_change=True`` default
+        of the new-API write path), and the books linked to the renamed row
+        are returned so the caller can touch them — every one of them shows
+        the entity under the new spelling now. Author rows are compared and
+        re-cased in the display form (stored pipes flip to commas); the
+        row's ``sort`` is deliberately NOT recomputed, matching upstream's
+        persisted shape (``change_case`` writes only the name column -- the
+        recomputation it shows lives in session memory and reverts on
+        reopen -- so a hand-tuned sort survives a case fix, and
+        :meth:`set_author_sort_name` remains the way to re-key a row).
+        ``case_change=False`` keeps the old reuse-as-is shape for entities
+        whose names are canonical codes (languages), matching upstream's
+        exact-keyed lookup for them.
         """
-        row = self.conn.execute(
-            f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE",
-            (name,),
-        ).fetchone()
+        renamed_books: list[int] = []
+        if table == "authors":
+            row = self._author_row_for_name(name)
+        else:
+            row = self.conn.execute(
+                f"SELECT id, {name_col} AS name FROM {table} "
+                f"WHERE {name_col} = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+                (name,),
+            ).fetchone()
         if row is not None:
-            return row["id"]
-        if self._HAS_SORT.get(table, False):
+            if case_change:
+                stored = row["name"]
+                if table == "authors":
+                    # Compare in the display form (upstream's id_map holds
+                    # unserialized names); the new spelling stores verbatim.
+                    stored_display = stored.replace("|", ",")
+                    differs = stored_display != name and (
+                        stored_display.lower() == name.lower()
+                    )
+                else:
+                    differs = stored != name and stored.lower() == name.lower()
+                if differs:
+                    # Name only: the sort column is untouched, upstream's
+                    # persisted shape (hand-tuned sorts survive; the
+                    # asort_map recompute upstream shows is session memory
+                    # that reverts on reopen).
+                    self.conn.execute(
+                        f"UPDATE {table} SET {name_col} = ? WHERE id = ?",
+                        (name, row["id"]),
+                    )
+                    fk = next(
+                        fk
+                        for _kind, (t, _nc, fk) in self._ENTITY_NAME_TABLES.items()
+                        if t == table
+                    )
+                    renamed_books = [
+                        r["book"]
+                        for r in self.conn.execute(
+                            f"SELECT book FROM books_{table}_link WHERE {fk} = ? "
+                            f"ORDER BY book",
+                            (row["id"],),
+                        )
+                    ]
+            return row["id"], renamed_books
+        if table == "authors":
+            # Upstream's creation path (db/write.py get_db_id): the name
+            # stores with commas as the legacy | separator and the sort is
+            # author_to_author_sort's flip. (1.26; the 1.25-and-earlier
+            # verbatim defaults rested on the wrong claim that upstream's
+            # flip runs only on GUI edits.)
+            cur = self.conn.execute(
+                f"INSERT INTO {table} ({name_col}, sort) VALUES (?, ?)",
+                (name.replace(",", "|"), author_to_author_sort(name)),
+            )
+        elif self._HAS_SORT.get(table, False):
             cur = self.conn.execute(
                 f"INSERT INTO {table} ({name_col}, sort) VALUES (?, ?)",
                 (name, name),
@@ -976,7 +1196,7 @@ class WritableCalibreDB:
             cur = self.conn.execute(
                 f"INSERT INTO {table} ({name_col}) VALUES (?)", (name,)
             )
-        return cur.lastrowid
+        return cur.lastrowid, []
 
     def set_authors(self, book_id: int, names: list[str]) -> bool:
         """Replace the book's author list. Returns True when state changed.
@@ -985,9 +1205,19 @@ class WritableCalibreDB:
         Calibre's starting point), relinks in the given order, recomputes
         ``books.author_sort`` from the authors' sort keys joined with " & "
         (upstream's ``authors_to_sort_string`` behavior) and prunes
-        now-orphaned author rows.
+        now-orphaned author rows. Since 1.27 incoming names are
+        display-normalized first (pipes become commas, upstream's
+        authors-only write adapter), so a piped spelling resolves and
+        stores exactly like its comma form instead of duplicating rows.
+        Since 1.28 a case-different spelling re-cases the shared author
+        row (upstream ``change_case``; the row's own ``sort`` is
+        untouched, so a hand-tuned sort survives the re-case): every book
+        linked to the row is touched and re-laid, its ``author_sort``
+        updated only when it matched the string recomputed from the
+        stored sorts modulo case (upstream's strcmp rule), and the call
+        reports True even when this book's own list did not change.
         """
-        cleaned = [n.strip() for n in names if n and n.strip()]
+        cleaned = [n.strip().replace("|", ",") for n in names if n and n.strip()]
         if not cleaned:
             raise ValueError("Author list must not be empty")
         self._begin()
@@ -995,8 +1225,37 @@ class WritableCalibreDB:
             self._require_book(book_id)
             new_ids: list[int] = []
             sorts: list[str] = []
+            recased_other_books: list[int] = []
+            renamed_any = False
             for name in cleaned:
-                aid = self._resolve_or_create("authors", "name", name)
+                aid, recased = self._resolve_or_create("authors", "name", name)
+                for other in recased:
+                    renamed_any = True
+                    if other == book_id:
+                        continue
+                    recomputed = " & ".join(
+                        r["s"] or r["name"]
+                        for r in self.conn.execute(
+                            "SELECT a.sort AS s, a.name AS name "
+                            "FROM books_authors_link bal JOIN authors a "
+                            "ON a.id = bal.author WHERE bal.book = ? "
+                            "ORDER BY bal.id",
+                            (other,),
+                        )
+                    )
+                    cur_sort = self.conn.execute(
+                        "SELECT author_sort FROM books WHERE id = ?", (other,)
+                    ).fetchone()
+                    if (
+                        cur_sort is not None
+                        and cur_sort["author_sort"] is not None
+                        and cur_sort["author_sort"].lower() == recomputed.lower()
+                    ):
+                        self.conn.execute(
+                            "UPDATE books SET author_sort = ? WHERE id = ?",
+                            (recomputed, other),
+                        )
+                    recased_other_books.append(other)
                 if aid in new_ids:
                     raise ValueError(f"Duplicate author: {name}")
                 new_ids.append(aid)
@@ -1020,6 +1279,7 @@ class WritableCalibreDB:
                 current == new_ids
                 and old_sort_row is not None
                 and old_sort_row["author_sort"] == new_sort
+                and not renamed_any
             ):
                 self._rollback()
                 return False
@@ -1046,6 +1306,18 @@ class WritableCalibreDB:
                 title_row["title"] or "",
                 self._first_author_name(book_id),
             )
+            for other in recased_other_books:
+                # The re-cased row's other books: same touch + re-lay as
+                # this book, riding the same deferred-relayout machinery.
+                self._touch_book(other)
+                other_title = self.conn.execute(
+                    "SELECT title FROM books WHERE id = ?", (other,)
+                ).fetchone()
+                self._relayout_book_path(
+                    other,
+                    other_title["title"] or "",
+                    self._first_author_name(other),
+                )
             self._commit()
             if not self._batch_depth:
                 # Same post-commit flush rule as update_title.
@@ -1074,11 +1346,15 @@ class WritableCalibreDB:
         """Rename an author, series, publisher, or tag everywhere.
 
         The fix-the-misspelled-name verb (upstream ``rename_items``,
-        cache.py:2758-2862). ``old`` resolves case-insensitively; ``new``
+        cache.py:2758-2862). ``old`` resolves case-insensitively (authors
+        also try the piped display form as a final stage, 1.27); ``new``
         is the row's new spelling. When ``new`` already exists as another
-        row (a case-variant or duplicate spelling) the rows MERGE: the old
+        row (a case-variant or duplicate spelling; for authors, also the
+        piped spelling of the comma form, 1.27) the rows MERGE: the old
         row's links move to the survivor, duplicate links are dropped, and
-        the old row is deleted. Every affected book is touched and queued
+        the old row is deleted (the survivor keeps its stored name,
+        exactly upstream's replace path). Every affected book is touched
+        and queued
         for OPF resync. For authors, ``books.author_sort`` is recomputed
         from the surviving authors' sort keys and each affected book's
         on-disk layout re-lays (the directory carries the author name; the
@@ -1098,19 +1374,32 @@ class WritableCalibreDB:
             raise ValueError("Entity names must not be empty")
         affected: list[int] = []
         with self.batch():
-            # Exact spelling wins; the NOCASE fallback (lowest id) only
-            # fires when no exact match exists, so a library with several
-            # case variants resolves deterministically.
-            row = self.conn.execute(
-                f"SELECT id, {name_col} AS name FROM {table} WHERE {name_col} = ?",
-                (old,),
-            ).fetchone()
-            if row is None:
+            if kind == "authors":
+                # Exact spelling wins; the NOCASE fallback (lowest id) only
+                # fires when no exact match exists, so a library with
+                # several case variants resolves deterministically. 1.27
+                # appends the piped display form as a final stage (upstream
+                # keys author lookups by the display form).
+                oid = self._resolve_author_id(old)
+                row = (
+                    None
+                    if oid is None
+                    else self.conn.execute(
+                        f"SELECT id, {name_col} AS name FROM {table} WHERE id = ?",
+                        (oid,),
+                    ).fetchone()
+                )
+            else:
                 row = self.conn.execute(
-                    f"SELECT id, {name_col} AS name FROM {table} "
-                    f"WHERE {name_col} = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+                    f"SELECT id, {name_col} AS name FROM {table} WHERE {name_col} = ?",
                     (old,),
                 ).fetchone()
+                if row is None:
+                    row = self.conn.execute(
+                        f"SELECT id, {name_col} AS name FROM {table} "
+                        f"WHERE {name_col} = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+                        (old,),
+                    ).fetchone()
             if row is None:
                 raise ValueError(f"No {kind} row matching {old!r}")
             if row["name"] == new:
@@ -1120,6 +1409,19 @@ class WritableCalibreDB:
                 f"AND id != ?",
                 (new, row["id"]),
             ).fetchone()
+            if other is None and kind == "authors":
+                # Merge detection by the display form too (1.27, upstream
+                # compares id_map display forms): renaming to a comma
+                # spelling merges into an existing piped row, whose stored
+                # name the survivor keeps -- exactly upstream's replace
+                # path.
+                piped_new = new.replace(",", "|")
+                if piped_new != new:
+                    other = self.conn.execute(
+                        f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
+                        f"AND id != ?",
+                        (piped_new, row["id"]),
+                    ).fetchone()
             affected = [
                 r["book"]
                 for r in self.conn.execute(
@@ -1195,7 +1497,8 @@ class WritableCalibreDB:
     def remove_entity_everywhere(self, kind: str, name: str) -> int:
         """Remove an author, series, publisher, or tag from every book.
 
-        Resolves ``name`` case-insensitively, deletes the entity's links
+        Resolves ``name`` case-insensitively (authors also try the piped
+        display form, 1.27), deletes the entity's links
         (the fkc_delete_on_* order), then the row itself, and touches +
         queues OPF resync for every affected book. For a series the
         affected books' ``series_index`` is reset to 1.0 too, matching
@@ -1212,15 +1515,25 @@ class WritableCalibreDB:
             raise ValueError("Entity name must not be empty")
         affected: list[int] = []
         with self.batch():
-            row = self.conn.execute(
-                f"SELECT id FROM {table} WHERE {name_col} = ?", (name,)
-            ).fetchone()
-            if row is None:
+            if kind == "authors":
+                aid = self._resolve_author_id(name)
+                row = (
+                    None
+                    if aid is None
+                    else self.conn.execute(
+                        f"SELECT id FROM {table} WHERE id = ?", (aid,)
+                    ).fetchone()
+                )
+            else:
                 row = self.conn.execute(
-                    f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
-                    f"ORDER BY id LIMIT 1",
-                    (name,),
+                    f"SELECT id FROM {table} WHERE {name_col} = ?", (name,)
                 ).fetchone()
+                if row is None:
+                    row = self.conn.execute(
+                        f"SELECT id FROM {table} WHERE {name_col} = ? COLLATE NOCASE "
+                        f"ORDER BY id LIMIT 1",
+                        (name,),
+                    ).fetchone()
             if row is None:
                 return 0
             affected = [
@@ -1269,20 +1582,28 @@ class WritableCalibreDB:
                     )
         return len(affected)
 
-    def set_author_sort_name(self, name: str, sort: str) -> int:
+    def set_author_sort_name(
+        self, name: str, sort: str, *, update_books: bool = True
+    ) -> int:
         """Set one author's per-author sort key (upstream
         ``set_sort_for_authors``, the row-level column behind the book-level
         ``author_sort``).
 
         The author resolves exact-spelling-first with a lowest-id NOCASE
-        fallback, ``authors.sort`` stores ``sort`` verbatim, and every book
+        fallback and, since 1.27, the piped display form as a final stage
+        (upstream keys author lookups by the display form, so a comma name
+        reaches a piped row), ``authors.sort`` stores ``sort`` verbatim,
+        and every book
         of the author recomputes ``books.author_sort`` as its authors' sort
         keys joined " & " in link order -- the same computation
-        :meth:`set_authors` performs -- and is touched and queued for OPF
-        resync. Returns the number of books affected (0 when the sort was
-        already equal). Raises ValueError for an empty sort, an unknown
-        author, or a schema whose authors table predates the ``sort``
-        column.
+        :meth:`set_authors` performs -- touched and queued for OPF resync.
+        ``update_books=False`` (upstream's
+        ``set_sort_for_authors(..., update_books=False)`` shape, used by the
+        cross-library copy) writes the sort ROW only, leaving every book's
+        ``author_sort`` and the queues untouched. An equal stored sort is an
+        honest no-op returning 0. Returns the number of books affected.
+        Raises ValueError for an empty sort, an unknown author, or a schema
+        whose authors table predates the ``sort`` column.
         """
         if not isinstance(sort, str) or not sort.strip():
             raise ValueError("Author sort must not be empty")
@@ -1291,20 +1612,24 @@ class WritableCalibreDB:
             raise ValueError("Author name must not be empty")
         affected: list[int] = []
         with self.batch():
-            row = self.conn.execute(
-                "SELECT id FROM authors WHERE name = ?", (name,)
-            ).fetchone()
-            if row is None:
-                row = self.conn.execute(
-                    "SELECT id FROM authors WHERE name = ? COLLATE NOCASE "
-                    "ORDER BY id LIMIT 1",
-                    (name,),
+            aid = self._resolve_author_id(name)
+            row = (
+                None
+                if aid is None
+                else self.conn.execute(
+                    "SELECT id, sort FROM authors WHERE id = ?", (aid,)
                 ).fetchone()
+            )
             if row is None:
                 raise ValueError(f"No author row matching {name!r}")
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(authors)")}
             if "sort" not in cols:
                 raise ValueError("Authors table predates the sort column")
+            if (row["sort"] or "") == sort:
+                # Honest no-op: an equal stored sort must not touch and
+                # queue every book of the author.
+                self._rollback()
+                return 0
             self.conn.execute(
                 "UPDATE authors SET sort = ? WHERE id = ?", (sort, row["id"])
             )
@@ -1316,6 +1641,10 @@ class WritableCalibreDB:
                     (row["id"],),
                 )
             ]
+            if not update_books:
+                # Upstream's update_books=False: the sort ROW commits (the
+                # batch exit) but no book is touched or queued.
+                return len(affected)
             for book_id in affected:
                 sorts = [
                     r["s"] or r["name"]
@@ -1348,7 +1677,9 @@ class WritableCalibreDB:
         This is the column cquarry could read but never edit before: the
         ``link`` URL beside author (and publisher/series/tag) rows, and the
         per-value ``link`` column of normalized custom-column value tables.
-        Names resolve exact-spelling-first with a NOCASE fallback; unknown
+        Names resolve exact-spelling-first with a NOCASE fallback; author
+        names also try the piped display form as a final stage (1.27,
+        upstream keys author lookups by the display form); unknown
         values raise (upstream skips them silently -- a link targeted at a
         misspelled name should fail loudly, not vanish). ``None`` clears a
         link; ``only_set_if_no_existing_link`` leaves values that already
@@ -1380,16 +1711,28 @@ class WritableCalibreDB:
                 value = value.strip() if isinstance(value, str) else ""
                 if not value:
                     raise ValueError("Entity values must not be empty")
-                row = self.conn.execute(
-                    f"SELECT id, link FROM {table} WHERE {name_col} = ?",
-                    (value,),
-                ).fetchone()
-                if row is None:
+                if table == "authors":
+                    # 1.27: the display-form stage too (upstream keys
+                    # author lookups by the display form).
+                    vid = self._resolve_author_id(value)
+                    row = (
+                        None
+                        if vid is None
+                        else self.conn.execute(
+                            f"SELECT id, link FROM {table} WHERE id = ?", (vid,)
+                        ).fetchone()
+                    )
+                else:
                     row = self.conn.execute(
-                        f"SELECT id, link FROM {table} WHERE {name_col} = ? "
-                        "COLLATE NOCASE ORDER BY id LIMIT 1",
+                        f"SELECT id, link FROM {table} WHERE {name_col} = ?",
                         (value,),
                     ).fetchone()
+                    if row is None:
+                        row = self.conn.execute(
+                            f"SELECT id, link FROM {table} WHERE {name_col} = ? "
+                            "COLLATE NOCASE ORDER BY id LIMIT 1",
+                            (value,),
+                        ).fetchone()
                 if row is None:
                     raise ValueError(f"No {kind} row matching {value!r}")
                 if only_set_if_no_existing_link and row["link"]:
@@ -1494,7 +1837,11 @@ class WritableCalibreDB:
         ``books.series_index`` to 1.0 -- the column is NOT NULL in real
         libraries (``REAL NOT NULL DEFAULT 1.0``) and Calibre's state for a
         book that never had a series is index 1.0 with no link row;
-        orphaned series rows are pruned.
+        orphaned series rows are pruned. Since 1.28 a name matching an
+        existing row only by case re-cases the shared row (upstream's
+        ``allow_case_change=True`` write default) and touches every linked
+        book; indexes are untouched by a re-case, exactly like an in-place
+        ``rename_entity``.
         """
         self._begin()
         try:
@@ -1531,7 +1878,9 @@ class WritableCalibreDB:
                 self._commit()
                 return True
 
-            sid = self._resolve_or_create("series", "name", name.strip())
+            sid, recased = self._resolve_or_create("series", "name", name.strip())
+            for other in recased:
+                self._touch_book(other)
             if index is not None:
                 new_index = float(index)
             elif old is not None and old["series"] == sid:
@@ -1539,7 +1888,8 @@ class WritableCalibreDB:
             else:
                 new_index = 1.0
             if (
-                old is not None
+                not recased
+                and old is not None
                 and old["series"] == sid
                 and _current_index() == new_index
             ):
@@ -1612,7 +1962,12 @@ class WritableCalibreDB:
         """Replace (or clear, with ``name=None``) the book's publisher.
 
         Returns True when stored state changed; orphaned publisher rows are
-        pruned.
+        pruned. Since 1.28 a name matching an existing row only by case
+        re-cases the shared row to the requested spelling (upstream's
+        ``allow_case_change=True`` write default) and touches every book
+        linked to it, so ``set_publisher(id, "DAW Books")`` on a
+        ``Daw Books`` row is a real consolidation, not a silent no-op
+        (issue #6).
         """
         self._begin()
         try:
@@ -1629,8 +1984,13 @@ class WritableCalibreDB:
                     "DELETE FROM books_publishers_link WHERE book = ?", (book_id,)
                 )
             else:
-                pid = self._resolve_or_create("publishers", "name", name.strip())
-                if old is not None and old["publisher"] == pid:
+                pid, recased = self._resolve_or_create(
+                    "publishers", "name", name.strip()
+                )
+                if recased:
+                    for other in recased:
+                        self._touch_book(other)
+                elif old is not None and old["publisher"] == pid:
                     self._rollback()
                     return False
                 self.conn.execute(
@@ -1762,7 +2122,12 @@ class WritableCalibreDB:
             else:
                 new_ids: list[int] = []
                 for code in cleaned:
-                    lid = self._resolve_or_create("languages", "lang_code", code)
+                    # Language codes are canonical spellings, not display
+                    # names: upstream's writer keys them exactly (no case
+                    # changes), so an odd-case stored row is reused as-is.
+                    lid, _recased = self._resolve_or_create(
+                        "languages", "lang_code", code, case_change=False
+                    )
                     if lid not in new_ids:
                         new_ids.append(lid)
                 if new_ids == old_ids:
@@ -2085,7 +2450,18 @@ class WritableCalibreDB:
             self._clear_pattern_a(link_table, value_table, book_id)
             return True
         if datatype == "enumeration":
-            sval = str(value).strip()
+            # Upstream routes enum values through the same single_text
+            # adapter BEFORE validating (9.16 added the whitespace collapse;
+            # the strip is older; 9.17 made it NBSP-preserving), so a
+            # double-spaced spelling of a listed value normalizes to the
+            # listed spelling, and a whitespace-only value reduces to None,
+            # which clears.
+            sval = _normalize_ws(str(value))
+            if not sval:
+                if not old_rows:
+                    return False
+                self._clear_pattern_a(link_table, value_table, book_id)
+                return True
             self._validate_enum(meta, sval)
             new_vals: list[Any] = [sval]
         elif datatype == "rating":
@@ -2104,31 +2480,79 @@ class WritableCalibreDB:
                 return True
             new_vals = [internal]
         elif is_multiple or isinstance(value, (list, tuple)):
+            # Each item normalizes like upstream's multiple_text adapter
+            # (strip the ends, collapse breaking whitespace, preserve the
+            # non-breaking spaces; mirrored since 1.26.2, NBSP-preserving
+            # since 1.28.1 after upstream's fix landed in 9.17), and items
+            # dedupe case-insensitively keeping the first spelling (upstream
+            # many_many's uniq(vals, kmap) -- so ["ya", "YA"] stores one
+            # "ya" row instead of fighting over the re-case).
             items: list[str] = []
+            lowered: set[str] = set()
             if isinstance(value, (list, tuple)):
                 for v in value:
                     if v is None:
                         # A None entry is skipped, never stringified into
                         # the literal 'None'.
                         continue
-                    s = str(v).strip()
-                    if s:
+                    s = _normalize_ws(str(v))
+                    if s and s.lower() not in lowered:
                         items.append(s)
+                        lowered.add(s.lower())
             else:
                 # A bare string is ONE value: comma-splitting it made
                 # "Last, First" round-trip as two phantom values. Callers
                 # with multiple values pass a list (both writers do).
-                items = [str(value).strip()]
+                s = _normalize_ws(str(value))
+                if s:
+                    items = [s]
             new_vals = [x for x in items if x]
         else:  # text (single-valued) and series: one text value
-            new_vals = [str(value)]
+            # Upstream's single_text adapter (9.16's collapse, 9.17's
+            # NBSP preservation) collapses breaking whitespace runs and
+            # reduces a whitespace-only value to None, which clears.
+            collapsed = _normalize_ws(str(value))
+            if not collapsed:
+                if not old_rows:
+                    return False
+                self._clear_pattern_a(link_table, value_table, book_id)
+                return True
+            new_vals = [collapsed]
         if new_vals == old_rows:
             return False
         self._clear_pattern_a(link_table, value_table, book_id)
+        link_cols = {
+            r[1] for r in self.conn.execute(f"PRAGMA table_info({link_table})")
+        }
         for val in new_vals:
             vrow = self.conn.execute(
-                f"SELECT id FROM {value_table} WHERE value = ?", (val,)
+                f"SELECT id, value FROM {value_table} WHERE value = ?", (val,)
             ).fetchone()
+            if (
+                vrow is None and datatype not in ("enumeration", "rating")
+                # Upstream's enum writer hardcodes allow_case_change=False
+                # (and exact membership was validated above); ratings are
+                # numeric, so the NOCASE re-case is text-family only.
+            ):
+                vrow = self.conn.execute(
+                    f"SELECT id, value FROM {value_table} "
+                    f"WHERE value = ? COLLATE NOCASE",
+                    (val,),
+                ).fetchone()
+                if vrow is not None and vrow["value"] != val:
+                    # 1.28: re-case the shared value row (upstream
+                    # many_one/many_many change_case) and touch every book
+                    # that shows it.
+                    self.conn.execute(
+                        f"UPDATE {value_table} SET value = ? WHERE id = ?",
+                        (val, vrow["id"]),
+                    )
+                    linked = self.conn.execute(
+                        f"SELECT book FROM {link_table} WHERE value = ? ORDER BY book",
+                        (vrow["id"],),
+                    ).fetchall()
+                    for r in linked:
+                        self._touch_book(r["book"])
             vid = (
                 vrow["id"]
                 if vrow is not None
@@ -2136,10 +2560,19 @@ class WritableCalibreDB:
                     f"INSERT INTO {value_table} (value) VALUES (?)", (val,)
                 ).lastrowid
             )
-            self.conn.execute(
-                f"INSERT INTO {link_table} (book, value) VALUES (?, ?)",
-                (book_id, vid),
-            )
+            if datatype == "series" and "extra" in link_cols:
+                # Upstream seeds a fresh series assignment's index at 1.0
+                # (db/write.py:365-368); leaving extra NULL made the
+                # #label_index location permanently unreadable.
+                self.conn.execute(
+                    f"INSERT INTO {link_table} (book, value, extra) VALUES (?, ?, 1.0)",
+                    (book_id, vid),
+                )
+            else:
+                self.conn.execute(
+                    f"INSERT INTO {link_table} (book, value) VALUES (?, ?)",
+                    (book_id, vid),
+                )
         return True
 
     def _write_pattern_b(self, meta, value_table, book_id, value) -> bool:
@@ -2208,8 +2641,9 @@ class WritableCalibreDB:
         appends: values already on the book are deduped away (the link
         table is ``UNIQUE(book, value)``), duplicates within ``values``
         collapse, only genuinely new ones insert, and the returned count is
-        honest. A no-op append does not bump ``last_modified`` or queue
-        anything.
+        honest. Values are normalized exactly like ``set_custom_column``'s
+        multi branch (per-item whitespace collapse, since 1.26.2). A no-op
+        append does not bump ``last_modified`` or queue anything.
 
         Only ``is_multiple`` Pattern-A (link-table) columns qualify; a
         single-valued column has one value to replace, so it raises with a
@@ -2244,17 +2678,25 @@ class WritableCalibreDB:
                 "is rejected"
             )
         items: list[str] = []
+        lowered: set[str] = set()
         for v in values:
             if v is None:
                 # A None entry is skipped, never stringified into 'None'.
                 continue
-            s = str(v).strip()
+            # Same per-item normalization as set_custom_column's multi
+            # branch (upstream multiple_text, NBSP-preserving since 9.17),
+            # so both verbs store rows that agree.
+            s = _normalize_ws(str(v))
             if not s:
                 continue
             if datatype == "enumeration":
                 self._validate_enum(meta, s)
-            if s not in items:
+            # Case-insensitive within-call dedupe, first spelling wins
+            # (upstream many_many's uniq(vals, kmap); the exact-spelling
+            # form predates 1.28).
+            if s not in items and s.lower() not in lowered:
                 items.append(s)
+                lowered.add(s.lower())
         cid = int(meta["id"])  # f-string SQL below; never interpolate raw ids
         link_table = f"books_custom_column_{cid}_link"
         value_table = f"custom_column_{cid}"
@@ -2269,20 +2711,43 @@ class WritableCalibreDB:
         try:
             self._require_book(book_id)
             existing = {
-                r["v"]
+                r["v"]: r["vid"]
                 for r in self.conn.execute(
-                    f"SELECT c.value AS v FROM {link_table} l "
+                    f"SELECT c.value AS v, c.id AS vid FROM {link_table} l "
                     f"JOIN {value_table} c ON c.id = l.value WHERE l.book = ?",
                     (book_id,),
                 ).fetchall()
             }
+            existing_ids = set(existing.values())
             added = 0
             for val in items:
-                if val in existing:
-                    continue
                 vrow = self.conn.execute(
-                    f"SELECT id FROM {value_table} WHERE value = ?", (val,)
+                    f"SELECT id, value FROM {value_table} WHERE value = ?", (val,)
                 ).fetchone()
+                if vrow is None and datatype not in ("enumeration", "rating"):
+                    vrow = self.conn.execute(
+                        f"SELECT id, value FROM {value_table} "
+                        f"WHERE value = ? COLLATE NOCASE",
+                        (val,),
+                    ).fetchone()
+                    if vrow is not None and vrow["value"] != val:
+                        # 1.28: re-case the shared value row (upstream
+                        # change_case) and touch every book that shows it;
+                        # this book may already link it under the old
+                        # spelling, which the id-dedupe below absorbs.
+                        # Exclusions match _write_pattern_a: enums are
+                        # validated exact (upstream hardcodes case changes
+                        # off) and ratings are numeric.
+                        self.conn.execute(
+                            f"UPDATE {value_table} SET value = ? WHERE id = ?",
+                            (val, vrow["id"]),
+                        )
+                        for r in self.conn.execute(
+                            f"SELECT book FROM {link_table} WHERE value = ? "
+                            f"ORDER BY book",
+                            (vrow["id"],),
+                        ).fetchall():
+                            self._touch_book(r["book"])
                 vid = (
                     vrow["id"]
                     if vrow is not None
@@ -2290,11 +2755,13 @@ class WritableCalibreDB:
                         f"INSERT INTO {value_table} (value) VALUES (?)", (val,)
                     ).lastrowid
                 )
+                if vid in existing_ids:
+                    continue
                 self.conn.execute(
                     f"INSERT INTO {link_table} (book, value) VALUES (?, ?)",
                     (book_id, vid),
                 )
-                existing.add(val)
+                existing_ids.add(vid)
                 added += 1
             if added:
                 self._touch_book(book_id)
@@ -2495,12 +2962,15 @@ class WritableCalibreDB:
         ``name`` is the filename stem (Calibre's ``data.name``) and ``size``
         the uncompressed byte size; the file itself is the caller's
         responsibility - cquarry never touches files. Raises ValueError if
-        the book already carries that format.
+        the book already carries that format, or if ``name`` carries the
+        format's own extension (the stem is stored verbatim and every
+        consumer resolves the file as ``<name>.<fmt.lower()>``).
         """
         fmt = fmt.strip().upper()
         name = name.strip()
         if not fmt or not name:
             raise ValueError("Format and name must not be empty")
+        _reject_extension_name(fmt, name)
         if size < 0:
             raise ValueError(f"Format size must not be negative, got {size}")
         # ATTACH must precede the transaction (see _ensure_fts_attached).
@@ -2546,6 +3016,18 @@ class WritableCalibreDB:
             changed = self.conn.total_changes > before
             if changed:
                 self._clear_fts_dirty(book_id, fmt.strip().upper())
+                # Upstream's remove_formats queues a pages rescan
+                # (cache.py:2576-2577) -- page counts may reflect the
+                # removed format until one is recomputed. Schema-guarded
+                # like set_pages.
+                if self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='books_pages_link'"
+                ).fetchone():
+                    self.conn.execute(
+                        "UPDATE books_pages_link SET needs_scan = 1 WHERE book = ?",
+                        (book_id,),
+                    )
                 self._touch_book(book_id)
             self._commit()
             return changed
@@ -2564,12 +3046,14 @@ class WritableCalibreDB:
         truthful. The replacement is queued for FTS re-extraction and a
         pages rescan when the sidecar exists, so Calibre's content index
         and page counts follow the repaired file. Raises ValueError on a
-        negative size or empty fmt/name, exactly like :meth:`add_format`.
+        negative size, an empty fmt/name, or a name carrying the format's
+        extension, exactly like :meth:`add_format`.
         """
         fmt = fmt.strip().upper()
         name = name.strip()
         if not fmt or not name:
             raise ValueError("Format and name must not be empty")
+        _reject_extension_name(fmt, name)
         if size < 0:
             raise ValueError(f"Format size must not be negative, got {size}")
         size = int(size)  # uncompressed_size stores integers, like add_format
@@ -2688,13 +3172,13 @@ class WritableCalibreDB:
         ``add_custom_book_data``, per book); ``None`` deletes the row.
 
         The row is the (book, name, val) UNIQUE pair the read side's
-        :meth:`CalibreDB.get_plugin_data` surfaces. Serialization: a ``str``
-        stores verbatim; any other JSON-serializable payload goes through
-        ``json.dumps`` (upstream's own serialization, so Calibre-side
-        readers see the shape they expect). Returns True when a row was
-        written or deleted, False when a delete found nothing. Raises
-        ValueError for an empty name, an unknown book, or a schema
-        predating the table.
+        :meth:`CalibreDB.get_plugin_data` surfaces. Serialization: every
+        payload goes through ``json.dumps(val, default=str)`` (since 1.26.0;
+        upstream's reader json.loads with a revive hook, so a verbatim plain
+        string is unreadable to it -- the 1.25 str-verbatim shortcut is
+        gone). Returns True when a row was written or deleted, False when a
+        delete found nothing. Raises ValueError for an empty name, an
+        unknown book, or a schema predating the table.
         """
         name = (name or "").strip()
         if not name:
@@ -2712,7 +3196,11 @@ class WritableCalibreDB:
                 changed = self.conn.total_changes > before
                 self._commit()
                 return changed
-            payload = val if isinstance(val, str) else json.dumps(val, default=str)
+            # Upstream add_custom_data json.dumps EVERY value (its reader
+            # json.loads with a revive hook), so a verbatim plain string is
+            # unreadable to Calibre -- the 1.25 str-verbatim shortcut is
+            # gone; payloads serialize exactly like upstream's writer.
+            payload = json.dumps(val, default=str)
             self.conn.execute(
                 "INSERT OR REPLACE INTO books_plugin_data (book, name, val) "
                 "VALUES (?, ?, ?)",
@@ -2760,7 +3248,14 @@ class WritableCalibreDB:
                 changed = self.conn.total_changes > before
                 self._commit()
                 return changed
-            payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+            raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+            # Upstream set_conversion_options wraps the payload in a fixed
+            # protocol-2 BINSTRING pickle frame (backend.py:2955-2964:
+            # b'\x80\x02T' + 4-byte LE length + payload + b'.'). The frame
+            # is deterministic bytes -- no pickle module needed to WRITE it;
+            # without it Calibre's unpickling reader answers None for every
+            # fresh cquarry-written row.
+            payload = b"\x80\x02T" + len(raw).to_bytes(4, "little") + raw + b"."
             self.conn.execute(
                 "INSERT OR REPLACE INTO conversion_options (book, format, data) "
                 "VALUES (?, ?, ?)",
@@ -2772,11 +3267,32 @@ class WritableCalibreDB:
             self._rollback()
             raise
 
+    # Upstream validate_book_storage (db/book_storage.py): the data map's
+    # keys AND values must be str, the serialized UTF-16 size caps at 1 MiB,
+    # and the timestamp is a non-negative float. Matching the rule here keeps
+    # every cquarry-written row readable by Calibre's viewer.
+    _BOOK_STORAGE_MAX_BYTES = 1024 * 1024
+
+    @staticmethod
+    def _validate_book_storage(data: dict[str, Any]) -> None:
+        for key, value in data.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                # Upstream raises InvalidBookStorage -- a ValueError -- for
+                # both shapes; noqa:TRY004 is the deliberate exception-type
+                # mapping, not an isinstance slip.
+                raise ValueError(  # noqa: TRY004
+                    "Book-storage keys and values must be strings "
+                    "(upstream validate_book_storage rejects anything else)"
+                )
+        encoded = json.dumps(data, ensure_ascii=False).encode("utf-16-le")
+        if len(encoded) > WritableCalibreDB._BOOK_STORAGE_MAX_BYTES:
+            raise ValueError("Book-storage payload exceeds the 1 MiB cap")
+
     def set_book_storage(
         self,
         book_id: int,
         fmt: str,
-        data: dict[str, Any] | None,
+        data: dict[str, str] | None,
         *,
         user_type: str = "local",
         user: str = "viewer",
@@ -2785,14 +3301,18 @@ class WritableCalibreDB:
         ``update_book_storage_for_book``, the viewers' per-book
         localStorage); ``None`` deletes the row.
 
-        The payload dict stores as the JSON object upstream's shape carries
-        (``{'timestamp': <now epoch>, 'data': <payload>}``; the timestamp is
-        stamped here like upstream's update). ``fmt`` uppercases (the
-        column is NOCASE but the stored spelling follows the formats row);
-        the (book, format, user_type, user) key is UNIQUE. Returns True
-        when a row was written or deleted, False when a delete found
-        nothing; unknown books and schemas predating the (newer-Calibre)
-        table raise ValueError.
+        The ``data`` column stores ONLY the payload map, JSON-encoded with
+        ``ensure_ascii=False`` exactly like upstream (the timestamp lives in
+        its own REAL column); storing the wrapped ``{'timestamp', 'data'}``
+        entry there was the 1.25 shape bug -- upstream's reader validates the
+        column as the bare str->str map and silently dropped every
+        cquarry-written row. Upstream's other guards are reproduced: keys and
+        values must be ``str``, the UTF-16 payload caps at 1 MiB, and an
+        OLDER entry never overwrites a newer one (newest-timestamp-wins).
+        ``fmt`` uppercases; the (book, format, user_type, user) key is
+        UNIQUE. Returns True when a row was written or deleted, False when a
+        delete found nothing or an older entry was refused; unknown books and
+        schemas predating the (newer-Calibre) table raise ValueError.
         """
         fmt = (fmt or "").strip().upper()
         if not fmt:
@@ -2813,7 +3333,17 @@ class WritableCalibreDB:
                 changed = self.conn.total_changes > before
                 self._commit()
                 return changed
-            entry = {"timestamp": time.time(), "data": data}
+            self._validate_book_storage(data)
+            timestamp = time.time()
+            existing = self.conn.execute(
+                "SELECT timestamp FROM book_storage WHERE book = ? AND "
+                "format = ? AND user_type = ? AND user = ?",
+                (book_id, fmt, user_type, user),
+            ).fetchone()
+            if existing is not None and float(existing["timestamp"]) > timestamp:
+                # Upstream's guard: a newer stored entry never regresses.
+                self._rollback()
+                return False
             self.conn.execute(
                 "INSERT OR REPLACE INTO book_storage "
                 "(book, format, user_type, user, timestamp, data) "
@@ -2823,8 +3353,8 @@ class WritableCalibreDB:
                     fmt,
                     user_type,
                     user,
-                    entry["timestamp"],
-                    json.dumps(entry),
+                    timestamp,
+                    json.dumps(data, ensure_ascii=False),
                 ),
             )
             self._commit()
@@ -2842,6 +3372,53 @@ class WritableCalibreDB:
         ).fetchone()
         if row is None:
             raise ValueError(f"Schema predates the {name} table")
+
+    def set_custom_series_index(
+        self, book_id: int, label: str, index: float | None
+    ) -> bool:
+        """Set one custom series column's index for a book (upstream
+        ``custom_series_index``): updates the link row's ``extra`` float
+        in place, the value row untouched.
+
+        The book must already belong to the series column's named series
+        (``set_custom_column`` assigns one); ``None`` writes the schema's
+        no-index value 1.0, exactly like the builtin ``set_series_index``'s
+        clear semantics. ``label`` addresses the column as in
+        ``set_custom_column``. Returns True when the extra changed, False
+        on an equal value; unknown books/columns, a non-series column, or
+        a book with no series in the column raise ValueError.
+        """
+        self._begin()
+        try:
+            self._require_book(book_id)
+            meta = self._custom_column_meta(label)
+            if str(meta["datatype"]).lower() != "series":
+                raise ValueError(f"{label!r} is not a series column")
+            cid = int(meta["id"])
+            link_table = f"books_custom_column_{cid}_link"
+            row = self.conn.execute(
+                f"SELECT value, extra FROM {link_table} WHERE book = ?",
+                (book_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"Book {book_id} has no series in {label!r} "
+                    "(set_custom_column assigns one first)"
+                )
+            new = round(float(index), 2) if index is not None else 1.0
+            if row["extra"] is not None and float(row["extra"]) == new:
+                self._rollback()
+                return False
+            self.conn.execute(
+                f"UPDATE {link_table} SET extra = ? WHERE book = ? AND value = ?",
+                (new, book_id, row["value"]),
+            )
+            self._touch_book(book_id)
+            self._commit()
+            return True
+        except BaseException:
+            self._rollback()
+            raise
 
     def set_has_cover(self, book_id: int, has_cover: bool) -> bool:
         """Toggle the catalogued ``has_cover`` flag (the cover FILE itself is
@@ -2873,12 +3450,19 @@ class WritableCalibreDB:
         """Write the book's cover file and set ``has_cover``.
 
         ``data`` is the image bytes, or a path to read them from. The
-        sniff-or-raise rule is ``add_book``'s: a JPEG lands as
-        ``cover.jpg``, a PNG as ``cover.png``, and anything unparseable
-        raises rather than being catalogued with ``has_cover=1``; a stale
-        cover under the OTHER extension is removed so
-        :meth:`cquarry.db.CalibreDB.get_cover_path` can never prefer it.
-        The file lands only after the commit (deferred inside a
+        sniff-or-raise rule is ``add_book``'s: JPEG or PNG data is
+        accepted, anything unparseable raises rather than being
+        catalogued with ``has_cover=1``. The file is ALWAYS
+        ``cover.jpg`` -- upstream Calibre only ever reads
+        ``COVER_FILE_NAME`` (issue #10: a ``cover.png`` was invisible in
+        the GUI, on devices, and in every cover query), so the validated
+        bytes land there verbatim, PNG included (upstream's
+        ``no_processing`` shape; its default path re-encodes PNG to JPEG
+        through PIL, which no stdlib encoder can mirror -- the recorded
+        §5 deviation). Readers sniff content over extension, so the GUI
+        displays the stored bytes unchanged. A stale ``cover.png`` is
+        removed so legacy pre-1.28.3 rows heal on their next write. The
+        file lands only after the commit (deferred inside a
         :meth:`batch`), so a failed pass never catalogues a cover it did
         not keep. Returns True; use :meth:`remove_cover` to clear.
         """
@@ -2890,8 +3474,7 @@ class WritableCalibreDB:
             with open(os.fspath(data), "rb") as f:
                 data = f.read()
         data = bytes(data)
-        ext = sniff_image_format(data)
-        if ext is None:
+        if sniff_image_format(data) is None:
             raise ValueError(
                 "Cover is neither JPEG nor PNG (sniff-or-raise: an "
                 "unparseable cover must not be catalogued with has_cover=1)"
@@ -2906,14 +3489,12 @@ class WritableCalibreDB:
                 (self._now(), book_id),
             )
             self._mark_dirty(book_id)
-            new_name = f"cover.{ext}"
-            other = "cover.png" if ext == "jpg" else "cover.jpg"
 
-            def _place(book_dir=book_dir, new_name=new_name, other=other, data=data):
+            def _place(book_dir=book_dir, data=data):
                 os.makedirs(book_dir, exist_ok=True)
-                _place_bytes(data, os.path.join(book_dir, new_name))
+                _place_bytes(data, os.path.join(book_dir, "cover.jpg"))
                 with contextlib.suppress(OSError):
-                    os.unlink(os.path.join(book_dir, other))
+                    os.unlink(os.path.join(book_dir, "cover.png"))
 
             self._pending_fs_ops.append(_place)
         return True
@@ -3007,11 +3588,27 @@ class WritableCalibreDB:
                     break
                 num += 1
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        if isinstance(data, (str, os.PathLike)):
-            shutil.copy2(os.fspath(data), dest)
-        else:
-            with open(dest, "wb") as f:
-                f.write(data)
+        # Write through a temp file + atomic replace: opening dest directly
+        # truncated an existing file whenever the source read or the write
+        # failed part way (upstream 9.17's add_extra_file fix).
+        tmp = dest + ".cquarry-tmp"
+        try:
+            if isinstance(data, (str, os.PathLike)):
+                with open(os.fspath(data), "rb") as fsrc, open(tmp, "wb") as fdst:
+                    shutil.copyfileobj(fsrc, fdst)
+                    fdst.flush()
+                    os.fsync(fdst.fileno())
+                shutil.copystat(os.fspath(data), tmp)  # as copy2() did
+            else:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.replace(tmp, dest)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
         return os.path.relpath(dest, data_dir).replace(os.sep, "/")
 
     def _book_data_dir(self, book_id: int) -> str | None:
@@ -3638,7 +4235,10 @@ class WritableCalibreDB:
         (``data`` rows follow, one per file, type taken from the file
         extension), a cover (path or bytes; JPEG/PNG only, sniff-or-raise:
         an unparseable cover raises rather than being catalogued with
-        ``has_cover=1``), ``identifiers`` (types normalized like
+        ``has_cover=1``; the file is ALWAYS ``cover.jpg`` -- upstream
+        reads only ``COVER_FILE_NAME``, so PNG source data is stored
+        verbatim inside it, never as ``cover.png``, issue #10),
+        ``identifiers`` (types normalized like
         ``set_identifier``), one ``language`` (canonicalized through the
         search engine's map, ``English`` -> ``eng``; unknown names pass
         through verbatim, exactly like ``set_languages``), ``pubdate``, and
@@ -3660,7 +4260,10 @@ class WritableCalibreDB:
         title = (title or "").strip() or "Unknown"
         cleaned_authors: list[str] = []
         for name in authors or []:
-            cleaned = name.strip()
+            # Display-normalized like set_authors (1.27, upstream's
+            # authors-only write adapter): pipes become commas before any
+            # resolution, dedupe, or path construction.
+            cleaned = name.strip().replace("|", ",")
             if cleaned and not any(
                 cleaned.lower() == existing.lower() for existing in cleaned_authors
             ):
@@ -3793,9 +4396,9 @@ class WritableCalibreDB:
                     # a rollback undoes it.
                     self._mark_fts_dirty(book_id, fmt)
                 if cover_data is not None and cover_ext is not None:
-                    _place_bytes(
-                        cover_data, os.path.join(book_dir, f"cover.{cover_ext}")
-                    )
+                    # Always cover.jpg (upstream's COVER_FILE_NAME); the
+                    # sniffed extension only validated the bytes (issue #10).
+                    _place_bytes(cover_data, os.path.join(book_dir, "cover.jpg"))
                     self.conn.execute(
                         "UPDATE books SET has_cover = 1 WHERE id = ?", (book_id,)
                     )
@@ -3869,7 +4472,13 @@ class WritableCalibreDB:
         the FTS/pages queues fill in), the cover bytes, tags, series +
         index, publisher, rating, languages, identifiers, comments,
         ``pubdate``, and -- ``preserve_timestamp`` (upstream
-        ``preserve_date``) -- the addition timestamp. NOT carried, each for
+        ``preserve_date``) -- the addition timestamp. The source cover is
+        read through :meth:`cquarry.db.CalibreDB.get_cover_bytes`, so since
+        1.28.3 it is ``cover.jpg`` only (issue #10; upstream's
+        ``copy_one_book`` reads ``COVER_FILE_NAME`` too): a legacy png-only
+        source book copies WITHOUT a cover and ``has_cover=0`` -- heal the
+        source first (one ``set_cover`` call) if the art should ride along.
+        NOT carried, each for
         a recorded reason: annotations (the postprocess decline), ``data/``
         extras (outside the copy's scope), plugin data and conversion
         options (the conversion overrides DO ride along through
@@ -3908,7 +4517,10 @@ class WritableCalibreDB:
             for tag in row["tags"] or []:
                 self.add_tag(new_id, tag)
             if row["series"]:
-                self.set_series(new_id, row["series"], row["series_index"] or 1.0)
+                # Verbatim index (upstream carries mi.series_index as-is):
+                # a legitimate 0.0 must not be coerced to 1.0.
+                index = row["series_index"] if row["series_index"] is not None else 1.0
+                self.set_series(new_id, row["series"], index)
             if row["rating"]:
                 self.set_rating(new_id, row["rating"] / 2.0)
             if row["languages"]:
@@ -3920,7 +4532,10 @@ class WritableCalibreDB:
             # survives the copy exactly as it reads in the source.
             for name, stored in zip(authors, author_sorts):
                 if stored and stored != name:
-                    self.set_author_sort_name(name, stored)
+                    # update_books=False, upstream's postprocess_copy: the
+                    # sort ROW is set but existing destination books keep
+                    # their author_sort (only the new book reflects it).
+                    self.set_author_sort_name(name, stored, update_books=False)
             if row["author_sort"]:
                 self.set_author_sort(new_id, row["author_sort"])
             if row["title_sort"] and row["title_sort"] != row["title"]:
@@ -3933,12 +4548,16 @@ class WritableCalibreDB:
                 self.set_timestamp(new_id, datetime.now(UTC))
             # The postprocess half of copy_one_book: conversion overrides
             # ride the blob writer verbatim (upstream copies them the same
-            # way; plugin data it does not copy, and neither do we).
+            # way; plugin data it does not copy, and neither do we). The
+            # source blob arrives FRAMED (upstream's stored shape), so the
+            # inner payload is unwrapped before the writer re-frames it.
             for profile in src_db.get_conversion_profiles(book_id):
                 blob = profile.get("data")
                 if isinstance(blob, (bytes, bytearray)) and blob:
                     self.set_conversion_options(
-                        new_id, bytes(blob), fmt=profile.get("format") or "PIPE"
+                        new_id,
+                        _unframe_conversion_blob(bytes(blob)),
+                        fmt=profile.get("format") or "PIPE",
                     )
         return new_id
 
@@ -3946,13 +4565,15 @@ class WritableCalibreDB:
         """Resolve author names to (name, sort, is_new) without writing.
 
         Existing rows keep their hand-tuned ``sort``; new ones default it
-        to the display name, Calibre's starting point.
+        to the display name, Calibre's starting point. Resolution matches
+        ``_resolve_or_create``, so an existing piped row is reported as
+        ``new: False`` with its stored sort instead of a phantom new
+        author (issue #5); the display-default sort for genuinely new
+        authors predates this and is the plan's documented shape.
         """
         resolved: list[tuple[str, str, bool]] = []
         for name in names:
-            row = self.conn.execute(
-                "SELECT sort FROM authors WHERE name = ? COLLATE NOCASE", (name,)
-            ).fetchone()
+            row = self._author_row_for_name(name)
             if row is None:
                 resolved.append((name, name, True))
             else:
@@ -4010,7 +4631,7 @@ class WritableCalibreDB:
                 }
                 for fmt, src, ext, size in fmt_entries
             ],
-            "cover": f"cover.{cover_ext}" if cover_ext else None,
+            "cover": "cover.jpg" if cover_ext else None,
             "author_sort_computed": author_sort,
         }
 
@@ -4868,6 +5489,19 @@ class WritableCalibreDB:
             # to a no-op inside _clear_fts_dirty).
             for fmt in book_fmts:
                 self._clear_fts_dirty(book_id, fmt)
+            # books_pages_link and book_storage have ON DELETE CASCADE FKs
+            # that upstream's connection (PRAGMA foreign_keys=ON) fires but
+            # this write connection deliberately does not engage -- and the
+            # books_delete_trg cascade covers neither table. Without these
+            # deletes a stranded pages row (the table's PRIMARY KEY) makes
+            # any later move_book_from_trash of the same id abort with
+            # IntegrityError. Schema-guarded like every optional table.
+            for table in ("books_pages_link", "book_storage"):
+                if self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone():
+                    self.conn.execute(f"DELETE FROM {table} WHERE book = ?", (book_id,))
             # The cascade trigger does the rest.
             self.conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
             # Orphan pruning AFTER the cascade: links are gone, so the

@@ -1,3 +1,467 @@
+## v1.28.3+py313.1 (2026-11-01)
+
+### The compat branch syncs forward to 1.28.3 (the Hermitage Flatpak ledger)
+
+Hermitage 1.8.7's docs record the cover.jpg-only contract that ships in
+cquarry 1.28.3, and its Flatpak pin follows this branch: main's
+1.26-1.28 line stays Python 3.14+ by contract, so compat-py313 merges
+main (through v1.28.3) and re-applies the recorded decision #81 deltas
+on top.
+
+- `requires-python >=3.13`; the version series is `1.28.3+py313.1`
+  (PEP 440 local version, never publishable, never confused with a
+  mainline release); all six carriers agree on it.
+- The bare except-groups the merge carried in are parenthesized again
+  (one site survived with main's bare spelling, db.py; the 3.13
+  compile check over src and tests is the authority and passes
+  clean). No other 3.14-only syntax exists on the line.
+- The publish trigger stays defused (`v-disabled-*`): the compat line
+  never publishes to PyPI; Hermitage's Flatpak pins a commit.
+- Suite on Python 3.13.15: 710 collected, green.
+
+## v1.28.3 (2026-11-01)
+
+### The cover.jpg-only fix (issue #10)
+
+The 2026-11-01 CofD batch (9 PDFs) made it visible: covers rendered by
+`pdftoppm -png` and passed to `set_cover` were written as `cover.png`
+files with `has_cover=1`, so every programmatic check passed, yet
+Calibre's GUI showed nothing -- upstream Calibre reads ONLY
+`COVER_FILE_NAME`, which is `'cover.jpg'` (`db/constants.py`); its
+backend has no `cover.png` reference at all, so a `cover.png` is
+invisible in the GUI, in device pushes, and in every cover query. The
+1.18-1.28.2 write side (JPEG to `cover.jpg`, PNG to `cover.png` by the
+sniff-or-raise rule) and the read side's `cover.png` fallback were both
+upstream-divergent, and the fallback is what masked the divergence.
+
+- **`set_cover` and `add_book`'s cover seed now write the file ALWAYS
+  as `cover.jpg`** (the dry-run plan's `cover` field follows). The
+  sniff-or-raise rule stays as validation -- JPEG or PNG accepted,
+  anything unparseable still raises before `has_cover=1` -- and the
+  validated bytes land verbatim, PNG source included: upstream's own
+  `no_processing=True` shape. Upstream's DEFAULT path re-encodes PNG to
+  JPEG through PIL (`save_cover_data_to`, quality 90, alpha blended
+  onto white); cquarry has no stdlib JPEG encoder, so the verbatim
+  bytes are the recorded deviation (spec §5.18), and every upstream
+  reader (PIL, Qt, the content server) decodes by content signature
+  rather than extension, so the stored bytes display unchanged. A
+  stale `cover.png` is removed on every write, so legacy rows heal on
+  their next `set_cover`.
+- **The reader resolves `cover.jpg` ONLY.** `get_cover_path`,
+  `get_cover_bytes`, and `get_cover_last_modified` drop the
+  `cover.png` fallback: a legacy png-only book (written before this
+  release) now reads as coverless -- the GUI's own answer -- instead
+  of handing consumers bytes Calibre can never display. That is what
+  surfaces these books in `find_missing_cover_files` for healing;
+  one `set_cover(book_id, png_bytes)` call rewrites the same bytes at
+  `cover.jpg` and the book is fixed everywhere. The same jpg-only read
+  rides `copy_book_from_library`'s source-cover fetch (upstream's
+  `copy_one_book` reads `COVER_FILE_NAME` too): a legacy png-only source
+  book copies WITHOUT a cover, `has_cover=0` -- heal the source first if
+  the art should ride along. `remove_cover` still sweeps both names, and
+  a `cover.png` in a book dir stays a tolerated normal in
+  `check_library_disk` (legacy dirs only; nothing writes one anymore).
+- **Consumers verified in the same pass** (issue #10's downstream
+  sweep): Carrel-calibre-web has one test pinning the png fallback
+  (`test_cover_route_serves_png_primary_covers`) that needs the same
+  update; CalibreQuarry's cover-source ladder (the affected writer) and
+  Hermitage's cover display need no code change, only awareness --
+  issues filed in each tracker.
+
+Suite: 708 tests -> 710 (the stale-png sweep and a copy-verb
+png-only-source case were added; the png-fallback and png-naming pins
+were rewritten to the new contract).
+
+## v1.28.2 (2026-10-29)
+
+### The set_format extension-name guard (issue #9)
+
+A live incident on book 11305 (the 2026-10-28 supersede swap) exposed a
+silent desynchronization in the format-row writers: a repair session
+passed the FILENAME (`<stem>.epub`) to `set_format`'s `name` argument,
+which stores verbatim, so `data.name` carried the extension. Every
+consumer that resolves a format file as `<name>.<fmt.lower()>` --
+cquarry's `get_format_path`, CalibreQuarry's `reconcile_file_metadata.py`,
+Carrel's download-link path -- then built `<stem>.epub.epub`, failed to
+find it, and reported the book unreadable while the real file sat fine on
+disk; the discrepancy cost a debug cycle before a row diff named it.
+Upstream never accepts a caller-supplied stem at all (`cache.add_format`
+reuses the stored name and `backend.add_format` derives the filename from
+title and author), so cquarry's low-level surface is the only place the
+row and the file can drift this way, and the fix is validation, not
+behavior change.
+
+- **`add_format` and `set_format` refuse a `name` carrying the format's
+  own extension.** A `ValueError` fires when the name ends
+  case-insensitively with `.<fmt.lower()>`, and the message names the stem
+  to pass instead. Refusal over auto-strip: cquarry's style is loud errors
+  over silent correction (the `set_link_map` precedent), and a
+  flag-or-strip result would churn the `True`/`False` return contract.
+  Legitimate dotted stems (`Anon.2023`) pass; `ORIGINAL_<FMT>` rows refuse
+  their own `.original_<ext>` spelling.
+- **Already-corrupted rows surface through the internal callers the same
+  way.** `move_format_from_trash` and the save/restore-original pair feed
+  row-derived stems into these setters, so a pre-existing double-extended
+  row now raises exactly where the corruption would propagate -- the
+  incident's own remedy was fixing the stem first.
+- **Downstream sweep, six call sites across the four consumer repos:**
+  only CalibreQuarry's free-text `--add-format`/TUI entry can legitimately
+  feed an extension-suffixed name (user error, the case the guard exists
+  for); CalibreQuarry's `integrate.py` and bindery-cli's `install_format`
+  pass data-row or `Path.stem` values that stay legal on healthy
+  libraries (bindery already catches `ValueError` and fails soft), and
+  Hermitage and Carrel-calibre-web never import `WritableCalibreDB`.
+  CalibreQuarry owes the floor bump in its next dependency wave.
+- 708 tests pass (one new regression test: the refusal on both setters,
+  the case-insensitive match, the dotted-stem pass, and the
+  `ORIGINAL_<FMT>` suffix shape).
+
+## v1.28.1 (2026-10-23)
+
+### The Calibre 9.17 watch audit: NBSP preservation and an atomic extra-file write
+
+The Friday parity-watch automation's second schema-search trip (v9.17.0,
+tagged 2026-10-23) turned out to be upstream fixing a regression in the
+exact adapter cquarry mirrored in 1.26.2. The full read-only audit against
+this tree found two fixes to make and verified the rest of the release is
+either out of cquarry's scope or already safe by construction; the per-file
+verdicts live in the roadmap's Calibre 9.17 watch audit section.
+
+- **The whitespace collapse now preserves the three non-breaking spaces**
+  (NO-BREAK SPACE, FIGURE SPACE, NARROW NO-BREAK SPACE), exactly like
+  upstream 9.17's `normalize_whitespace`. 9.16's plain `' '.join(x.split())`
+  -- mirrored by 1.26.2 -- silently turned them into regular spaces because
+  Python's `str.split()` treats them as whitespace, and upstream reverted
+  that as a regression in 9.17 after users hit it in text and comments
+  columns. All four `_write_pattern_a` branches and
+  `add_custom_column_values` normalize through the same helper; ends still
+  strip, breaking runs still collapse, and a trailing NBSP still strips away
+  with the ends (upstream's composite behavior).
+- **`add_data_file` writes through a temp file + atomic replace** (upstream
+  9.17's `add_extra_file` fix): opening the destination directly truncated
+  an existing file whenever the source read or the write failed part way.
+  A failed copy now leaves the old file intact and no temp orphan behind.
+- **Audited, no action**: `restore_original_format` cannot destroy the
+  current format on failure (cquarry reads the ORIGINAL bytes into memory
+  first and places them atomically after the rows commit -- upstream's
+  empty-placeholder bug never existed here); the trash move is a
+  same-filesystem atomic rename (`.caltrash` lives inside the library), so
+  the partial-copy data-loss class upstream fixed does not apply;
+  `set_format`'s file swap stays the caller's atomic-replace job by
+  contract; the remaining 9.17 work is notes-sidecar, in-memory cache, and
+  GUI-facing robustness that cquarry does not mirror.
+- 707 tests pass (four new: NBSP preservation for single-valued text, the
+  enum adapt-then-validate order with NBSP spellings, NBSP preservation in
+  multi-valued items and appends, and the failed-copy intact-destination
+  pin).
+
+## v1.28.0 (2026-10-11)
+
+### The entity case-change wave (issue #6)
+
+Third live occurrence of the same trap in the library (ABRAMS/Abrams on
+2026-10-04, then Daw Books/DAW Books and ROC/Roc on 2026-10-11, the ROC
+row carrying 40 accumulated books): a case-variant target spelling
+resolved NOCASE to the existing row and the setter reported already-so,
+silently no-oping the consolidation. Issue #6 offered two shapes; the fix
+takes the parity one, because the spec's documented rationale turned out
+to rest on a misreading of upstream.
+
+- **The spec premise was wrong, and said so plainly.** §5 deviation 12
+  (2026-09-12) claimed upstream's write default reuses a case-different
+  entity row as-is (`allow_case_change=False`), citing `get_db_id`. The
+  flag flows from `many_one`/`many_many`, whose callers default it True
+  (`Writer.set_books` db/write.py:558, `set_field` cache.py:1970 -- the
+  path Calibre's GUI metadata edits ride); only the retired legacy
+  `db.py` API wrapped False, and `change_case` then rewrites the row's
+  name and dirties every linked book. The rewritten deviation records
+  the correction in place, in the same class as the two upstream-factual
+  fixes the v1.25.0 audit landed.
+- **`set_publisher` consolidates case variants (the issue's headline).**
+  `set_publisher(id, "DAW Books")` on a `Daw Books` row now rewrites the
+  row's name to the requested spelling and touches + queues every book
+  linked to it, returning True. `set_series` is the same shape, indexes
+  untouched by an in-place re-case.
+- **Authors get the full upstream treatment.** `set_authors` (and every
+  path that funnels through it: `add_book`, the trash restore) compares
+  and stores the display form and updates each linked book's
+  `author_sort` only when it matched the string recomputed from the
+  stored sorts modulo case -- upstream's strcmp rule, so a hand-tuned
+  sort on an unrelated book survives a spelling fix made from another
+  book. The row's own `sort` is deliberately NOT rewritten: upstream's
+  `change_case` writes only the name column (its asort_map recompute is
+  session memory that reverts on reopen), so the stored sort -- and any
+  hand-tuning in it -- survives, with `set_author_sort_name` remaining
+  the re-keying verb. Paths re-lay through the usual deferred machinery.
+- **The tag surface stops fragmenting.** `add_tag` used to resolve the
+  exact spelling only and INSERT a duplicate row for a case variant --
+  the only cquarry path that could create case-duplicate rows. It now
+  resolves NOCASE and re-cases the shared row (every linked book
+  touched), and `remove_tag` gained the NOCASE fallback so removing
+  `roc` reaches a `ROC` row instead of honestly failing against the
+  case.
+- **Custom-column text family included, exclusions named.** Pattern-A
+  text/series/multi-text value rows re-case like the builtin entities
+  (upstream writes them through the same `many_one`/`many_many`), and
+  multi-valued items dedupe case-insensitively keeping the first
+  spelling (upstream's `uniq(vals, kmap)`), so `["ya", "YA"]` stores one
+  row. Deliberately excluded: custom enumerations (upstream's enum
+  writer hardcodes case changes off), languages (upstream keys them
+  exactly; odd-case rows reuse as-is), ratings (numeric), and the
+  rename/removal verbs, whose exact-spelling-first resolution is the
+  ratified 1.19 contract -- `rename_entity` remains the consolidation
+  tool, including for pre-existing case-duplicate rows cquarry
+  deliberately does not heal (`fix_case_duplicates` stays Calibre's).
+- **Eleven new regression tests** in `TestCaseChangeParity` (the DAW
+  scenario, series indexes, the author strcmp rule, tag
+  re-case/already-linked/removal, custom-column set/append/dedupe,
+  language reuse, batch rollback), plus the three tests that pinned the
+  old behavior re-pinned to the new contract.
+
+## v1.27.0 (2026-10-11)
+
+### The author display-form parity wave (the three issue #5 follow-ups)
+
+The 1.26.3 collision fix (issue #5, earlier today) made `set_authors`
+reuse an existing piped author row; its review verified three adjacent
+surfaces still resolving stored spellings only, each logged as a
+deliberate non-goal. Brandon chose to ship all three as one wave the
+same day. Together they complete the author display-form parity story:
+upstream keys EVERY author lookup by the display form (AuthorsTable
+unserializes stored pipes back to commas when it loads the id map,
+tables.py -- an authors-only flip), and its authors write adapter flips
+incoming pipes to commas before anything else.
+
+- **Lane 1, resolution (write surface).** `set_author_sort_name`,
+  `rename_entity` (old-name lookup AND merge detection),
+  `set_link_map(kind="authors")`, and `remove_entity_everywhere` now
+  resolve author names through `_resolve_author_id`: exact raw
+  spelling first, then that spelling NOCASE (lowest id, the ratified
+  1.19 contract untouched), then the piped display form NOCASE. A
+  comma name reaches a piped row instead of raising, and renaming to a
+  comma spelling whose piped form already exists MERGES into it, the
+  survivor keeping its stored name -- exactly upstream's replace path.
+- **Lane 2, layout.** `_first_author_name` (the single input every
+  path builder shares) now shows the display form, so directories and
+  format stems read `Leckie, Ann/...` for piped-stored authors where
+  1.26 laid out `Leckie_ Ann/` (the pipe hit `_ascii_filename`'s
+  illegal-character map). This is convergence, not a new divergence:
+  Calibre's own layout inputs are unserialized display forms.
+  Pre-1.27 underscore directories linger untouched until each book is
+  next written, then move -- the same shape as any layout correction;
+  no bulk migration, and `find_book_by_path`/`format_path_index` match
+  stored paths, so read-side matching is unaffected.
+- **Lane 3, inputs.** `set_authors` and `add_book` display-normalize
+  incoming author names before any resolution, dedupe, or path
+  construction (pipes become commas, upstream's authors-only write
+  adapter), so a pipe-bearing input resolves and stores exactly like
+  its comma form instead of matching only its own spelling and
+  INSERTing a duplicate. The other name-taking verbs deliberately do
+  NOT normalize: their raw-first resolution is what lets a caller
+  target a piped row by its stored spelling when both spellings exist.
+- Nine new regression tests across the three lanes (resolution
+  reaching piped rows through every verb, the display-form merge,
+  layout assertions for directories and format stems, the
+  underscore-to-display re-lay, and the piped-input round trip: input
+  pipes -> normalized -> stored piped -> layout display). Suite 683 to
+  692; spec.md, CLAUDE.md, API.md, and the roadmap's issue #5 section
+  document the completed surface.
+
+## v1.26.3 (2026-10-11)
+
+### set_authors resolves piped author rows instead of colliding with them (issue #5)
+
+Live failure on 2026-10-11 (big-wave library phase 3, book 10083): the
+author row existed as the pipe-import artifact `John William Strutt|
+Baron Rayleigh` and the caller called `set_authors(10083, ['John
+William Strutt, Baron Rayleigh'])`. The lookup tried the raw comma
+spelling only, missed, and the create path's INSERT
+(`name.replace(",", "|")`) died on UNIQUE(authors.name) against the
+piped row it was about to duplicate. The batch machinery rolled the
+143-book pass back cleanly, so no data was hurt, but the crash fires
+exactly when the comma form is the repair for an existing piped form,
+which is the author-byline-repair case the setter exists for.
+
+- **Author resolution now tries both spellings.** `set_authors` and
+  `add_book` resolve incoming display names through
+  `_author_row_for_name`: the raw spelling first (so `rename_entity`'s
+  verbatim comma rows keep winning), then the piped form the create
+  path would store, and only a double miss reaches the INSERT. This is
+  upstream's observable behavior: Calibre keys its author lookups by
+  the display form (AuthorsTable unserializes stored pipes back to
+  commas on load), so a comma-name lookup there already reuses piped
+  rows; cquarry's direct SQL needed both spellings tried explicitly.
+- **Reuse semantics are unchanged**: an existing row keeps its
+  hand-tuned `sort`, the stored spelling is never rewritten, a raw
+  comma match outranks a piped variant, and the orphaned piped
+  duplicate then falls to the setter's standard prune. To fix a reused
+  piped row's sort afterward, pass `set_author_sort_name` the STORED
+  piped spelling (the display comma name raises there; that verb still
+  resolves stored spellings only -- see the logged follow-ups).
+- **The add_book dry-run plan stays truthful for the reuse case**:
+  `_author_sort_keys` shares the same resolution, so a plan over a
+  comma name with an existing piped row reports `new: False` and the
+  row's stored sort instead of predicting a phantom new author.
+- **Logged follow-ups (adjacent surfaces this fix deliberately does not
+  touch**, each recorded in the roadmap's issue #5 section with
+  upstream citations): the on-disk layout for piped-named authors lays
+  out with the pipe mapped to an underscore (`Leckie_ Ann/`) where
+  upstream uses the display form -- pre-existing since the 1.26
+  creation shape, identical before and after this fix, and now on
+  record; the reverse resolution direction (a pipe-bearing input
+  against comma-spelled rows) still creates a second row where
+  upstream's write adapter would reuse; and `set_author_sort_name`/
+  `rename_entity`/`set_link_map` still resolve stored spellings only,
+  so display names raise where reuse now silently works.
+- No schema, read-path, or search changes; nothing else in the write
+  module resolved-and-inserted different spellings of the same name.
+  Six regression tests cover set_authors reuse, hand-tuned sorts,
+  NOCASE, comma-row precedence, add_book over a piped row, and the
+  dry-run plan.
+
+## v1.26.2 (2026-10-09)
+
+### Mirroring Calibre 9.16: the first parity-watch audit lane
+
+Calibre 9.16 shipped on 2026-10-09 and tripped the new parity-watch
+automation's schema-search tier (seven files under `src/calibre/db/`
+moved, the most since 9.12). The full read-only audit against this tree
+found one real divergence and ratified everything else; the per-file
+verdicts live in the roadmap's Calibre 9.16 watch audit section.
+
+- **Custom-column writes now collapse whitespace exactly like upstream's
+  text adapters**: single-valued text, series, and enumeration values go
+  through the `single_text` mirror (`' '.join(x.split())` over the
+  stripped string; a whitespace-only value clears via its empty-to-None
+  rule), and each item of a multi-valued text write collapses like
+  upstream's `multiple_text` adapter has always done -- in both write
+  verbs, `set_custom_column` and `add_custom_column_values`. Enumeration
+  values are adapted BEFORE validation, so a double-spaced spelling of a
+  listed value now normalizes and passes instead of raising. cquarry
+  used to strip ends only and store the interior verbatim, so rows
+  written here and rows written by the 9.16 GUI disagreed for values
+  carrying double spaces or line breaks. Comments columns are
+  unaffected: upstream deliberately moved them to the verbatim
+  `long_text` adapter, so their behavior is unchanged.
+- **Schema v27 ratified.** The `book_storage` table cquarry mirrored
+  from master in 1.25 shipped upstream in 9.16 with the same DDL and
+  write semantics; the audit confirmed the support gate (`user_version
+  > 27`, fresh libraries born at 28, upgrades land there too) and
+  cquarry's `_require_table` ValueError on pre-v27 schemas. No code
+  change was needed; CLAUDE.md's blob-writer bullet now records the
+  shipped fact.
+- **The roadmap records the audit**: the 9.16 verdict per file (the
+  search fast path and the categories cache need no action; the
+  read-path reworks are internal mechanics), the stale gap row for
+  `get_book_storage` (shipped in af41e52) removed, and the
+  snapshot-retry hardening candidate updated to 9.16's 60-second
+  busy-time budget + `can_use_sqlite_in` probe + /tmp fallback
+  reference shape.
+- Nothing is owed downstream: no caller in CalibreQuarry, bindery-cli,
+  Hermitage, or Carrel-calibre-web writes custom columns through
+  cquarry yet.
+
+## v1.26.1 (2026-10-02)
+
+### The closing sweep: documentation truth after the audit wave
+
+A verification sweep over the 1.26 wave's documentation found the prose
+lagging the shipped code and the recorded facts. No behavior changes; the
+only Python delta is one docstring. Every fix was re-verified against the
+current tree and upstream's reference clone before landing.
+
+- **CLAUDE.md's blob-writer bullets teach the 1.26 storage shapes.** The
+  bullets still described the 1.25 passthrough (str verbatim / raw
+  json.dumps / wrapped entry) and instructed "do not 'complete' that" --
+  which, after 1.26 shipped the conversion-options frame, read as a
+  mandate to revert a shipped fix. They now match spec §3.6 and API.md:
+  json.dumps on every plugin-data payload, upstream's deterministic
+  protocol-2 BINSTRING frame, the bare str->str map in the data column.
+- **The author-sort bullet carries the 1.26 refinements** (the honest
+  no-op on an equal stored sort and `update_books=False`'s row-only
+  write), and the four consumer-wave spots in CLAUDE.md and API.md speak
+  in the recorded past: Carrel 0.6.43 and Hermitage 1.8.6 retired their
+  helper copies on 2026-10-02.
+- **`set_plugin_data`'s docstring matches its body**: every payload goes
+  through `json.dumps(val, default=str)` since 1.26; the docstring's
+  first half still claimed a `str` stores verbatim.
+- **Spec §5 carries the search-audit divergences it promised.** New
+  entries 14-17 record the enum-multi count-operator scope, the
+  relative-date vocabulary pair (negative `Ndaysago` upstream, singular
+  `1dayago` here), `loc:="X"`'s contains-vs-exact result-set difference,
+  and the search-behavior preferences -- each verified against upstream's
+  reference clone, each dependency- or GUI-bound. The roadmap audit block
+  had claimed "§5 carries them" while §5 carried none of them.
+- **The audit's seventh search divergence is retracted.** Unregistered
+  `@name:` does not sweep as an `all:` text search upstream:
+  `get_user_category_matches` returns the empty set for an unknown name,
+  exactly like cquarry (db/search.py:601-602, :719-721, :907-929 in the
+  reference clone). There is no divergence to record; CLAUDE.md's
+  match-nothing claim was right all along, and the roadmap now says so.
+- **Erratum, tag v1.25.0 vs patchnotes.md.** Commit c03d7dc backticked
+  the `@Name` token in the v1.25.0 entry after the tag was cut (GitHub
+  autolinked the bare token as a mention), so the tag message and this
+  file differ by that one formatting pair. Tags are immutable and stay
+  untouched; the delta is recorded here rather than rewritten.
+
+## v1.26.0 (2026-10-02)
+
+### The parity audit's fix wave: every confirmed bug and divergence lands
+
+The 2026-10-02 eight-agent parity audit (four reviewers, two bug hunters,
+one compat-merge review, one claim verification -- 8/8 top claims confirmed)
+found three shipped-code bugs, eleven confirmed divergences, and a gaps
+list. This release fixes the bugs and the divergences users plausibly hit,
+and records the rest in the roadmap's audit block.
+
+- **`set_book_storage` stores upstream's bare data map** (was the wrapped
+  `{'timestamp', 'data'}` entry, which Calibre's validating reader dropped
+  on every cquarry-written row), with upstream's guards reproduced
+  (str-only keys/values, the 1 MiB UTF-16 cap, newest-timestamp-wins) and
+  the missing read half shipping as `get_book_storage`.
+- **`remove_book` cleans `books_pages_link` and `book_storage`** -- the two
+  FK-cascade tables neither `books_delete_trg` nor cquarry's
+  foreign-keys-off connection covered; the stranded pages row (its book
+  column is the PRIMARY KEY) broke `move_book_from_trash` with
+  IntegrityError on any library with page counts.
+- **`get_categories` follows upstream's `is_category = normalized` rule**
+  (direct-storage customs out -- their raw values made engine-unparseable
+  expressions), gains the identifiers category (one node per identifier
+  key), and escapes expression values for quotes/backslashes.
+- **Search parity, claim-verified:** bare-term sweeps match identifier
+  KEYS like upstream (the 1.18-1.25 spec sentence said otherwise and was
+  wrong about upstream); `all:false` is upstream's sequential loop
+  (missing AT LEAST ONE swept field, not missing every); `cover:` is
+  numeric with exactly true/false special-cased (`cover:1` works,
+  `cover:yes` raises).
+- **New author rows follow upstream's creation path**: the name stores
+  with commas as the legacy pipe and the sort is
+  `helpers.author_to_author_sort`'s flip under the default tweaks -- the
+  old verbatim defaults rested on a spec sentence that was factually
+  wrong about upstream.
+- **Writer fidelity:** `remove_format` queues the pages rescan;
+  `set_plugin_data` json.dumps's every payload (the str-verbatim
+  shortcut stored strings upstream's reader cannot decode);
+  `set_conversion_options` wraps payloads in upstream's deterministic
+  protocol-2 frame (fresh rows were unreadable by Calibre's unpickling
+  reader); `set_custom_series_index` writes the link row's extra float
+  and fresh series assignments seed it at 1.0;
+  `set_author_sort_name` gains `update_books=False` and its long-promised
+  honest no-op; `copy_book_from_library` carries a 0.0 series index
+  verbatim and its author-sort postprocess no longer rewrites existing
+  destination books.
+- Recorded, not adopted (roadmap audit block): the enum count-operator
+  gap, negative `Ndaysago`, `loc:="X"`'s contains-vs-exact degradation,
+  translated date vocabulary, the search-behavior prefs, upstream's
+  localized language node names, ICU sort keys, and the popularity/
+  first-letter sort parameters -- each dependency-bound or GUI-state-
+  bound, now named in spec §5 or the roadmap.
+- Housekeeping: the compat branch carries the merge-review erratum
+  (restored its own 1.18.0+py313.1 entry; suite count corrected to 653).
+- Suite: 672 tests (flat -- every fix reshaped existing pins rather than adding volume; the new pins replaced the wrong-shape ones one-for-one).
+
+
+
 ## v1.25.0+py313.1 (2026-10-02)
 
 ### The compat branch syncs forward to 1.25.0 (the Hermitage Flatpak ledger)

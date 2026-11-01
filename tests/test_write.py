@@ -1016,6 +1016,15 @@ class TestRemoveBook(unittest.TestCase):
             CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, book INTEGER UNIQUE, value INTEGER);
             CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
             CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+            CREATE TABLE books_pages_link (
+                book INTEGER PRIMARY KEY,
+                pages INTEGER DEFAULT 0 NOT NULL,
+                needs_scan INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TRIGGER books_pages_link_create_trigger AFTER INSERT ON books
+            BEGIN
+                INSERT INTO books_pages_link(book) VALUES (NEW.id);
+            END;
             -- The cascade trigger the real schema carries; remove_book cleans
             -- exactly what falls OUTSIDE this trigger.
             CREATE TRIGGER books_delete_trg AFTER DELETE ON books
@@ -1213,6 +1222,59 @@ class TestRemoveBook(unittest.TestCase):
             os.path.isdir(os.path.join(self.temp_dir, ".caltrash", "b", "1"))
         )
 
+    def test_remove_book_cleans_the_fk_cascade_tables_the_trigger_misses(self):
+        # The audit's HIGH (claim-verified): books_pages_link and
+        # book_storage carry ON DELETE CASCADE FKs that upstream's
+        # PRAGMA foreign_keys=ON fires but this write connection does not
+        # engage, and books_delete_trg covers neither. The stranded pages
+        # row (its book column is the PRIMARY KEY) used to make a later
+        # move_book_from_trash of the same id abort with IntegrityError.
+        # The fixture's create trigger already seeded the pages row (the
+        # real schema's shape: every book carries one automatically).
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_pages_link WHERE book = 1"),
+            [(1,)],
+        )
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1)
+        # Book 2's own auto-seeded row legitimately remains; book 1's is gone.
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_pages_link WHERE book = 1"),
+            [(0,)],
+        )
+
+    def test_remove_then_move_back_from_trash_round_trips(self):
+        # The end-to-end shape the stranding broke: trash a book with a
+        # pages row, restore it, and the resurrection must not hit the
+        # stranded PK.
+        book_dir = self._book_dir(1, "Doomed")
+        # Calibre's own backup thread writes this sidecar; move_book_from_trash
+        # refuses entries without one.
+        with open(os.path.join(book_dir, "metadata.opf"), "w") as f:
+            f.write(
+                "<?xml version='1.0' encoding='utf-8'?>"
+                "<package xmlns='http://www.idpf.org/2007/opf' version='2.0' unique-identifier='id'>"
+                "<metadata/><guide/></package>"
+            )
+        # The create trigger's auto-seeded pages row is the strander.
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM books_pages_link WHERE book = 1"),
+            [(1,)],
+        )
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.remove_book(1, delete_files="trash")
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.move_book_from_trash(1)
+        # Book 2 was never removed; book 1 is back (its empty OPF restores
+        # the Unknown placeholder title, the documented behavior).
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM books"), [(2,)])
+        self.assertEqual(self._sql("SELECT id FROM books ORDER BY id"), [(1,), (2,)])
+        # The directory relays to the restored metadata's place: the empty
+        # OPF restores title Unknown and no authors, which lays out bare
+        # Unknown/ (no author nesting).
+        self.assertTrue(os.path.isdir(os.path.join(self.temp_dir, "Unknown")))
+        self.assertFalse(os.path.isdir(book_dir))
+
     def test_remove_book_is_irreversible_second_call_raises(self):
         # Irreversible: the second call sees a book that is not there.
         with WritableCalibreDB(self.db_path) as wdb:
@@ -1313,8 +1375,14 @@ class _WriteSideTests:
         ).fetchone()[0]
         conn.close()
         self.assertEqual(names, ["Ann Leckie", "Zed A. Writer"])
-        self.assertEqual(asort, "Ann Leckie & Writer, Zed A.")  # new author sort=name
-        self.assertEqual(newsort, "Ann Leckie")  # new rows default sort=name
+        # 1.26: new authors follow upstream's creation path -- flipped sort,
+        # comma stored as the legacy pipe in the name column.
+        self.assertEqual(asort, "Leckie, Ann & Writer, Zed A.")
+        self.assertEqual(newsort, "Leckie, Ann")
+        self.assertEqual(
+            self._sql2("SELECT name FROM authors WHERE name LIKE 'Ann%'"),
+            [("Ann Leckie",)],
+        )
         self.assertEqual(others, 1)  # shared author survives for book 2
 
     def test_set_authors_noop_returns_false(self):
@@ -1341,7 +1409,11 @@ class _WriteSideTests:
     def test_set_publisher_roundtrip(self):
         with self._wdb() as wdb:
             self.assertTrue(wdb.set_publisher(1, "Orbit"))
-            self.assertFalse(wdb.set_publisher(1, "orbit"))  # NOCASE match
+            # 1.28 (issue #6): a case-different spelling re-cases the shared
+            # row (upstream allow_case_change=True), it is not a no-op.
+            self.assertTrue(wdb.set_publisher(1, "orbit"))
+            self.assertFalse(wdb.set_publisher(1, "orbit"))
+            self.assertEqual(self._sql2("SELECT name FROM publishers"), [("orbit",)])
             self.assertTrue(wdb.set_publisher(1, None))
         self.assertEqual(
             self._sql2("SELECT COUNT(*) FROM publishers"), [(0,)]
@@ -1493,6 +1565,196 @@ class _WriteSideTests:
             ],
         )
 
+    def _add_single_text_column(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_6 (
+                id INTEGER PRIMARY KEY, value TEXT UNIQUE NOT NULL, link TEXT DEFAULT ''
+            );
+            CREATE TABLE books_custom_column_6_link (
+                book INTEGER, value INTEGER, UNIQUE(book, value)
+            );
+            INSERT INTO custom_columns VALUES
+                (6,'shelf','Shelf','text',1,'{}',0,1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def _add_series_column(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_7 (
+                id INTEGER PRIMARY KEY, value TEXT UNIQUE NOT NULL, link TEXT DEFAULT ''
+            );
+            CREATE TABLE books_custom_column_7_link (
+                book INTEGER, value INTEGER, extra REAL, UNIQUE(book, value)
+            );
+            INSERT INTO custom_columns VALUES
+                (7,'myseries','My Series','series',1,'{}',0,1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_single_text_column_collapses_whitespace(self):
+        # Calibre 9.16's single_text adapter (upstream db/write.py) collapses
+        # whitespace runs and reduces a whitespace-only value to None, which
+        # clears; cquarry used to store the caller's bytes verbatim.
+        self._add_single_text_column()
+        with self._wdb() as wdb:
+            self.assertTrue(
+                wdb.set_custom_column(1, "#shelf", "  Hovering\r\n over   the\tTower  ")
+            )
+            # A messier spelling of the stored value is an honest no-op.
+            self.assertFalse(
+                wdb.set_custom_column(1, "#shelf", "Hovering over the Tower")
+            )
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_6"),
+            [("Hovering over the Tower",)],
+        )
+        with self._wdb() as wdb:
+            # "Doe, John" stays one value; single interior spaces survive.
+            self.assertTrue(wdb.set_custom_column(1, "#shelf", "Doe,  John"))
+            self.assertTrue(wdb.set_custom_column(1, "#shelf", "   \n  "))  # clear
+            self.assertFalse(wdb.set_custom_column(1, "#shelf", "\t"))  # already clear
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_6"), [(0,)])
+        self.assertEqual(
+            self._sql2("SELECT COUNT(*) FROM books_custom_column_6_link"), [(0,)]
+        )
+
+    def test_series_column_value_collapses_whitespace(self):
+        self._add_series_column()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#myseries", "The  First   Cycle"))
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_7"), [("The First Cycle",)]
+        )
+        # The series-index seeding rides the same write, untouched.
+        self.assertEqual(
+            self._sql2("SELECT book, extra FROM books_custom_column_7_link"),
+            [(1, 1.0)],
+        )
+
+    def test_single_text_preserves_non_breaking_spaces(self):
+        # Calibre 9.17 reverted 9.16's plain str.split() collapse: the three
+        # non-breaking spaces survive interior runs, ends still strip.
+        self._add_single_text_column()
+        with self._wdb() as wdb:
+            self.assertTrue(
+                wdb.set_custom_column(
+                    1, "#shelf", "  Hovering\r\n over\xa0 the\tTower  "
+                )
+            )
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_6"),
+            [("Hovering over\xa0 the Tower",)],
+        )
+        with self._wdb() as wdb:
+            # Figure space and narrow no-break space survive too; a trailing
+            # NBSP is end whitespace and strips away.
+            self.assertTrue(wdb.set_custom_column(1, "#shelf", "A\u2007B\u202fC\xa0"))
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_6"), [("A\u2007B\u202fC",)]
+        )
+
+    def test_enumeration_non_breaking_space_normalizes_before_validating(self):
+        # Adapt-before-validate with 9.17's NBSP preservation: breaking
+        # whitespace normalizes onto the listed value, but an NBSP spelling
+        # matches no listed value and still raises.
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#status", "  To   Read "))
+            with self.assertRaises(ValueError):
+                wdb.set_custom_column(1, "#status", "To\xa0 Read")
+
+    def test_multi_valued_items_preserve_non_breaking_spaces(self):
+        self._add_multi_text_column()
+        with self._wdb() as wdb:
+            self.assertTrue(
+                wdb.set_custom_column(1, "#crowd", ["Beta\xa0 Readers", "  Rin  "])
+            )
+        values = sorted(v for (v,) in self._sql2("SELECT value FROM custom_column_8"))
+        self.assertEqual(values, ["Beta\xa0 Readers", "Rin"])
+        # An end-NBSP spelling of an existing value collapses onto it and
+        # dedupes away (both write verbs normalize identically).
+        with self._wdb() as wdb:
+            self.assertEqual(
+                wdb.add_custom_column_values(1, "#crowd", ["Beta\xa0 Readers "]), 0
+            )
+
+    def test_enumeration_value_collapses_whitespace(self):
+        # Enumeration rides the same single_text adapter upstream, adapted
+        # BEFORE validation: a double-spaced spelling of a listed value
+        # normalizes and passes, a whitespace-only value clears (None).
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#status", "  To   Read "))
+            self.assertFalse(wdb.set_custom_column(1, "#status", "To Read"))  # no-op
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_1"), [("To Read",)]
+        )
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#status", "   \n"))  # clear
+            self.assertFalse(wdb.set_custom_column(1, "#status", " "))  # already clear
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_1"), [(0,)])
+
+    def _add_multi_text_column(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_column_8 (
+                id INTEGER PRIMARY KEY, value TEXT UNIQUE NOT NULL, link TEXT DEFAULT ''
+            );
+            CREATE TABLE books_custom_column_8_link (
+                book INTEGER, value INTEGER, UNIQUE(book, value)
+            );
+            INSERT INTO custom_columns VALUES
+                (8,'crowd','Crowd','text',1,'{}',1,1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_multi_valued_column_items_collapse_whitespace(self):
+        # Upstream's multiple_text adapter has always collapsed each item;
+        # cquarry stripped only until 1.26.2. The bare string stays ONE
+        # value, collapsed, never comma-split; set_custom_column is
+        # replace-only, so the final bare-string pass replaces the list.
+        self._add_multi_text_column()
+        with self._wdb() as wdb:
+            self.assertTrue(
+                wdb.set_custom_column(
+                    1, "#crowd", ["  Influencer\r\n Kings ", "Beta   Readers"]
+                )
+            )
+            self.assertFalse(
+                wdb.set_custom_column(
+                    1, "#crowd", ["  Influencer\r\n Kings ", "Beta\tReaders "]
+                )
+            )  # honest no-op: messy spellings collapse to the stored order
+        self.assertEqual(
+            sorted(v for (v,) in self._sql2("SELECT value FROM custom_column_8")),
+            ["Beta Readers", "Influencer Kings"],
+        )
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "#crowd", "Doe,  John"))
+        self.assertEqual(
+            self._sql2("SELECT value FROM custom_column_8"), [("Doe, John",)]
+        )
+        # The replaced list's value rows pruned with their links.
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM custom_column_8"), [(1,)])
+
+    def test_add_custom_column_values_collapses_whitespace(self):
+        self._add_multi_text_column()
+        with self._wdb() as wdb:
+            self.assertEqual(wdb.add_custom_column_values(1, "#crowd", ["  Rin  "]), 1)
+            # A messy spelling of an existing value collapses to it and
+            # dedupes away.
+            self.assertEqual(wdb.add_custom_column_values(1, "#crowd", ["Rin   "]), 0)
+        self.assertEqual(self._sql2("SELECT value FROM custom_column_8"), [("Rin",)])
+
     def test_custom_column_unknown_datatype_raises(self):
         conn = sqlite3.connect(self.db_path)
         conn.executescript(
@@ -1610,6 +1872,29 @@ class _WriteSideTests:
             self.assertTrue(wdb.set_has_cover(1, True))
             self.assertFalse(wdb.set_has_cover(1, True))
             self.assertTrue(wdb.set_has_cover(1, False))
+
+    def test_format_name_carrying_extension_raises(self):
+        # Issue #9, live case 11305: set_format(1, "EPUB", "<stem>.epub")
+        # stored the double-extended row, so reconcile-style readers built
+        # "<stem>.epub.epub" and reported the book unreadable. data.name is
+        # the stem; both row setters refuse the format's own extension.
+        with self._wdb() as wdb:
+            with self.assertRaises(ValueError):
+                wdb.add_format(1, "EPUB", "oldtitle.epub", 1024)
+            with self.assertRaises(ValueError):
+                wdb.set_format(1, "EPUB", "OldTitle - Author.epub", 1024)
+            with self.assertRaises(ValueError):
+                wdb.set_format(1, "epub", "oldtitle.EPUB", 1024)
+            # A dotted stem that is not the format's extension stays legal.
+            self.assertTrue(wdb.add_format(1, "EPUB", "Anon.2023", 1024))
+            # ORIGINAL_<FMT> rows refuse their own .original_<ext> spelling.
+            with self.assertRaises(ValueError):
+                wdb.add_format(1, "ORIGINAL_EPUB", "oldtitle.original_epub", 1)
+            self.assertTrue(wdb.add_format(1, "ORIGINAL_EPUB", "Anon.2023", 1))
+        self.assertEqual(
+            self._sql2("SELECT format, name FROM data WHERE book = 1 ORDER BY format"),
+            [("EPUB", "Anon.2023"), ("ORIGINAL_EPUB", "Anon.2023")],
+        )
 
 
 class TestWriteSideExpansion(_WriteSideFixture, _WriteSideTests, unittest.TestCase):
@@ -2055,7 +2340,9 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
         self.assertEqual(title, "The Fifth Head of Data")
         self.assertEqual(sort, "Fifth Head of Data, The")  # books_insert_trg
         self.assertEqual(len(uuid), 36)  # books_insert_trg uuid4()
-        self.assertEqual(author_sort, "Ann Leckie")  # new author, sort = name
+        # 1.26: new author, flipped sort (upstream's creation path); the
+        # path takes the first stored author name verbatim.
+        self.assertEqual(author_sort, "Leckie, Ann")
         self.assertEqual(path, "Ann Leckie/The Fifth Head of Data (3)")
         self.assertEqual(has_cover, 0)
         # Author link + the Count Pages create-trigger row.
@@ -2158,11 +2445,10 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
             fts.close()
 
     def test_add_book_cover_places_and_flags(self):
-        for sig, expected in (
-            (b"\xff\xd8\xff\xe0jpegbody", "cover.jpg"),
-            (b"\x89PNG\r\n\x1a\nrest", "cover.png"),
-        ):
-            with self.subTest(expected=expected):
+        # Issue #10: the seeded cover file is ALWAYS cover.jpg (upstream
+        # reads only COVER_FILE_NAME); PNG source data lands there verbatim.
+        for sig in (b"\xff\xd8\xff\xe0jpegbody", b"\x89PNG\r\n\x1a\nrest"):
+            with self.subTest(sig=sig[:4]):
                 with self._wdb() as wdb:
                     book_id = wdb.add_book(
                         "The Fifth Head of Data", ["Ann Leckie"], cover=sig
@@ -2171,8 +2457,15 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
                     "SELECT path FROM books WHERE id = ?", (book_id,)
                 )[0][0]
                 self.assertTrue(
-                    os.path.isfile(os.path.join(self.temp_dir, rel_path, expected))
+                    os.path.isfile(os.path.join(self.temp_dir, rel_path, "cover.jpg"))
                 )
+                self.assertFalse(
+                    os.path.exists(os.path.join(self.temp_dir, rel_path, "cover.png"))
+                )
+                with open(
+                    os.path.join(self.temp_dir, rel_path, "cover.jpg"), "rb"
+                ) as f:
+                    self.assertEqual(f.read(), sig)
                 self.assertEqual(
                     self._sql2("SELECT has_cover FROM books WHERE id = ?", (book_id,)),
                     [(1,)],
@@ -2276,10 +2569,19 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
         path = self._sql2("SELECT path FROM books WHERE id = ?", (book_id,))[0][0]
         self.assertEqual(path, "Ann Leckie/_nicode T_st (3)")
 
-    def test_add_book_existing_author_reuses_sort_nocase(self):
+    def test_add_book_existing_author_recases_to_incoming_spelling(self):
+        # 1.28 (upstream change_case): an author spelling differing only by
+        # case re-cases the shared row instead of silently reusing it; the
+        # row's own sort is untouched (upstream's change_case writes only
+        # the name column), so the book-level sort recomputes from the
+        # stored sort key, not from the new spelling.
         with self._wdb() as wdb:
             wdb.add_book("The Fifth Head of Data", ["zed a. writer"])
         self.assertEqual(self._sql2("SELECT COUNT(*) FROM authors"), [(1,)])
+        self.assertEqual(
+            self._sql2("SELECT name, sort FROM authors"),
+            [("zed a. writer", "Writer, Zed A.")],
+        )
         self.assertEqual(
             self._sql2("SELECT author_sort FROM books WHERE id = 3"),
             [("Writer, Zed A.",)],
@@ -2328,6 +2630,93 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
             second = wdb.add_book("Second", ["A"])
         self.assertEqual(plan["predicted_id"], first + 1)
         self.assertEqual(second, first + 1)
+
+    def test_add_book_comma_author_reuses_piped_row(self):
+        # Issue #5 at the add_book surface: an existing piped spelling
+        # (the create path's own storage form) is linked, not collided
+        # with at INSERT.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (2, 'Leckie| Ann', 'Leckie, Ann', '')")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("The Raven Tower", ["Leckie, Ann"])
+        self.assertEqual(book_id, 3)
+        self.assertEqual(self._count("SELECT COUNT(*) FROM authors"), 2)
+        self.assertEqual(
+            self._sql2("SELECT author FROM books_authors_link WHERE book = 3"),
+            [(2,)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 3"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_add_book_dry_run_reports_piped_row_as_existing(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO authors VALUES (2, 'Leckie| Ann', 'Custom, Sort', '')"
+        )
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            plan = wdb.add_book("The Raven Tower", ["Leckie, Ann"], dry_run=True)
+        self.assertEqual(
+            plan["authors"],
+            [{"name": "Leckie, Ann", "sort": "Custom, Sort", "new": False}],
+        )
+
+    def test_add_book_comma_author_lays_out_display_form(self):
+        # 1.27: the layout shows the display form (upstream's path inputs
+        # are unserialized id-map entries); 1.26 laid out `Leckie_ Ann/`.
+        source = self._epub()
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("The Raven Tower", ["Leckie, Ann"], formats=[source])
+        self.assertEqual(book_id, 3)
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 3"),
+            [("Leckie, Ann/The Raven Tower (3)",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT name FROM data WHERE book = 3"),
+            [("The Raven Tower - Leckie, Ann",)],
+        )
+        self.assertTrue(os.path.isdir(os.path.join(self.temp_dir, "Leckie, Ann")))
+        self.assertFalse(os.path.isdir(os.path.join(self.temp_dir, "Leckie_ Ann")))
+
+    def test_set_authors_reuse_relays_underscore_layout_to_display(self):
+        # The issue-#5 shape over a 1.26-era path column: the reuse write
+        # re-lays the stored path to the display-form directory.
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES (2, 'Leckie| Ann', 'Leckie, Ann', '');
+            UPDATE books SET path = 'Leckie_ Ann/Old Title (1)' WHERE id = 1;
+            """
+        )
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 1"),
+            [("Leckie, Ann/Old Title (1)",)],
+        )
+
+    def test_add_book_pipe_author_normalizes_end_to_end(self):
+        # 1.27 round trip: piped input -> display-normalized -> the create
+        # path pipes commas back for storage -> the layout shows display.
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("The Raven Tower", ["Leckie| Ann"])
+        self.assertEqual(book_id, 3)
+        self.assertEqual(
+            self._sql2("SELECT name FROM authors WHERE id = 2"),
+            [("Leckie| Ann",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 3"),
+            [("Leckie, Ann/The Raven Tower (3)",)],
+        )
 
     def test_add_book_failure_removes_rows_and_directory(self):
         # A directory squatting on the format-file path makes the atomic
@@ -3117,14 +3506,35 @@ class TestCoverManagement(_WriteSideFixture, unittest.TestCase):
         with open(os.path.join(self.book_dir, "cover.jpg"), "rb") as f:
             self.assertEqual(f.read(), jpeg)
 
-    def test_set_cover_png_replaces_stale_jpeg(self):
+    def test_set_cover_png_lands_cover_jpg_verbatim(self):
+        # Issue #10: PNG source data is stored at cover.jpg (upstream reads
+        # only COVER_FILE_NAME; a cover.png was invisible in the GUI), the
+        # bytes verbatim -- no stdlib transcode -- and any stale cover under
+        # the other name is swept.
         png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
         with open(os.path.join(self.book_dir, "cover.jpg"), "wb") as f:
             f.write(b"STALE")
         with self._wdb() as wdb:
             wdb.set_cover(1, png)
-        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.jpg")))
-        self.assertTrue(os.path.isfile(os.path.join(self.book_dir, "cover.png")))
+        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.book_dir, "cover.jpg")))
+        with open(os.path.join(self.book_dir, "cover.jpg"), "rb") as f:
+            self.assertEqual(f.read(), png)
+        self.assertEqual(
+            self._sql2("SELECT has_cover FROM books WHERE id = 1")[0][0], 1
+        )
+
+    def test_set_cover_sweeps_legacy_stale_png(self):
+        # A pre-1.28.3 book dir can carry an orphaned cover.png beside a
+        # JPEG-source cover.jpg; the next set_cover heals it.
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 32 + b"\xff\xd9"
+        with open(os.path.join(self.book_dir, "cover.png"), "wb") as f:
+            f.write(b"LEGACY PNG")
+        with self._wdb() as wdb:
+            wdb.set_cover(1, jpeg)
+        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.png")))
+        with open(os.path.join(self.book_dir, "cover.jpg"), "rb") as f:
+            self.assertEqual(f.read(), jpeg)
 
     def test_set_cover_rejects_unparseable_data(self):
         with self._wdb() as wdb, self.assertRaises(ValueError):
@@ -4359,13 +4769,22 @@ class TestAuthorSortNameAndLinkMap(_WriteSideFixture, unittest.TestCase):
             self.assertEqual(wdb.set_author_sort_name("zed a. writer", "W, Z.A."), 2)
 
     def test_author_sort_name_honest_noop(self):
+        # The docstring promised this from day one; the 1.25 body never
+        # compared (it touched and queued every book of the author). The
+        # 1.26 body honors it -- and the fixture's stored sort IS
+        # 'Writer, Zed A.', so the very first call is the no-op.
         with self._wdb() as wdb:
             self.assertEqual(
-                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed A."), 2
+                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed A."), 0
             )
-            # Equal stored sort: books recompute to the same string.
             self.assertEqual(
-                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed A."), 2
+                self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)]
+            )
+            self.assertEqual(
+                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed"), 2
+            )
+            self.assertEqual(
+                wdb.set_author_sort_name("Zed A. Writer", "Writer, Zed"), 0
             )
 
     def test_author_sort_name_rejects_empty_and_unknown(self):
@@ -4623,6 +5042,33 @@ class TestDataFiles(_WriteSideFixture, unittest.TestCase):
             self.assertEqual(db.get_data_file(1, "docs/readme.txt"), b"inline")
             self.assertEqual(db.get_data_file(1, "copy.bin"), b"from disk")
 
+    def test_failed_source_copy_leaves_destination_intact(self):
+        # Upstream 9.17's add_extra_file fix: writes go through a temp file
+        # + atomic replace, so a failure part way cannot truncate an
+        # existing file and no temp orphan survives.
+        from pathlib import Path
+        from unittest import mock
+
+        self._book_dir()
+        src = os.path.join(self.temp_dir, "src.bin")
+        with open(src, "wb") as f:
+            f.write(b"replacement")
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertEqual(wdb.add_data_file(1, "a.txt", b"original"), "a.txt")
+            data_file = next(Path(self.temp_dir).rglob("data/a.txt"))
+            with (
+                mock.patch(
+                    "shutil.copyfileobj", side_effect=RuntimeError("mid-copy failure")
+                ),
+                self.assertRaises(RuntimeError),
+            ):
+                wdb.add_data_file(1, "a.txt", src, replace=True)
+            self.assertEqual(data_file.read_bytes(), b"original")
+            self.assertEqual(list(data_file.parent.glob("*.cquarry-tmp")), [])
+            # The happy path still replaces, atomically.
+            self.assertEqual(wdb.add_data_file(1, "a.txt", src, replace=True), "a.txt")
+            self.assertEqual(data_file.read_bytes(), b"replacement")
+
     def test_add_conflict_semantics(self):
         self._book_dir()
         with WritableCalibreDB(self.db_path) as wdb:
@@ -4801,6 +5247,30 @@ class TestCopyBookFromLibrary(unittest.TestCase):
         with open(copied, "rb") as f:
             self.assertEqual(f.read(), b"\xff\xd8\xff\xe0jpegdata")
 
+    def test_copy_of_legacy_png_only_source_carries_no_cover(self):
+        # Issue #10: the source cover reads cover.jpg-only (upstream's
+        # COVER_FILE_NAME read), so a legacy png-only source book -- written
+        # by pre-1.28.3 set_cover -- copies WITHOUT a cover instead of
+        # carrying bytes Calibre could never display. Heal the source first
+        # when the art should ride along.
+        book_dir = os.path.join(
+            self.temp_dir, "src", "Leckie, Ann", "Ancillary Justice (1)"
+        )
+        os.unlink(os.path.join(book_dir, "cover.jpg"))
+        with open(os.path.join(book_dir, "cover.png"), "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\nlegacy")
+        with CalibreDB(self.src_path) as src, WritableCalibreDB(self.dest_path) as dest:
+            new_id = dest.copy_book_from_library(src, 1)
+        with CalibreDB(self.dest_path) as check:
+            row = check.get_book(new_id)
+            self.assertFalse(row["has_cover"])
+            self.assertIsNone(check.get_cover_path(new_id))
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(os.path.dirname(self.dest_path), row["path"], "cover.png")
+            )
+        )
+
     def test_missing_format_file_rolls_everything_back(self):
         conn = sqlite3.connect(self.src_path)
         conn.execute("UPDATE data SET name = 'vanished'")
@@ -4887,12 +5357,15 @@ class TestBlobWriters(unittest.TestCase):
             conn.close()
 
     def test_plugin_data_str_verbatim_json_serialized_and_delete(self):
+        # 1.26: every payload json.dumps's like upstream's writer -- a
+        # verbatim plain string was unreadable to upstream's json.loads
+        # reader (it needs quoted JSON strings).
         with WritableCalibreDB(self.db_path) as wdb:
             self.assertTrue(wdb.set_plugin_data(1, "wordcount", "5123"))
             self.assertTrue(wdb.set_plugin_data(1, "metrics", {"a": 1}))
             self.assertEqual(
                 self._sql("SELECT val FROM books_plugin_data WHERE name='wordcount'"),
-                [("5123",)],
+                [('"5123"',)],
             )
             self.assertEqual(
                 json.loads(
@@ -4916,32 +5389,67 @@ class TestBlobWriters(unittest.TestCase):
                 wdb.set_plugin_data(999, "name", "x")
 
     def test_conversion_options_passthrough_and_delete(self):
+        # 1.26: fresh payloads store inside upstream's protocol-2 BINSTRING
+        # frame, so Calibre's unpickling reader can decode them.
         with WritableCalibreDB(self.db_path) as wdb:
-            blob = b"\x80\x04 pickled-recipe-bytes"
-            self.assertTrue(wdb.set_conversion_options(1, blob))
+            self.assertTrue(wdb.set_conversion_options(1, b"recipe-bytes"))
             self.assertTrue(wdb.set_conversion_options(1, "text payload", fmt="mobi"))
             rows = self._sql(
                 "SELECT format, data FROM conversion_options ORDER BY format"
             )
             self.assertEqual(rows[0][0], "MOBI")  # NOCASE lookup, stored spelling ours
-            self.assertEqual(rows[1], ("PIPE", blob))
+            frame = rows[1][1]
+            self.assertTrue(frame.startswith(b"\x80\x02T"))
+            self.assertEqual(int.from_bytes(frame[3:7], "little"), 12)
+            self.assertEqual(frame[7:-1], b"recipe-bytes")  # 3 magic + 4 length
+            self.assertEqual(frame[-1:], b".")
             self.assertTrue(wdb.set_conversion_options(1, None, fmt="mobi"))
             self.assertFalse(wdb.set_conversion_options(1, None, fmt="mobi"))
             self.assertEqual(
                 self._sql("SELECT COUNT(*) FROM conversion_options"), [(1,)]
             )
 
-    def test_book_storage_wraps_and_clears(self):
+    def test_book_storage_stores_the_bare_map_and_clears(self):
+        # Upstream's column contract (the 1.25 shape bug, fixed): the data
+        # column is ONLY the str->str payload map, JSON-encoded; the
+        # timestamp lives in its own REAL column. The 1.25 wrapped
+        # {"timestamp", "data"} into the column and Calibre's reader
+        # silently dropped every such row.
         with WritableCalibreDB(self.db_path) as wdb:
-            self.assertTrue(wdb.set_book_storage(1, "epub", {"position": 0.42}))
-            row = self._sql("SELECT format, user_type, user, data FROM book_storage")[0]
+            self.assertTrue(wdb.set_book_storage(1, "epub", {"position": "0.42"}))
+            row = self._sql(
+                "SELECT format, user_type, user, timestamp, data FROM book_storage"
+            )[0]
             self.assertEqual(row[0], "EPUB")
             self.assertEqual((row[1], row[2]), ("local", "viewer"))
-            entry = json.loads(row[3])
-            self.assertEqual(entry["data"], {"position": 0.42})
-            self.assertIsInstance(entry["timestamp"], float)
+            self.assertIsInstance(row[3], float)
+            self.assertEqual(json.loads(row[4]), {"position": "0.42"})
             self.assertTrue(wdb.set_book_storage(1, "EPUB", None))
             self.assertFalse(wdb.set_book_storage(1, "EPUB", None))
+
+    def test_book_storage_non_string_values_raise(self):
+        # Upstream validate_book_storage: keys AND values must be str. The
+        # 1.25 test used a float value, which upstream's reader rejects.
+        # Both cases raise ValueError: upstream's InvalidBookStorage (a
+        # ValueError subclass) does not distinguish them.
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_book_storage(1, "EPUB", {"position": 0.42})
+            with self.assertRaises(ValueError):
+                wdb.set_book_storage(1, "EPUB", {1: "x"})
+
+    def test_book_storage_newer_entry_wins(self):
+        # Upstream's guard: an older entry never overwrites a newer one.
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.set_book_storage(1, "EPUB", {"v": "new"}))
+            # Force an older timestamp into the row, then replay an old write.
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("UPDATE book_storage SET timestamp = ?", (time.time() + 3600,))
+            conn.commit()
+            conn.close()
+            self.assertFalse(wdb.set_book_storage(1, "EPUB", {"v": "old"}))
+            row = self._sql("SELECT data FROM book_storage")[0]
+            self.assertEqual(json.loads(row[0]), {"v": "new"})
 
     def test_book_storage_non_dict_raises(self):
         with (
@@ -5006,11 +5514,584 @@ class TestBlobWriters(unittest.TestCase):
             wdb.set_plugin_data(1, "wordcount", "10")
         with CalibreDB(src_path) as src, WritableCalibreDB(self.db_path) as dest:
             new_id = dest.copy_book_from_library(src, 1)
-        self.assertEqual(
-            self._sql(
-                "SELECT format, data FROM conversion_options WHERE book=?", (new_id,)
-            ),
-            [("PIPE", b"recipe")],
-        )
+        # The destination stores the framed shape (upstream's column
+        # contract): the source's framed blob is unwrapped and re-framed.
+        dest_blob = self._sql(
+            "SELECT data FROM conversion_options WHERE book=?", (new_id,)
+        )[0][0]
+        self.assertTrue(dest_blob.startswith(b"\x80\x02T"))
+        self.assertEqual(dest_blob[7:-1], b"recipe")
         # The source book's plugin data does NOT follow (upstream's copy doesn't).
         self.assertEqual(self._sql("SELECT book FROM books_plugin_data"), [(1,)])
+
+
+class TestCustomSeriesIndex(unittest.TestCase):
+    """The custom-series index writer + the fresh-assignment seed
+    (1.26, Phase 17's D2)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT,
+                author_sort TEXT, timestamp TEXT, pubdate TEXT, last_modified TEXT,
+                series_index REAL, path TEXT, has_cover INTEGER);
+            INSERT INTO books (id, title) VALUES (1, 'One'), (2, 'Two');
+            CREATE TABLE custom_columns (id INTEGER PRIMARY KEY, label TEXT UNIQUE,
+                name TEXT, datatype TEXT, editable BOOL DEFAULT 1,
+                display TEXT DEFAULT '{}', is_multiple BOOL DEFAULT 0,
+                normalized BOOL DEFAULT 0);
+            INSERT INTO custom_columns VALUES (1,'sag','Saga','series',1,'{}',0,1);
+            CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT UNIQUE, link TEXT DEFAULT '');
+            CREATE TABLE books_custom_column_1_link (book INTEGER, value INTEGER, extra REAL, UNIQUE(book, value));
+            CREATE TABLE metadata_dirtied (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, UNIQUE(book));
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql(self, query):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query).fetchall()]
+        finally:
+            conn.close()
+
+    def test_fresh_assignment_seeds_extra_10(self):
+        # Upstream seeds a fresh series assignment's extra at 1.0; the 1.25
+        # writer left it NULL, making #sag_index permanently unreadable.
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_custom_column(1, "#sag", "Saga")
+        extra = self._sql("SELECT extra FROM books_custom_column_1_link")[0][0]
+        self.assertEqual(extra, 1.0)
+
+    def test_set_custom_series_index_updates_and_noops(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_custom_column(1, "#sag", "Saga")
+            self.assertTrue(wdb.set_custom_series_index(1, "#sag", 3.5))
+            self.assertFalse(wdb.set_custom_series_index(1, "#sag", 3.5))
+            self.assertEqual(
+                self._sql("SELECT extra FROM books_custom_column_1_link"),
+                [(3.5,)],
+            )
+            # None writes the schema's no-index value 1.0.
+            self.assertTrue(wdb.set_custom_series_index(1, "#sag", None))
+            self.assertEqual(
+                self._sql("SELECT extra FROM books_custom_column_1_link"),
+                [(1.0,)],
+            )
+
+    def test_unassigned_book_and_non_series_raise(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            with self.assertRaises(ValueError):
+                wdb.set_custom_series_index(2, "#sag", 2.0)
+            with self.assertRaises(ValueError):
+                wdb.set_custom_series_index(1, "title", 2.0)
+
+
+class TestAuthorCreationParity(unittest.TestCase):
+    """New author rows follow upstream's creation path (1.26, D5): the
+    name stores comma-as-pipe and the sort is author_to_author_sort's
+    flip -- the pre-1.26 verbatim defaults rested on the wrong claim
+    that upstream's flip runs only on GUI edits."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "metadata.db")
+        _make_simple_db(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)  # the insert trigger calls title_sort/uuid4
+        conn.executescript(
+            """
+            ALTER TABLE books ADD COLUMN author_sort TEXT;
+            CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT UNIQUE, sort TEXT);
+            CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+            INSERT INTO books (id, title, sort) VALUES (1, 'Target', 'Target');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _sql(self, query):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return [tuple(r) for r in conn.execute(query).fetchall()]
+        finally:
+            conn.close()
+
+    def test_new_comma_author_stores_piped_name_and_flipped_sort(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Leckie| Ann", "Leckie, Ann")],
+        )
+        # The book-level author_sort joins the stored sort keys.
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_existing_rows_keep_their_sorts(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'Hand Tuned', 'Custom, Sort')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Hand Tuned"])
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Hand Tuned", "Custom, Sort")],
+        )
+
+    def test_plain_names_are_unchanged(self):
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Ann Leckie"])
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Ann Leckie", "Leckie, Ann")],
+        )
+
+    def test_comma_name_reuses_existing_piped_row(self):
+        # Issue #5: the pipe-import artifact exists as the create path
+        # stores names; the comma display form must resolve to it instead
+        # of colliding with it at INSERT.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'Leckie| Ann', 'Leckie, Ann')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT id, name, sort FROM authors"),
+            [(1, "Leckie| Ann", "Leckie, Ann")],
+        )
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [(1,)],
+        )
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_piped_reuse_keeps_hand_tuned_sort(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO authors VALUES (1, 'Leckie| Ann', 'Hand Tuned, Sort')"
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Leckie| Ann", "Hand Tuned, Sort")],
+        )
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Hand Tuned, Sort",)],
+        )
+
+    def test_piped_row_recases_to_display_form(self):
+        # 1.28 (upstream change_case): a case-different display input
+        # re-cases the shared row; the stored all-caps pipe spelling gives
+        # way to the incoming display form and the sort recomputes from it.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'LECKIE| ANN', 'Leckie, Ann')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT id, name, sort FROM authors"),
+            [(1, "Leckie, Ann", "Leckie, Ann")],
+        )
+
+    def test_comma_row_wins_over_piped_variant(self):
+        # Both spellings exist (rename_entity leaves comma rows verbatim):
+        # the raw-form match takes precedence and the piped row is left
+        # untouched.
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES (1, 'Leckie, Ann', 'Leckie, Ann');
+            INSERT INTO authors VALUES (2, 'Leckie| Ann', 'Leckie, Ann');
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie, Ann"])
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [(1,)],
+        )
+        # The relink orphaned the piped variant; the standard prune takes it.
+        self.assertEqual(
+            self._sql("SELECT id, name FROM authors"), [(1, "Leckie, Ann")]
+        )
+
+    def test_set_author_sort_name_resolves_display_form(self):
+        # 1.27: the comma spelling reaches a piped row (the 1.26.3-era trap).
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES (1, 'Leckie| Ann', 'Wrong, Sort');
+            INSERT INTO books_authors_link VALUES (1, 1, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.set_author_sort_name("Leckie, Ann", "Leckie, Ann")
+        self.assertEqual(n, 1)
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Leckie| Ann", "Leckie, Ann")],
+        )
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_remove_entity_resolves_display_form(self):
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)  # the books INSERT trigger calls title_sort/uuid4
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES
+                (1, 'Leckie| Ann', 'Leckie, Ann'), (2, 'Solo', 'Solo');
+            INSERT INTO books (id, title, sort, author_sort) VALUES
+                (2, 'Second', 'Second', 'x');
+            INSERT INTO books_authors_link VALUES (1, 1, 1), (2, 2, 2);
+            INSERT INTO authors VALUES (3, 'Zed', 'Zed');
+            INSERT INTO books_authors_link VALUES (3, 2, 3);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.remove_entity_everywhere("authors", "Leckie, Ann")
+        self.assertEqual(n, 1)
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM authors"), [(2,)])
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [],
+        )
+        # Book 1 has no remaining authors: author_sort joins to ''.
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"), [("",)]
+        )
+
+    def test_rename_entity_resolves_display_form_and_merges_piped_target(self):
+        # Renaming a misspelled author to the comma display form of an
+        # existing piped row MERGES into it (the survivor keeps its stored
+        # piped name, exactly upstream's replace path).
+        conn = sqlite3.connect(self.db_path)
+        register_udfs(conn)
+        conn.executescript(
+            """
+            INSERT INTO authors VALUES
+                (1, 'Leckie| Ann', 'Leckie, Ann'),
+                (2, 'Leckie, Anne', 'Anne, Leckie');
+            INSERT INTO books_authors_link VALUES (1, 1, 2);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.rename_entity("authors", "Leckie, Anne", "Leckie, Ann")
+        self.assertEqual(n, 1)
+        self.assertEqual(
+            self._sql("SELECT id, name FROM authors"), [(1, "Leckie| Ann")]
+        )
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [(1,)],
+        )
+        # The merge recomputed the book's author_sort from the survivor.
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Leckie, Ann",)],
+        )
+
+    def test_rename_entity_resolves_piped_old_name(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'Leckie| Ann', 'Leckie, Ann')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.rename_entity("authors", "Leckie, Ann", "Ann Leckie")
+        self.assertEqual(n, 0)  # book 1 has no links: renamed, nothing re-laid
+        self.assertEqual(self._sql("SELECT name FROM authors"), [("Ann Leckie",)])
+
+    def test_pipe_input_normalizes_and_reuses_comma_row(self):
+        # 1.27: a pipe-bearing input is display-normalized first (upstream's
+        # authors write adapter flips pipes to commas), so it reuses the
+        # comma row instead of INSERTing a duplicate.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO authors VALUES (1, 'Leckie, Ann', 'Leckie, Ann')")
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Leckie| Ann"])
+        self.assertEqual(
+            self._sql("SELECT author FROM books_authors_link WHERE book = 1"),
+            [(1,)],
+        )
+        self.assertEqual(self._sql("SELECT COUNT(*) FROM authors"), [(1,)])
+
+    def test_set_link_map_resolves_display_form(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE custom_columns (
+                id INTEGER PRIMARY KEY, label TEXT, name TEXT, datatype TEXT,
+                is_multiple TEXT NOT NULL DEFAULT '', editable BOOL,
+                display TEXT DEFAULT '{}', normalized BOOL NOT NULL DEFAULT 0,
+                mark_for_delete BOOL NOT NULL DEFAULT 0
+            );
+            ALTER TABLE authors ADD COLUMN link TEXT DEFAULT '';
+            INSERT INTO authors (id, name, sort, link) VALUES
+                (1, 'Leckie| Ann', 'Leckie, Ann', '');
+            INSERT INTO books_authors_link VALUES (1, 1, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+        with WritableCalibreDB(self.db_path) as wdb:
+            n = wdb.set_link_map("authors", {"Leckie, Ann": "https://example.com/ann"})
+        self.assertEqual(n, 1)
+        self.assertEqual(
+            self._sql("SELECT link FROM authors WHERE id = 1"),
+            [("https://example.com/ann",)],
+        )
+
+
+class TestCaseChangeParity(_WriteSideFixture, unittest.TestCase):
+    """1.28 (issue #6): the name-taking setters re-case a shared entity row
+    when the requested spelling differs only by case -- upstream's
+    ``allow_case_change=True`` write default (``set_field`` ->
+    ``get_db_id``/``change_case``, db/write.py), replacing the
+    reuse-as-is shape spec §5 deviation 12 used to document. Every book
+    linked to the renamed row is touched and queued for OPF resync; authors
+    additionally recompute sorts and re-lay their books' on-disk layout."""
+
+    def _seed_publisher(self, name: str = "Daw Books") -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO publishers VALUES (1, ?, 'Daw Books', '')", (name,))
+        conn.execute("INSERT INTO books_publishers_link VALUES (1, 1, 1)")
+        conn.execute("INSERT INTO books_publishers_link VALUES (2, 2, 1)")
+        conn.commit()
+        conn.close()
+
+    def test_set_publisher_case_variant_recases_shared_row(self):
+        # The issue's live scenario: DAW Books vs Daw Books.
+        self._seed_publisher()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_publisher(1, "DAW Books"))
+        self.assertEqual(
+            self._sql2("SELECT id, name FROM publishers"), [(1, "DAW Books")]
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM books_publishers_link ORDER BY book"),
+            [(1,), (2,)],
+        )
+        # Both books show the new spelling; both queue for OPF resync.
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_set_series_case_variant_recases_and_keeps_indexes(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO series VALUES (1, 'imperial radch', 'radch, imperial', '')"
+        )
+        conn.execute("INSERT INTO books_series_link VALUES (1, 1, 1)")
+        conn.execute("INSERT INTO books_series_link VALUES (2, 2, 1)")
+        conn.execute("UPDATE books SET series_index = 3.0 WHERE id = 1")
+        conn.execute("UPDATE books SET series_index = 5.0 WHERE id = 2")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_series(1, "Imperial Radch"))
+        self.assertEqual(
+            self._sql2("SELECT id, name FROM series"), [(1, "Imperial Radch")]
+        )
+        # A re-case is an in-place rename: every index stays.
+        self.assertEqual(
+            self._sql2("SELECT id, series_index FROM books ORDER BY id"),
+            [(1, 3.0), (2, 5.0)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_set_authors_case_variant_updates_stale_sorts_only(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE authors SET name = 'zed a. writer' WHERE id = 1")
+        # Book 1 is the calling book (recomputes unconditionally); book 2's
+        # stored sort is a stale all-caps variant of the recomputed one;
+        # book 3's is hand-tuned beyond case and must survive the re-case.
+        # The recompute flows from the row's stored sort ("Writer, Zed
+        # A."), which the re-case deliberately does not rewrite.
+        conn.execute("UPDATE books SET author_sort = 'WRITER, ZED A.' WHERE id = 2")
+        conn.execute("UPDATE books SET path = 'zed a. writer/Other (2)' WHERE id = 2")
+        conn.execute(
+            "INSERT INTO books (id, title, sort, author_sort) "
+            "VALUES (3, 'Third', 'Third', 'W., Zed')"
+        )
+        conn.execute("INSERT INTO books_authors_link VALUES (3, 3, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_authors(1, ["Zed A. Writer"]))
+        self.assertEqual(
+            self._sql2("SELECT id, name, sort FROM authors"),
+            [(1, "Zed A. Writer", "Writer, Zed A.")],
+        )
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 1"),
+            [("Writer, Zed A.",)],
+        )
+        # The stale variant on the other book follows the re-case...
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 2"),
+            [("Writer, Zed A.",)],
+        )
+        # ...its directory re-lays to the new spelling...
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 2"),
+            [("Zed A. Writer/Other (2)",)],
+        )
+        # ...and the hand-tuned sort on book 3 survives untouched (upstream's
+        # strcmp rule), though the book is still touched and queued.
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 3"),
+            [("W., Zed",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,), (3,)],
+        )
+
+    def test_add_tag_case_variant_recases_shared_row(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO tags VALUES (1, 'sci-fi', '')")
+        conn.execute("INSERT INTO books_tags_link VALUES (1, 1, 1)")
+        conn.execute("INSERT INTO books_tags_link VALUES (2, 2, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.add_tag(1, "Sci-Fi"))
+        self.assertEqual(self._sql2("SELECT id, name FROM tags"), [(1, "Sci-Fi")])
+        self.assertEqual(
+            self._sql2("SELECT COUNT(*) FROM books_tags_link WHERE tag = 1"), [(2,)]
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_add_tag_case_variant_already_linked_returns_true(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO tags VALUES (1, 'sci-fi', '')")
+        conn.execute("INSERT INTO books_tags_link VALUES (1, 1, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            # The link exists; the re-case is the change.
+            self.assertTrue(wdb.add_tag(1, "Sci-Fi"))
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(1,)])
+
+    def test_remove_tag_case_variant_removes(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO tags VALUES (1, 'ROC', '')")
+        conn.execute("INSERT INTO books_tags_link VALUES (1, 1, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.remove_tag(1, "roc"))
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM tags"), [(0,)])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM books_tags_link"), [(0,)])
+
+    def test_set_custom_column_case_variant_recases_shared_value(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO custom_column_3 VALUES (1, 'ya', '')")
+        conn.execute("INSERT INTO books_custom_column_3_link VALUES (1, 1)")
+        conn.execute("INSERT INTO books_custom_column_3_link VALUES (2, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_custom_column(1, "audience", ["YA"]))
+        self.assertEqual(
+            self._sql2("SELECT id, value FROM custom_column_3"), [(1, "YA")]
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_add_custom_column_values_case_variant_no_duplicate_link(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO custom_column_3 VALUES (1, 'ya', '')")
+        conn.execute("INSERT INTO books_custom_column_3_link VALUES (1, 1)")
+        conn.execute("INSERT INTO books_custom_column_3_link VALUES (2, 1)")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            # The book already links the row under the old spelling: zero
+            # links added, but the re-case still lands and touches everyone.
+            self.assertEqual(wdb.add_custom_column_values(1, "audience", ["YA"]), 0)
+        self.assertEqual(
+            self._sql2("SELECT id, value FROM custom_column_3"), [(1, "YA")]
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM books_custom_column_3_link ORDER BY book"),
+            [(1,), (2,)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT book FROM metadata_dirtied ORDER BY book"),
+            [(1,), (2,)],
+        )
+
+    def test_set_custom_column_case_variant_items_dedupe(self):
+        # Within one call, case-variant items collapse to the first
+        # spelling (upstream many_many's uniq(vals, kmap)); no UNIQUE fight.
+        with self._wdb() as wdb:
+            wdb.set_custom_column(1, "audience", ["ya", "YA", "YA"])
+        self.assertEqual(self._sql2("SELECT value FROM custom_column_3"), [("ya",)])
+
+    def test_language_codes_reuse_without_recasing(self):
+        # Language codes are canonical spellings, not display names: an
+        # odd-case stored row is reused as-is (upstream keys them exactly).
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO languages VALUES (1, 'ENG', '')")
+        conn.commit()
+        conn.close()
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_languages(1, ["eng"]))
+        self.assertEqual(
+            self._sql2("SELECT id, lang_code FROM languages"), [(1, "ENG")]
+        )
+
+    def test_batch_rollback_undoes_case_rename(self):
+        self._seed_publisher()
+        with self._wdb() as wdb, self.assertRaises(RuntimeError), wdb.batch():
+            wdb.set_publisher(1, "DAW Books")
+            raise RuntimeError("boom")
+        self.assertEqual(
+            self._sql2("SELECT id, name FROM publishers"), [(1, "Daw Books")]
+        )
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM metadata_dirtied"), [(0,)])

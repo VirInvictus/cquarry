@@ -346,6 +346,153 @@ def author_sort_key(author_sort: str | None, primary_only: bool = False) -> str:
     return key
 
 
+# Upstream's default tweaks (resources/default_tweaks.py) behind
+# author_to_author_sort -- cquarry reads no tweaks file, so these ARE the
+# behavior; a consumer wanting tweak-driven sorts pre-computes author_sort
+# and writes it through the passthrough setter.
+_AUTHOR_SORT_COPY_METHOD = "comma"
+_AUTHOR_NAME_SUFFIXES = (
+    "Jr",
+    "Sr",
+    "Inc",
+    "Ph.D",
+    "Phd",
+    "MD",
+    "M.D",
+    "I",
+    "II",
+    "III",
+    "IV",
+    "Junior",
+    "Senior",
+)
+_AUTHOR_NAME_PREFIXES = ("Mr", "Mrs", "Ms", "Dr", "Prof")
+_AUTHOR_NAME_COPYWORDS = (
+    "Agency",
+    "Corporation",
+    "Company",
+    "Co.",
+    "Council",
+    "Committee",
+    "Inc.",
+    "Institute",
+    "National",
+    "Society",
+    "Club",
+    "Team",
+    "Software",
+    "Games",
+    "Entertainment",
+    "Media",
+    "Studios",
+)
+_AUTHOR_USE_SURNAME_PREFIXES = False
+_AUTHOR_SURNAME_PREFIXES = ("da", "de", "di", "la", "le", "van", "von")
+
+
+def _remove_bracketed_text(src: str) -> str:
+    """Upstream remove_bracketed_text: drop balanced (...)/[...]/{...}
+    spans (nesting tracked per bracket kind), keep everything else."""
+    counts: dict[str, int] = {}
+    total = 0
+    buf: list[str] = []
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    rmap = {v: k for k, v in pairs.items()}
+    for char in src:
+        if char in pairs:
+            counts[char] = counts.get(char, 0) + 1
+            total += 1
+        elif char in rmap:
+            idx = rmap[char]
+            if counts.get(idx, 0) > 0:
+                counts[idx] -= 1
+                total -= 1
+        elif total < 1:
+            buf.append(char)
+    return "".join(buf)
+
+
+def author_to_author_sort(author: str | None) -> str:
+    """Upstream's author_to_author_sort under its default tweaks
+    (``author_sort_copy_method = 'comma'``): an author already carrying a
+    comma sorts verbatim; otherwise the surname-prefixed tokens flip to
+    the front ("Ann Leckie" -> "Leckie, Ann"), honoring the default
+    prefixes/suffixes/copywords tables. Non-flippable authors (one token,
+    copywords like "Institute", all-prefix strings) sort verbatim. This
+    is what upstream applies when a NEW author row is created (1.26
+    adopts it there; the 1.25-and-earlier verbatim default was the
+    audit's D5 divergence).
+    """
+    if not author:
+        return ""
+    if _AUTHOR_SORT_COPY_METHOD == "copy":
+        return author
+
+    sauthor = _remove_bracketed_text(author).strip()
+    if _AUTHOR_SORT_COPY_METHOD == "comma" and "," in sauthor:
+        return author
+
+    tokens = sauthor.split()
+    if len(tokens) < 2:
+        return author
+
+    ltoks = frozenset(x.lower() for x in tokens)
+    copy_words = frozenset(x.lower() for x in _AUTHOR_NAME_COPYWORDS)
+    if ltoks.intersection(copy_words):
+        return author
+
+    use_surname_prefixes = _AUTHOR_USE_SURNAME_PREFIXES
+    surname_prefixes = frozenset(x.lower() for x in _AUTHOR_SURNAME_PREFIXES)
+    if (
+        use_surname_prefixes
+        and len(tokens) == 2
+        and tokens[0].lower() in surname_prefixes
+    ):
+        return author
+
+    prefixes = {y.lower() for y in _AUTHOR_NAME_PREFIXES}
+    prefixes |= {y + "." for y in prefixes}
+
+    first = len(tokens)
+    for i, tok in enumerate(tokens):
+        if tok.lower() not in prefixes:
+            first = i
+            break
+    else:
+        return author
+
+    suffixes = {y.lower() for y in _AUTHOR_NAME_SUFFIXES}
+    suffixes |= {y + "." for y in suffixes}
+
+    last = first - 1
+    for i in range(len(tokens) - 1, first - 1, -1):
+        if tokens[i].lower() not in suffixes:
+            last = i
+            break
+    else:
+        return author
+
+    suffix = " ".join(tokens[last + 1 :])
+
+    if (
+        use_surname_prefixes
+        and last > first
+        and tokens[last - 1].lower() in surname_prefixes
+    ):
+        tokens[last - 1] += " " + tokens[last]
+        last -= 1
+
+    atokens = tokens[last : last + 1] + tokens[first:last]
+    num_toks = len(atokens)
+    if suffix:
+        atokens = atokens + [suffix]
+        num_toks += 1
+    if num_toks < 2:
+        return author
+    res = ", ".join(atokens)
+    return res.removesuffix(",")
+
+
 def unpipe_author(name: str | None) -> str:
     """Resolve Calibre's legacy pipe separator in one author display name.
 

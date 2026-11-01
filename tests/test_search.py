@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 from cquarry.db import CalibreDB
-from cquarry.search import ParseException, SearchEngine, _Parser
+from cquarry.search import DT_BOOL, ParseException, SearchEngine, _Parser
 
 # --- In-memory provider for engine tests -----------------------------------
 
@@ -776,12 +776,19 @@ class TestSearchParityFixes(unittest.TestCase):
         self.assertEqual(self.s("3"), {4})
 
     def test_all_sweep_bare_true_false_is_the_presence_test(self):
-        # The 1.18 pin: with contains semantics, a bare true/false term is
-        # upstream's presence branch across the sweep (DS:849-855), not a
-        # substring match. Every fixture book has a title, so true matches
-        # everything and false matches nothing.
+        # The 1.18 pin, with the 1.26 `false` correction: a bare true/false
+        # term is upstream's presence branch across the sweep (DS:848-866),
+        # not a substring match. Every fixture book has a title, so true
+        # matches everything; false is upstream's missing-AT-LEAST-ONE --
+        # a book whose title is blank somewhere in the sweep's field list
+        # (comments, identifiers, cover...) qualifies, so the answer is
+        # the books with blank comments rather than nothing.
+        # Under upstream's missing-AT-LEAST-ONE semantics the answer is
+        # every book missing any swept field (a book lacking publisher or
+        # comments qualifies) -- the audit's 'nearly every book'. The two
+        # fully-blank fixture books (3, 4) are certainly in.
         self.assertEqual(self.s("true"), {1, 2, 3, 4})
-        self.assertEqual(self.s("false"), set())
+        self.assertEqual(self.s("false"), {1, 2, 3, 4})
 
     def test_all_sweep_presence_counts_identifiers_and_cover(self):
         # Isolated sweep: books with no text at all -- identifiers and the
@@ -798,11 +805,19 @@ class TestSearchParityFixes(unittest.TestCase):
                 "cover": False,
             },
             2: {
-                "title": "",
-                "authors": [],
-                "tags": [],
-                "comments": "",
-                "identifiers": {},
+                # The complete book: present in EVERY swept field (the
+                # author_sort key included -- it is one of the swept
+                # fields), so it is the one title missing from all:false.
+                "title": "t",
+                "authors": ["a"],
+                "author_sort": "a",
+                "series": "s",
+                "publisher": "p",
+                "tags": ["t"],
+                "comments": "c",
+                "formats": ["EPUB"],
+                "languages": ["eng"],
+                "identifiers": {"goodreads": "y"},
                 "cover": True,
             },
             3: {
@@ -833,10 +848,17 @@ class TestSearchParityFixes(unittest.TestCase):
 
         engine = SearchEngine(_BareProvider())
         self.assertEqual(engine.search("true"), {1, 2})
-        self.assertEqual(engine.search("false"), {3})
-        # Identifier keys do not text-sweep: a bare term matching an
-        # identifier key or value matches nothing here.
-        self.assertEqual(engine.search("isbn"), set())
+        # Upstream's missing-AT-LEAST-ONE semantics: only the complete
+        # book (2) stays out; books 1 and 3 each miss swept fields.
+        self.assertEqual(engine.search("false"), {1, 3})
+        # Identifier KEYS join the text sweep (the 1.26 audit: upstream's
+        # matcher iterates the identifiers dict, i.e. its keys -- the 1.18
+        # comment claiming otherwise was wrong about upstream). Book 1
+        # carries the isbn KEY; a bare `isbn` matches it. Values never
+        # sweep: book 1's value "x" matches nothing.
+        self.assertEqual(engine.search("isbn"), {1})
+        self.assertEqual(engine.search("x"), set())
+        self.assertEqual(engine.search("=isbn"), {1})
 
     def test_search_with_exact_prefix_resolves_saved_search(self):
         # Upstream removeprefix's the '=' before the saved-search lookup;
@@ -890,17 +912,57 @@ class TestBooleanKeywords(unittest.TestCase):
     def setUp(self):
         self.s = lambda q: _engine().search(q)
 
+    def test_cover_takes_true_false_and_numbers_only(self):
+        # The 1.26 audit (D4): upstream types cover as a numeric field with
+        # exactly true/false special-cased -- the 1.18-1.25 behavior ran
+        # cover through the full boolean vocabulary, which upstream never
+        # had. The vocabulary words raise on cover like any non-numeric.
+        self.assertEqual(self.s("cover:true"), {1, 2, 4})
+        self.assertEqual(self.s("cover:false"), {3})
+        self.assertEqual(self.s("cover:1"), {1, 2, 4})
+        self.assertEqual(self.s("cover:0"), {3})
+        for word in ("checked", "unchecked", "blank", "empty", "yes", "_checked"):
+            with self.assertRaises(ParseException):
+                self.s(f"cover:{word}")
+
     def test_checked_and_unchecked(self):
-        self.assertEqual(self.s("cover:checked"), {1, 2, 4})
-        self.assertEqual(self.s("cover:unchecked"), {3})
+        # The vocabulary lives on bool CUSTOM columns (upstream's tristate
+        # fields), pinned through a provider registering one. The shared
+        # engine has no bool column, so its #flag queries answer nothing
+        # (unknown locations match nothing) instead of raising.
+        books = {1: {"#flag": 1}, 2: {"#flag": 0}, 3: {"#flag": None}}
+
+        class _BoolP:
+            def all_ids(self):
+                return set(books)
+
+            def field(self, book_id, location):
+                return books[book_id].get(location)
+
+            def vl_expression(self, name):
+                return None
+
+            def saved_search(self, name):
+                return None
+
+            def custom_locations(self):
+                return {"#flag": DT_BOOL}
+
+        e = SearchEngine(_BoolP())
+        # cquarry's documented twostate behavior (spec 5.9): False and
+        # None both answer the false-side vocabulary.
+        self.assertEqual(e.search("#flag:checked"), {1})
+        self.assertEqual(e.search("#flag:unchecked"), {2, 3})
+        self.assertEqual(e.search("#flag:_blank"), {2, 3})
+        self.assertEqual(e.search("#flag:empty"), {2, 3})
 
     def test_blank_and_empty_mean_false(self):
-        self.assertEqual(self.s("cover:blank"), {3})
-        self.assertEqual(self.s("cover:empty"), {3})
+        self.assertRaises(ParseException, self.s, "cover:blank")
+        self.assertRaises(ParseException, self.s, "cover:empty")
 
     def test_underscore_variants(self):
-        self.assertEqual(self.s("cover:_checked"), {1, 2, 4})
-        self.assertEqual(self.s("cover:_blank"), {3})
+        self.assertRaises(ParseException, self.s, "cover:_checked")
+        self.assertRaises(ParseException, self.s, "cover:_blank")
 
     def test_tristate_rating_keywords(self):
         # 1.18 parity pin: numerics take exactly true/false as presence
@@ -1291,3 +1353,51 @@ class TestQuotedCustomColumnContains(unittest.TestCase):
         # 'To Read' is book 2's value; 'unread' matches nothing here, the
         # presence test stays word-based.
         self.assertEqual(self.db.search("#reading_status:unread"), set())
+
+
+class TestCoverVocabulary(unittest.TestCase):
+    """cover: is numeric upstream with true/false special-cased (the 1.26
+    audit's D4); 1.18-1.25 ran it through the full boolean vocabulary."""
+
+    def setUp(self):
+        books = {
+            1: {"cover": True},
+            2: {"cover": False},
+            3: {},
+        }
+
+        class _P:
+            def all_ids(self):
+                return set(books)
+
+            def field(self, book_id, location):
+                return books[book_id].get(location)
+
+            def vl_expression(self, name):
+                return None
+
+            def saved_search(self, name):
+                return None
+
+            def custom_locations(self):
+                return {}
+
+        self.e = SearchEngine(_P())
+
+    def test_true_false_special_cases(self):
+        self.assertEqual(self.e.search("cover:true"), {1})
+        self.assertEqual(self.e.search("cover:false"), {2, 3})
+
+    def test_numeric_values_work(self):
+        # cover:0 does NOT match book 3 (no cover key -> None): upstream's
+        # numeric probe skips None, exactly like it skips a null cover.
+        self.assertEqual(self.e.search("cover:1"), {1})
+        self.assertEqual(self.e.search("cover:=0"), {2})
+        self.assertEqual(self.e.search("cover:>0"), {1})
+        self.assertEqual(self.e.search("cover:false"), {2, 3})
+
+    def test_boolean_vocabulary_raises(self):
+        with self.assertRaises(ParseException):
+            self.e.search("cover:yes")
+        with self.assertRaises(ParseException):
+            self.e.search("cover:checked")

@@ -974,15 +974,19 @@ class CalibreDB:
         return out
 
     def get_cover_path(self, book_id: int, verify: bool = True) -> str | None:
-        """Resolve a book's cover image path (``cover.jpg``, falling back to
-        ``cover.png``).
+        """Resolve a book's cover image path (``cover.jpg`` only).
 
         Builds ``<library root>/<books.path>/cover.jpg`` per Calibre's storage
-        layout from the original DB location (snapshot-safe). With ``verify``
-        set (default), returns None instead of a path when no cover file
-        exists on disk; without it, returns the .jpg path unconditionally so
-        callers can distinguish 'catalogued' from 'present'. Raises ValueError
-        when the book is unknown.
+        layout from the original DB location (snapshot-safe). Upstream reads
+        ONLY ``COVER_FILE_NAME`` -- a ``cover.png`` is invisible to Calibre's
+        GUI, devices, and cover queries (issue #10) -- so the pre-1.28.3
+        ``cover.png`` fallback is gone: a legacy png-only book resolves None,
+        the GUI's own answer (heal it with one ``set_cover`` call, which
+        rewrites the bytes at ``cover.jpg``). With ``verify`` set (default),
+        returns None instead of a path when no cover file exists on disk;
+        without it, returns the .jpg path unconditionally so callers can
+        distinguish 'catalogued' from 'present'. Raises ValueError when the
+        book is unknown.
         """
         cur = self.conn.cursor()
         brow = cur.execute(
@@ -992,23 +996,22 @@ class CalibreDB:
             raise ValueError(f"Book {book_id} not found")
         root = os.path.dirname(os.path.abspath(self.db_path))
         jpg = os.path.join(root, brow["path"], "cover.jpg")
-        png = os.path.join(root, brow["path"], "cover.png")
         if not verify:
             return jpg
         if os.path.exists(jpg):
             return jpg
-        if os.path.exists(png):
-            return png
         return None
 
     def get_cover_bytes(self, book_id: int) -> bytes | None:
-        """A book's raw cover image bytes (``cover.jpg``, falling back to
-        ``cover.png``), or None when no cover file exists on disk.
+        """A book's raw cover image bytes (``cover.jpg`` only), or None when
+        no cover file exists on disk.
 
         The bytes half of :meth:`get_cover_path` (upstream ``Cache.cover()``,
         the bytestring mode web frontends serve and thumbnailers consume);
         resolution and the unknown-book ValueError are exactly
-        :meth:`get_cover_path`'s. The catalogued ``has_cover`` flag is not
+        :meth:`get_cover_path`'s -- ``cover.jpg`` only, so a legacy
+        png-only book (pre-1.28.3 ``set_cover``) reads as None, the
+        GUI's own answer. The catalogued ``has_cover`` flag is not
         consulted: the file's presence is the answer, so a catalogued-but-
         missing cover reads as None the same way the verified path read does.
         """
@@ -2222,6 +2225,50 @@ class CalibreDB:
             return []
         return [dict(row) for row in cur.fetchall()]
 
+    def get_book_storage(
+        self,
+        book_id: int,
+        fmt: str,
+        *,
+        user_type: str = "local",
+        user: str = "viewer",
+    ) -> dict[str, Any] | None:
+        """One book's viewer localStorage entry (upstream
+        ``Cache.book_storage_for_book``; the read half of
+        :meth:`cquarry.write.WritableCalibreDB.set_book_storage`'s table).
+
+        Returns ``{'timestamp': float, 'data': {key: value}}`` -- the
+        timestamp from the row's REAL column reassembled with the JSON-
+        decoded ``data`` column, exactly upstream's reassembly -- or None
+        when no row exists, the schema predates the (newer-Calibre) table,
+        or the stored payload fails upstream's validation (a str->str map;
+        invalid rows are what upstream's viewer also answers None to).
+        ``fmt`` is case-insensitive.
+        """
+        fmt = (fmt or "").strip().upper()
+        if not fmt:
+            raise ValueError("Book-storage format must not be empty")
+        cur = self.conn.cursor()
+        try:
+            row = cur.execute(
+                "SELECT timestamp, data FROM book_storage WHERE book = ? "
+                "AND format = ? AND user_type = ? AND user = ?",
+                (book_id, fmt, user_type, user),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None  # schema predates the table
+        if row is None:
+            return None
+        try:
+            data = json.loads(row["data"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(data, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in data.items()
+        ):
+            return None  # upstream validate_book_storage's rule
+        return {"timestamp": float(row["timestamp"]), "data": data}
+
     def get_conversion_profiles(
         self, book_id: int | None = None
     ) -> list[dict[str, Any]]:
@@ -2568,11 +2615,18 @@ class CalibreDB:
         reproducing the node against the engine.
 
         Categories: the builtin browse fields (authors, series, publisher,
-        tags, languages, formats, rating) plus every storage-backed custom
-        column keyed ``#label``. Composite columns stay gated by the §7 GPM
-        boundary; comments columns have no category values; user
+        tags, languages, formats, rating), the ``identifiers`` category
+        (one node per identifier key, upstream's own shape), and custom
+        columns keyed ``#label`` under upstream's rule -- only NORMALIZED
+        columns (text, enumeration, series, rating) are categories; the
+        direct-storage datatypes (int, float, bool, datetime, comments)
+        are not categories upstream and are not here either (1.25
+        over-included them; the 1.26 audit corrected the boundary).
+        Composite columns stay gated by the §7 GPM boundary; user
         categories, ``search``, and ``news`` are upstream GUI
-        synthesizations outside the portable subset. Where results overlap
+        synthesizations outside the portable subset. Expression values are
+        escaped (backslash and quote), so nodes with quotes in their names
+        still round-trip. Where results overlap
         :meth:`get_tag_browser_counts`, counts and average ratings agree
         (same data, same rule); two documented naming differences remain:
         rating nodes surface STARS -- ``"4.0"``, matching ``field()`` and
@@ -2595,6 +2649,10 @@ class CalibreDB:
         def _avg(ids: set[int]) -> float | None:
             vals = [rating_map[b] for b in ids if b in rating_map]
             return (sum(vals) / len(vals)) / 2.0 if vals else None
+
+        def _escape(value: str) -> str:
+            # Backslash first, then the quote: the lexer's escape pairs.
+            return value.replace("\\", "\\\\").replace('"', '\\"')
 
         def _node(
             node_id: int | None,
@@ -2633,7 +2691,7 @@ class CalibreDB:
                     name,
                     (meta.get(name, {}) or {}).get("sort") or name,
                     ids,
-                    f'{location}:="{name}"',
+                    f'{location}:="{_escape(name)}"',
                 )
                 for name, ids in buckets.items()
             ]
@@ -2649,6 +2707,28 @@ class CalibreDB:
             "formats": _from_rows("formats", "formats"),
         }
 
+        # Identifiers: one node per identifier KEY (upstream
+        # IdentifiersField.get_categories), id=None like formats; the
+        # expression is the keypair presence form, exact on the key.
+        ident_buckets: dict[str, set[int]] = {}
+        for b in restricted:
+            for key in self.get_identifiers(b["id"]) or {}:
+                ident_buckets.setdefault(key, set()).add(b["id"])
+        out["identifiers"] = [
+            _node(
+                None,
+                key,
+                key,
+                ids,
+                # Exact-key presence form. The key cannot contain a colon
+                # (upstream's identifier cleaning strips them), so the
+                # unquoted keypair is unambiguous; the = prefix makes the
+                # key match exact, so isbn13 never answers for isbn.
+                f"identifiers:={key}:true",
+            )
+            for key, ids in sorted(ident_buckets.items(), key=lambda kv: kv[0].lower())
+        ]
+
         # Rating: star nodes merged across legacy duplicate rating rows
         # (upstream merges same-star tags too), descending.
         star_buckets: dict[float, set[int]] = {}
@@ -2661,12 +2741,14 @@ class CalibreDB:
             for stars, ids in sorted(star_buckets.items(), reverse=True)
         ]
 
-        # Storage-backed custom columns, keyed #label. Normalized columns
-        # carry entity ids from their value tables; direct-storage columns
-        # name their nodes (id None, like formats).
+        # Custom columns, keyed #label, under upstream's is_category rule:
+        # NORMALIZED columns only (text, enumeration, series, rating).
+        # Direct-storage datatypes (int, float, bool, datetime, comments)
+        # are not categories upstream -- 1.25 over-included them, and their
+        # raw stored values made engine-unparseable node expressions.
         for col in self.get_custom_columns().values():
             datatype = col["datatype"]
-            if datatype in ("composite", "comments"):
+            if not col["normalized"]:
                 continue
             location = "#" + col["label"]
             try:
@@ -2713,7 +2795,7 @@ class CalibreDB:
                         str(value),
                         str(value),
                         ids,
-                        f'{location}:="{value}"',
+                        f'{location}:="{_escape(str(value))}"',
                     )
                     for value, ids in buckets.items()
                 ]
