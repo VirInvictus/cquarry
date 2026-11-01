@@ -1,3 +1,56 @@
+## v1.28.3 (2026-11-01)
+
+### The cover.jpg-only fix (issue #10)
+
+The 2026-11-01 CofD batch (9 PDFs) made it visible: covers rendered by
+`pdftoppm -png` and passed to `set_cover` were written as `cover.png`
+files with `has_cover=1`, so every programmatic check passed, yet
+Calibre's GUI showed nothing -- upstream Calibre reads ONLY
+`COVER_FILE_NAME`, which is `'cover.jpg'` (`db/constants.py`); its
+backend has no `cover.png` reference at all, so a `cover.png` is
+invisible in the GUI, in device pushes, and in every cover query. The
+1.18-1.28.2 write side (JPEG to `cover.jpg`, PNG to `cover.png` by the
+sniff-or-raise rule) and the read side's `cover.png` fallback were both
+upstream-divergent, and the fallback is what masked the divergence.
+
+- **`set_cover` and `add_book`'s cover seed now write the file ALWAYS
+  as `cover.jpg`** (the dry-run plan's `cover` field follows). The
+  sniff-or-raise rule stays as validation -- JPEG or PNG accepted,
+  anything unparseable still raises before `has_cover=1` -- and the
+  validated bytes land verbatim, PNG source included: upstream's own
+  `no_processing=True` shape. Upstream's DEFAULT path re-encodes PNG to
+  JPEG through PIL (`save_cover_data_to`, quality 90, alpha blended
+  onto white); cquarry has no stdlib JPEG encoder, so the verbatim
+  bytes are the recorded deviation (spec §5.18), and every upstream
+  reader (PIL, Qt, the content server) decodes by content signature
+  rather than extension, so the stored bytes display unchanged. A
+  stale `cover.png` is removed on every write, so legacy rows heal on
+  their next `set_cover`.
+- **The reader resolves `cover.jpg` ONLY.** `get_cover_path`,
+  `get_cover_bytes`, and `get_cover_last_modified` drop the
+  `cover.png` fallback: a legacy png-only book (written before this
+  release) now reads as coverless -- the GUI's own answer -- instead
+  of handing consumers bytes Calibre can never display. That is what
+  surfaces these books in `find_missing_cover_files` for healing;
+  one `set_cover(book_id, png_bytes)` call rewrites the same bytes at
+  `cover.jpg` and the book is fixed everywhere. The same jpg-only read
+  rides `copy_book_from_library`'s source-cover fetch (upstream's
+  `copy_one_book` reads `COVER_FILE_NAME` too): a legacy png-only source
+  book copies WITHOUT a cover, `has_cover=0` -- heal the source first if
+  the art should ride along. `remove_cover` still sweeps both names, and
+  a `cover.png` in a book dir stays a tolerated normal in
+  `check_library_disk` (legacy dirs only; nothing writes one anymore).
+- **Consumers verified in the same pass** (issue #10's downstream
+  sweep): Carrel-calibre-web has one test pinning the png fallback
+  (`test_cover_route_serves_png_primary_covers`) that needs the same
+  update; CalibreQuarry's cover-source ladder (the affected writer) and
+  Hermitage's cover display need no code change, only awareness --
+  issues filed in each tracker.
+
+Suite: 708 tests -> 710 (the stale-png sweep and a copy-verb
+png-only-source case were added; the png-fallback and png-naming pins
+were rewritten to the new contract).
+
 ## v1.28.2 (2026-10-29)
 
 ### The set_format extension-name guard (issue #9)
