@@ -94,6 +94,30 @@ with CalibreDB("~/Calibre Library/metadata.db") as db:
     print(db.get_dirtied_books())  # e.g. [42, 43]
 ```
 
+### Search quoting and regex
+
+The grammar is Calibre's, quoting rules included: only double quotes
+(`"..."`) and super-quotes (`"""..."""`) quote a value. Single quotes are
+ordinary characters, and unquoted `(` / `)` are boolean grouping operators,
+so wrapping a pattern in the shell's `'...'` shreds the query into bare
+terms that match nothing. Keep the shell quoting outermost and the grammar
+quoting innermost:
+
+```sh
+cquarry --search 'tags:"~(Fantasy|SciFi)" or authors:"~(Le Carré)"'
+```
+
+(The expression is frontend-agnostic: that command is CalibreQuarry's CLI
+passing it to `db.search()`, and Calibre's own search box parses it the
+same way.)
+
+The `~` regex marker goes inside the quotes (`tags:"~pat"`); the
+op-outside form (`tags:~"pat"`) misparses. Alternations are unanchored
+(`~Thriller` also matches a `Crime Thriller` tag), and regex values compare
+raw: accent-insensitive matching (é matching e) belongs to the default
+contains form and to `=` only, so spell accented names the way the library
+stores them.
+
 ## Installation
 
 ```sh
