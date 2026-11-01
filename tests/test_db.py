@@ -656,8 +656,10 @@ class TestLibraryUuidAndFormats(unittest.TestCase):
         try:
             c1 = db.get_cover_path(1)
             self.assertTrue(c1 and c1.endswith("cover.jpg"))
-            c2 = db.get_cover_path(2)  # png fallback
-            self.assertTrue(c2 and c2.endswith("cover.png"))
+            # Issue #10: cover.jpg only, like upstream's COVER_FILE_NAME --
+            # a legacy cover.png (pre-1.28.3 set_cover) resolves None, the
+            # GUI's own answer, instead of a file Calibre cannot display.
+            self.assertIsNone(db.get_cover_path(2))
             self.assertIsNone(db.get_cover_path(3))  # neither file exists
             unverified = db.get_cover_path(3, verify=False)
             self.assertTrue(unverified.endswith("cover.jpg"))
@@ -2576,10 +2578,12 @@ class TestCoverBytesAndFreshness(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
 
-    def test_cover_bytes_roundtrip_and_png_fallback(self):
+    def test_cover_bytes_roundtrip_and_legacy_png_reads_none(self):
+        # Issue #10: cover.jpg only. A legacy png-only book reads as None
+        # (the GUI's answer) rather than bytes Calibre can never display.
         with CalibreDB(self.db_path) as db:
             self.assertEqual(db.get_cover_bytes(1), b"jpeg-bytes")
-            self.assertEqual(db.get_cover_bytes(2), b"png-bytes")
+            self.assertIsNone(db.get_cover_bytes(2))
 
     def test_cover_bytes_none_without_file(self):
         with CalibreDB(self.db_path) as db:

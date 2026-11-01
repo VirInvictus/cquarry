@@ -302,8 +302,10 @@ def find_series_gaps(db: CalibreDB) -> dict[str, list[int]]:
 # could not be read at all. One pass over the library tree, categorized.
 # ---------------------------------------------------------------------------
 
-# Files every Calibre book directory may legitimately hold (plus cquarry's
-# cover.png, which set_cover can write beside upstream's cover.jpg).
+# Files every Calibre book directory may legitimately hold (cover.png is
+# legacy only: pre-1.28.3 set_cover wrote it and issue #10 stopped that, but
+# unhealed book dirs may still carry one -- tolerated, never written, never
+# resolved as THE cover).
 _BOOK_DIR_NORMALS = frozenset({"metadata.opf", "cover.jpg", "cover.png", "data"})
 
 # Library-root entries that are not book directories (upstream

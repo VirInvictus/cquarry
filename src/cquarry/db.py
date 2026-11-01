@@ -974,15 +974,19 @@ class CalibreDB:
         return out
 
     def get_cover_path(self, book_id: int, verify: bool = True) -> str | None:
-        """Resolve a book's cover image path (``cover.jpg``, falling back to
-        ``cover.png``).
+        """Resolve a book's cover image path (``cover.jpg`` only).
 
         Builds ``<library root>/<books.path>/cover.jpg`` per Calibre's storage
-        layout from the original DB location (snapshot-safe). With ``verify``
-        set (default), returns None instead of a path when no cover file
-        exists on disk; without it, returns the .jpg path unconditionally so
-        callers can distinguish 'catalogued' from 'present'. Raises ValueError
-        when the book is unknown.
+        layout from the original DB location (snapshot-safe). Upstream reads
+        ONLY ``COVER_FILE_NAME`` -- a ``cover.png`` is invisible to Calibre's
+        GUI, devices, and cover queries (issue #10) -- so the pre-1.28.3
+        ``cover.png`` fallback is gone: a legacy png-only book resolves None,
+        the GUI's own answer (heal it with one ``set_cover`` call, which
+        rewrites the bytes at ``cover.jpg``). With ``verify`` set (default),
+        returns None instead of a path when no cover file exists on disk;
+        without it, returns the .jpg path unconditionally so callers can
+        distinguish 'catalogued' from 'present'. Raises ValueError when the
+        book is unknown.
         """
         cur = self.conn.cursor()
         brow = cur.execute(
@@ -992,23 +996,22 @@ class CalibreDB:
             raise ValueError(f"Book {book_id} not found")
         root = os.path.dirname(os.path.abspath(self.db_path))
         jpg = os.path.join(root, brow["path"], "cover.jpg")
-        png = os.path.join(root, brow["path"], "cover.png")
         if not verify:
             return jpg
         if os.path.exists(jpg):
             return jpg
-        if os.path.exists(png):
-            return png
         return None
 
     def get_cover_bytes(self, book_id: int) -> bytes | None:
-        """A book's raw cover image bytes (``cover.jpg``, falling back to
-        ``cover.png``), or None when no cover file exists on disk.
+        """A book's raw cover image bytes (``cover.jpg`` only), or None when
+        no cover file exists on disk.
 
         The bytes half of :meth:`get_cover_path` (upstream ``Cache.cover()``,
         the bytestring mode web frontends serve and thumbnailers consume);
         resolution and the unknown-book ValueError are exactly
-        :meth:`get_cover_path`'s. The catalogued ``has_cover`` flag is not
+        :meth:`get_cover_path`'s -- ``cover.jpg`` only, so a legacy
+        png-only book (pre-1.28.3 ``set_cover``) reads as None, the
+        GUI's own answer. The catalogued ``has_cover`` flag is not
         consulted: the file's presence is the answer, so a catalogued-but-
         missing cover reads as None the same way the verified path read does.
         """

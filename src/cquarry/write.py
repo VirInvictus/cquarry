@@ -3450,12 +3450,19 @@ class WritableCalibreDB:
         """Write the book's cover file and set ``has_cover``.
 
         ``data`` is the image bytes, or a path to read them from. The
-        sniff-or-raise rule is ``add_book``'s: a JPEG lands as
-        ``cover.jpg``, a PNG as ``cover.png``, and anything unparseable
-        raises rather than being catalogued with ``has_cover=1``; a stale
-        cover under the OTHER extension is removed so
-        :meth:`cquarry.db.CalibreDB.get_cover_path` can never prefer it.
-        The file lands only after the commit (deferred inside a
+        sniff-or-raise rule is ``add_book``'s: JPEG or PNG data is
+        accepted, anything unparseable raises rather than being
+        catalogued with ``has_cover=1``. The file is ALWAYS
+        ``cover.jpg`` -- upstream Calibre only ever reads
+        ``COVER_FILE_NAME`` (issue #10: a ``cover.png`` was invisible in
+        the GUI, on devices, and in every cover query), so the validated
+        bytes land there verbatim, PNG included (upstream's
+        ``no_processing`` shape; its default path re-encodes PNG to JPEG
+        through PIL, which no stdlib encoder can mirror -- the recorded
+        §5 deviation). Readers sniff content over extension, so the GUI
+        displays the stored bytes unchanged. A stale ``cover.png`` is
+        removed so legacy pre-1.28.3 rows heal on their next write. The
+        file lands only after the commit (deferred inside a
         :meth:`batch`), so a failed pass never catalogues a cover it did
         not keep. Returns True; use :meth:`remove_cover` to clear.
         """
@@ -3467,8 +3474,7 @@ class WritableCalibreDB:
             with open(os.fspath(data), "rb") as f:
                 data = f.read()
         data = bytes(data)
-        ext = sniff_image_format(data)
-        if ext is None:
+        if sniff_image_format(data) is None:
             raise ValueError(
                 "Cover is neither JPEG nor PNG (sniff-or-raise: an "
                 "unparseable cover must not be catalogued with has_cover=1)"
@@ -3483,14 +3489,12 @@ class WritableCalibreDB:
                 (self._now(), book_id),
             )
             self._mark_dirty(book_id)
-            new_name = f"cover.{ext}"
-            other = "cover.png" if ext == "jpg" else "cover.jpg"
 
-            def _place(book_dir=book_dir, new_name=new_name, other=other, data=data):
+            def _place(book_dir=book_dir, data=data):
                 os.makedirs(book_dir, exist_ok=True)
-                _place_bytes(data, os.path.join(book_dir, new_name))
+                _place_bytes(data, os.path.join(book_dir, "cover.jpg"))
                 with contextlib.suppress(OSError):
-                    os.unlink(os.path.join(book_dir, other))
+                    os.unlink(os.path.join(book_dir, "cover.png"))
 
             self._pending_fs_ops.append(_place)
         return True
@@ -4231,7 +4235,10 @@ class WritableCalibreDB:
         (``data`` rows follow, one per file, type taken from the file
         extension), a cover (path or bytes; JPEG/PNG only, sniff-or-raise:
         an unparseable cover raises rather than being catalogued with
-        ``has_cover=1``), ``identifiers`` (types normalized like
+        ``has_cover=1``; the file is ALWAYS ``cover.jpg`` -- upstream
+        reads only ``COVER_FILE_NAME``, so PNG source data is stored
+        verbatim inside it, never as ``cover.png``, issue #10),
+        ``identifiers`` (types normalized like
         ``set_identifier``), one ``language`` (canonicalized through the
         search engine's map, ``English`` -> ``eng``; unknown names pass
         through verbatim, exactly like ``set_languages``), ``pubdate``, and
@@ -4389,9 +4396,9 @@ class WritableCalibreDB:
                     # a rollback undoes it.
                     self._mark_fts_dirty(book_id, fmt)
                 if cover_data is not None and cover_ext is not None:
-                    _place_bytes(
-                        cover_data, os.path.join(book_dir, f"cover.{cover_ext}")
-                    )
+                    # Always cover.jpg (upstream's COVER_FILE_NAME); the
+                    # sniffed extension only validated the bytes (issue #10).
+                    _place_bytes(cover_data, os.path.join(book_dir, "cover.jpg"))
                     self.conn.execute(
                         "UPDATE books SET has_cover = 1 WHERE id = ?", (book_id,)
                     )
@@ -4465,7 +4472,13 @@ class WritableCalibreDB:
         the FTS/pages queues fill in), the cover bytes, tags, series +
         index, publisher, rating, languages, identifiers, comments,
         ``pubdate``, and -- ``preserve_timestamp`` (upstream
-        ``preserve_date``) -- the addition timestamp. NOT carried, each for
+        ``preserve_date``) -- the addition timestamp. The source cover is
+        read through :meth:`cquarry.db.CalibreDB.get_cover_bytes`, so since
+        1.28.3 it is ``cover.jpg`` only (issue #10; upstream's
+        ``copy_one_book`` reads ``COVER_FILE_NAME`` too): a legacy png-only
+        source book copies WITHOUT a cover and ``has_cover=0`` -- heal the
+        source first (one ``set_cover`` call) if the art should ride along.
+        NOT carried, each for
         a recorded reason: annotations (the postprocess decline), ``data/``
         extras (outside the copy's scope), plugin data and conversion
         options (the conversion overrides DO ride along through
@@ -4618,7 +4631,7 @@ class WritableCalibreDB:
                 }
                 for fmt, src, ext, size in fmt_entries
             ],
-            "cover": f"cover.{cover_ext}" if cover_ext else None,
+            "cover": "cover.jpg" if cover_ext else None,
             "author_sort_computed": author_sort,
         }
 

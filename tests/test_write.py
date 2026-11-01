@@ -2445,11 +2445,10 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
             fts.close()
 
     def test_add_book_cover_places_and_flags(self):
-        for sig, expected in (
-            (b"\xff\xd8\xff\xe0jpegbody", "cover.jpg"),
-            (b"\x89PNG\r\n\x1a\nrest", "cover.png"),
-        ):
-            with self.subTest(expected=expected):
+        # Issue #10: the seeded cover file is ALWAYS cover.jpg (upstream
+        # reads only COVER_FILE_NAME); PNG source data lands there verbatim.
+        for sig in (b"\xff\xd8\xff\xe0jpegbody", b"\x89PNG\r\n\x1a\nrest"):
+            with self.subTest(sig=sig[:4]):
                 with self._wdb() as wdb:
                     book_id = wdb.add_book(
                         "The Fifth Head of Data", ["Ann Leckie"], cover=sig
@@ -2458,8 +2457,15 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
                     "SELECT path FROM books WHERE id = ?", (book_id,)
                 )[0][0]
                 self.assertTrue(
-                    os.path.isfile(os.path.join(self.temp_dir, rel_path, expected))
+                    os.path.isfile(os.path.join(self.temp_dir, rel_path, "cover.jpg"))
                 )
+                self.assertFalse(
+                    os.path.exists(os.path.join(self.temp_dir, rel_path, "cover.png"))
+                )
+                with open(
+                    os.path.join(self.temp_dir, rel_path, "cover.jpg"), "rb"
+                ) as f:
+                    self.assertEqual(f.read(), sig)
                 self.assertEqual(
                     self._sql2("SELECT has_cover FROM books WHERE id = ?", (book_id,)),
                     [(1,)],
@@ -3500,14 +3506,35 @@ class TestCoverManagement(_WriteSideFixture, unittest.TestCase):
         with open(os.path.join(self.book_dir, "cover.jpg"), "rb") as f:
             self.assertEqual(f.read(), jpeg)
 
-    def test_set_cover_png_replaces_stale_jpeg(self):
+    def test_set_cover_png_lands_cover_jpg_verbatim(self):
+        # Issue #10: PNG source data is stored at cover.jpg (upstream reads
+        # only COVER_FILE_NAME; a cover.png was invisible in the GUI), the
+        # bytes verbatim -- no stdlib transcode -- and any stale cover under
+        # the other name is swept.
         png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
         with open(os.path.join(self.book_dir, "cover.jpg"), "wb") as f:
             f.write(b"STALE")
         with self._wdb() as wdb:
             wdb.set_cover(1, png)
-        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.jpg")))
-        self.assertTrue(os.path.isfile(os.path.join(self.book_dir, "cover.png")))
+        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.book_dir, "cover.jpg")))
+        with open(os.path.join(self.book_dir, "cover.jpg"), "rb") as f:
+            self.assertEqual(f.read(), png)
+        self.assertEqual(
+            self._sql2("SELECT has_cover FROM books WHERE id = 1")[0][0], 1
+        )
+
+    def test_set_cover_sweeps_legacy_stale_png(self):
+        # A pre-1.28.3 book dir can carry an orphaned cover.png beside a
+        # JPEG-source cover.jpg; the next set_cover heals it.
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 32 + b"\xff\xd9"
+        with open(os.path.join(self.book_dir, "cover.png"), "wb") as f:
+            f.write(b"LEGACY PNG")
+        with self._wdb() as wdb:
+            wdb.set_cover(1, jpeg)
+        self.assertFalse(os.path.exists(os.path.join(self.book_dir, "cover.png")))
+        with open(os.path.join(self.book_dir, "cover.jpg"), "rb") as f:
+            self.assertEqual(f.read(), jpeg)
 
     def test_set_cover_rejects_unparseable_data(self):
         with self._wdb() as wdb, self.assertRaises(ValueError):
@@ -5219,6 +5246,30 @@ class TestCopyBookFromLibrary(unittest.TestCase):
         copied = os.path.join(dest_dir, row["path"], "cover.jpg")
         with open(copied, "rb") as f:
             self.assertEqual(f.read(), b"\xff\xd8\xff\xe0jpegdata")
+
+    def test_copy_of_legacy_png_only_source_carries_no_cover(self):
+        # Issue #10: the source cover reads cover.jpg-only (upstream's
+        # COVER_FILE_NAME read), so a legacy png-only source book -- written
+        # by pre-1.28.3 set_cover -- copies WITHOUT a cover instead of
+        # carrying bytes Calibre could never display. Heal the source first
+        # when the art should ride along.
+        book_dir = os.path.join(
+            self.temp_dir, "src", "Leckie, Ann", "Ancillary Justice (1)"
+        )
+        os.unlink(os.path.join(book_dir, "cover.jpg"))
+        with open(os.path.join(book_dir, "cover.png"), "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\nlegacy")
+        with CalibreDB(self.src_path) as src, WritableCalibreDB(self.dest_path) as dest:
+            new_id = dest.copy_book_from_library(src, 1)
+        with CalibreDB(self.dest_path) as check:
+            row = check.get_book(new_id)
+            self.assertFalse(row["has_cover"])
+            self.assertIsNone(check.get_cover_path(new_id))
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(os.path.dirname(self.dest_path), row["path"], "cover.png")
+            )
+        )
 
     def test_missing_format_file_rolls_everything_back(self):
         conn = sqlite3.connect(self.src_path)
