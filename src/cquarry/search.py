@@ -37,7 +37,8 @@ Coverage:
     the provider (Calibre stores them in the ``preferences`` table), including
     nested references with cycle detection.
   - Numeric relational (``= > < >= <= !=`` and ``true``/``false``), date
-    relational (incl. ``today``/``yesterday``/``thismonth``/``N daysago``),
+    relational (incl. ``today``/``yesterday``/``thismonth``/``lastmonth``/
+    ``thisyear``/``lastyear``/``N daysago``/``N monthsago``/``N yearsago``),
     boolean columns with the tristate keywords (``checked``, ``blank``, ...;
     numeric and date locations take exactly ``true``/``false`` as presence
     words, upstream parity).
@@ -685,6 +686,14 @@ def canonical_language(name: str) -> str:
     return mapped if mapped is not None else name.strip()
 
 
+def _months_ago(today: date, num: int) -> date:
+    """Upstream 9.18's months_ago: the first day of the month ``num``
+    months before ``today``'s month (``Nyearsago`` passes 12 * num and
+    compares at year precision)."""
+    year, month = divmod(today.year * 12 + today.month - 1 - num, 12)
+    return today.replace(year=year, month=month + 1, day=1)
+
+
 class _DateQuery:
     """Parsed date query: a comparison operator plus a target with precision."""
 
@@ -710,6 +719,14 @@ class _DateQuery:
             return today - timedelta(days=1), 3
         if ql in ("thismonth", "_thismonth"):
             return today.replace(day=1), 2
+        if ql in ("lastmonth", "_lastmonth"):
+            # Calibre 9.18's vocabulary: previous calendar month, compared
+            # at month precision (year + month), like thismonth.
+            return _months_ago(today, 1), 2
+        if ql in ("thisyear", "_thisyear"):
+            return today, 1
+        if ql in ("lastyear", "_lastyear"):
+            return _months_ago(today, 12), 1
         m = re.match(r"^(\d+)\s*(?:days?ago|_daysago)$", ql)
         if m:
             try:
@@ -719,6 +736,19 @@ class _DateQuery:
                 # the module's error contract is ParseException, never a
                 # raw OverflowError escaping the parser.
                 raise ParseException(f"Date out of range in query: {q!r}") from e
+        for pat, back, fc in (
+            (r"^(\d+)\s*(?:monthsago|_monthsago)$", 1, 2),
+            (r"^(\d+)\s*(?:yearsago|_yearsago)$", 12, 1),
+        ):
+            # Calibre 9.18's Nmonthsago / Nyearsago: month- and year-
+            # precision boundaries from the first of the month N months
+            # back (plural-only spellings, exactly like upstream).
+            m = re.match(pat, ql)
+            if m:
+                try:
+                    return _months_ago(today, int(m.group(1)) * back), fc
+                except (OverflowError, ValueError) as e:
+                    raise ParseException(f"Date out of range in query: {q!r}") from e
         # Calibre also accepts slashes as date separators: 2024/06/15.
         parts = q.replace("/", "-").split("-")
         try:

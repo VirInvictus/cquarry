@@ -10,6 +10,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import date, timedelta
 
 from cquarry.db import CalibreDB
 from cquarry.search import DT_BOOL, ParseException, SearchEngine, _Parser
@@ -1252,6 +1253,101 @@ class TestDateOverflowGuard(unittest.TestCase):
     def test_large_but_valid_daysago_still_matches(self):
         # 30000 days is ~82 years back (1944): every fixture book follows.
         self.assertEqual(self.s("pubdate:>30000daysago"), {1, 2, 3, 4})
+
+
+class TestDateVocabularyCalibre918(unittest.TestCase):
+    """Calibre 9.18 (d318054731) added lastmonth/thisyear/lastyear and
+    Nmonthsago/Nyearsago. `date` aliases `timestamp` (upstream's aliasing),
+    and the fixture's timestamp rows are known constants, so every expected
+    set is derived independently from those raw rows (never from the engine)
+    and stays stable as the calendar advances."""
+
+    def setUp(self):
+        self.s = lambda q: _engine().search(q)
+        self.by_year = {}
+        self.by_month = {}
+        for i, book in BOOKS.items():
+            ts = book["timestamp"]
+            self.by_year.setdefault(ts[:4], set()).add(i)
+            self.by_month.setdefault(ts[:7], set()).add(i)
+
+    def _prev_month(self, today):
+        first = today.replace(day=1)
+        return (first - timedelta(days=1)).replace(day=1)
+
+    def test_thisyear_is_year_precision(self):
+        year = str(date.today().year)
+        expected = self.by_year.get(year, set())
+        self.assertEqual(self.s("date:thisyear"), expected)
+        self.assertEqual(self.s("date:_thisyear"), expected)
+        self.assertEqual(self.s(f"date:{year}"), expected)
+        # Year precision: nothing outside the year matches, either side.
+        self.assertEqual(
+            self.s("date:>thisyear"),
+            {i for i, book in BOOKS.items() if book["timestamp"][:4] > year},
+        )
+        self.assertEqual(
+            self.s("date:<thisyear"),
+            {i for i, book in BOOKS.items() if book["timestamp"][:4] < year},
+        )
+
+    def test_lastmonth_is_previous_calendar_month(self):
+        prev = self._prev_month(date.today())
+        key = f"{prev.year}-{prev.month:02d}"
+        expected = self.by_month.get(key, set())
+        self.assertEqual(self.s("date:lastmonth"), expected)
+        self.assertEqual(self.s("date:_lastmonth"), expected)
+        self.assertEqual(self.s(f"date:{key}"), expected)
+        # Month precision: the same month one year earlier does not match.
+        earlier = f"{prev.year - 1}-{prev.month:02d}"
+        self.assertEqual(self.s(f"date:{earlier}"), self.by_month.get(earlier, set()))
+
+    def test_lastyear_is_previous_year(self):
+        year = str(date.today().year - 1)
+        expected = self.by_year.get(year, set())
+        self.assertEqual(self.s("date:lastyear"), expected)
+        self.assertEqual(self.s("date:_lastyear"), expected)
+        self.assertEqual(self.s(f"date:{year}"), expected)
+
+    def test_monthsago_is_month_precision_boundary(self):
+        today = date.today()
+        year, month = divmod(today.year * 12 + today.month - 1 - 3, 12)
+        key = f"{year}-{month:02d}"
+        self.assertEqual(self.s("date:3monthsago"), self.by_month.get(key, set()))
+        # Relational: on-or-after the boundary keeps the boundary's month;
+        # strictly before loses it.
+        self.assertEqual(self.s("date:>=3monthsago"), self.by_month.get(key, set()))
+        self.assertEqual(
+            self.s("date:<3monthsago"),
+            {i for i, book in BOOKS.items() if book["timestamp"][:7] < key},
+        )
+
+    def test_yearsago_is_year_precision_boundary(self):
+        year = str(date.today().year - 2)
+        self.assertEqual(self.s("date:2yearsago"), self.by_year.get(year, set()))
+        self.assertEqual(
+            self.s("date:<2yearsago"),
+            {i for i, book in BOOKS.items() if book["timestamp"][:4] < year},
+        )
+        self.assertEqual(
+            self.s("date:>2yearsago"),
+            {i for i, book in BOOKS.items() if book["timestamp"][:4] > year},
+        )
+
+    def test_overflow_and_rejected_shapes(self):
+        # Gigantic counts overflow date's range into ParseException, like
+        # daysago.
+        self.assertRaises(ParseException, self.s, "pubdate:100000000000monthsago")
+        self.assertRaises(ParseException, self.s, "pubdate:1000000000000000yearsago")
+        # The new words are plural-only upstream; a singular spelling is
+        # not vocabulary (cquarry's singular 1dayago stays the recorded
+        # §5.15 daysago edge).
+        self.assertRaises(ParseException, self.s, "pubdate:1monthago")
+        self.assertRaises(ParseException, self.s, "pubdate:1yearago")
+        # Negative counts raise (the §5.15 deviation: cquarry's \d+
+        # patterns reject where upstream's suffix search accepts).
+        self.assertRaises(ParseException, self.s, "pubdate:-3monthsago")
+        self.assertRaises(ParseException, self.s, "pubdate:-2yearsago")
 
 
 class TestQuotedCustomColumnContains(unittest.TestCase):
