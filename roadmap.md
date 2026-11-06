@@ -805,6 +805,65 @@ written:
   need awareness only; bindery-cli never touches cover APIs. Issues filed
   in the three trackers.
 
+## The Calibre 9.18 watch audit (2026-11-05, parity-watch automation)
+
+The watch's third schema-search trip, and the heaviest release since 9.12:
+8,316 lines across 79 db files, thirteen high-tier files tripping the
+verdict. The volume turned out to be a repo-wide type-annotation sweep
+(`aa8463740f` enforced typing for the db package; `74cf42e581`,
+`659759d899`, `ad42fa09db` annotated library/ebooks/db and fixed latent
+bugs found on the way; the lint auto-fixes rode along). Full read-only
+audit against this tree (then v1.28.3); suite 710 -> 716 with six new
+regression tests; the one parity gap shipped same day as v1.29.0.
+
+- **The date-search vocabulary, mirrored (1.29.0).** `d318054731` added
+  `lastmonth` (previous calendar month, month precision), `thisyear`
+  (year precision), `lastyear` (year precision), and the counted
+  `Nmonthsago`/`Nyearsago` (month and year precision), all driven by a
+  `months_ago` helper (first day of the month N months back, a clean
+  divmod). cquarry mirrors the helper as `_months_ago` and the five words
+  in `_parse_target`; the existing `_eq`/`_gt`/`_lt` precision machinery
+  (fc 1/2/3) needed no changes. The new words keep the recorded §5.15
+  edges: `\d+` counts only (negative counts raise where upstream's suffix
+  search accepts) and English-only spellings (upstream's `_()`-localized
+  forms stay unmirrored); upstream's new words are plural-only, mirrored
+  exactly, so no new singular edge. Gigantic counts raise ParseException
+  like `Ndaysago`.
+- **Date-precision fix: no action.** `e4903034eb` fixed upstream's
+  dateutil-based parser comparing dotted and month-name spellings
+  (`15.01.2020`, `January 2020`) by year only -- the precision was chosen
+  by counting `-`/`/` separators. cquarry's explicit-format parser
+  (`-`/`/` separated year/month/day only) REJECTS those spellings instead
+  of parsing them, so the mis-compare cannot occur here; the
+  format-acceptance difference is the recorded §5.7 dependency-bound
+  deviation, now slightly wider (upstream also handles `month.year`/
+  `year.month` dotted forms explicitly).
+- **Fieldless-numeric fix: no action.** `55dd295877` fixed upstream's bare
+  `int(float(query))` truncation (`3.7` matched 3 stars, `0.4` matched
+  unrated books, `2.5` matched 2 stars but not 2.5). cquarry's bare-term
+  numeric probe (`_ALL_NUMERIC_FIELDS`, exact float equality) never
+  truncated -- probe-verified against a throwaway library: whole and half
+  stars match, `3.7` does not match 3 stars, `1.5` does not match int 1,
+  `0.4` matches nothing, and quarter-star ratings cannot exist on either
+  side (both round to whole internal units). Recorded observation, not a
+  9.18 delta: the bare-term probe covers builtin numerics only
+  (`series_index`, `rating`, `pages`, `size`); upstream's bare sweep also
+  reaches custom numeric columns -- a §5 candidate if ever wanted.
+- **Schema: unchanged.** `user_version` stays 28; the `schema_upgrades.py`
+  diff was type annotations only (same for the notes/ and fts/ sidecar
+  schema files).
+- **Annotations rework: no action.** `annotations.py` (+135/19) is type
+  annotations plus upstream's `CFISortKey` sort-key rework for the
+  highlight merge/sort fixes (`3261111b5f`, `eac0a848a3`) -- viewer-side
+  ordering cquarry's decoded reads do not mirror.
+- **Latent-bug fixes: no action.** `263f8c8fb8`'s real fixes are a
+  hardcoded `can_cache` flag (query-planner internal), a bytes-decode path
+  in the multiple-sep split (cquarry's typed API takes strings), and
+  empty-source guards for format paths cquarry's existing validation
+  already covers (the 1.28.2 extension-name guard family). `366e49fb3b`
+  (content-server per-library restrictions) and `f1e441bd32` (calibredb
+  remote-template guard) are server/CLI surface cquarry does not mirror.
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
 - [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference

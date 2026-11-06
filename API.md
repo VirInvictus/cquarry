@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.28.3
+**Version:** 1.29.0
 
 ## Public API
 
@@ -499,6 +499,11 @@ timestamp:<2024-06
 last_modified:=today
 pubdate:>=yesterday
 timestamp:thismonth
+pubdate:lastmonth      # the previous calendar month (month precision)
+pubdate:thisyear       # any date this year (year precision)
+pubdate:lastyear       # the whole of last year
+pubdate:>=3monthsago   # on/after the first of the month 3 months back
+pubdate:<2yearsago     # before January of the year 2 years back (year precision)
 pubdate:2024          # matches any date in 2024
 pubdate:2024-06       # matches any date in June 2024
 pubdate:2024-06-15    # matches that exact day
