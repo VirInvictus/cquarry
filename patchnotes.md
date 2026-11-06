@@ -1,3 +1,41 @@
+## v1.29.0 (2026-11-05)
+
+### The Calibre 9.18 date-search vocabulary
+
+The parity-watch automation's third schema-search trip (v9.18.0, tagged
+2026-11-06: a repo-wide type-annotation sweep wrapped around real
+search-grammar work). The full read-only audit found one parity gap and
+verified everything else is either out of scope or already safe by
+construction; the per-file verdicts live in the roadmap's Calibre 9.18
+watch audit section.
+
+- **Five new date-search keywords, mirrored from upstream**: `lastmonth`
+  (the previous calendar month, compared at month precision), `thisyear`
+  (this year, year precision), `lastyear` (last year, year precision), and
+  the counted forms `N monthsago` and `N yearsago`, which bound at the
+  first day of the month N months back (month precision) and the year N
+  years back (year precision). All work with the relational operators, like
+  the existing `today`/`thismonth`/`N daysago` vocabulary. The new words
+  raise `ParseException` on gigantic counts and reject negative counts and
+  singular spellings, exactly like upstream (the recorded §5.15 edges
+  carry over unchanged).
+- **Audited, no action**: upstream's date-precision fix (dotted and
+  month-name spellings used to compare by year only) lives in its dateutil
+  parser; cquarry's explicit-format parser rejects those spellings instead
+  of parsing them (the recorded §5.7 deviation), so the mis-compare cannot
+  occur here. The fieldless-numeric fix (a bare `3.7` used to match 3
+  stars) fixed a truncation cquarry never had: its bare-term probe is
+  exact float equality, probe-verified equivalent to the fixed semantics
+  for every storable value. The schema did not change (user_version stays
+  28); the annotations rework is upstream's viewer-side sort keys; the
+  8,000-line volume is typing enforcement whose three latent-bug fixes are
+  upstream-internal or covered by existing validation.
+- 710 -> 716 tests (six new: each word asserted against an expected set
+  derived independently from the fixture's raw timestamp rows, plus the
+  overflow, plural-only, and negative-count edges).
+- Also riding the tag: the README's search documentation gained the
+  quoting and regex rules (the post-1.28.3 docs commit `6383b3c`).
+
 ## v1.28.3 (2026-11-01)
 
 ### The cover.jpg-only fix (issue #10)
