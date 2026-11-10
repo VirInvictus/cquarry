@@ -3,7 +3,7 @@
 The full per-method reference. The [README](README.md) keeps the hero, the
 quick-starts, and the search grammar; everything callable lives here.
 
-**Version:** 1.29.0
+**Version:** 1.29.1
 
 ## Public API
 

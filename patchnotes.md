@@ -1,3 +1,36 @@
+## v1.29.1 (2026-11-09)
+
+### The author_sort flip assembly (issue #11)
+
+New author rows written through `add_book`/`set_authors` carried flawed
+sort keys on multi-token names: the flip's assembly comma-joined every
+token, so "Paul S. Kemp" stored "Kemp, Paul, S." where Calibre writes
+"Kemp, Paul S.", and suffixes landed as "Egremont, Carlton, III"
+instead of "Egremont, Carlton III". Two-token names were unaffected
+(with exactly two tokens the two joiners coincide), which is why the
+shape hid until a phase-2 import batch of three-token authors hit it.
+
+- `helpers.author_to_author_sort` now transcribes upstream's assembly
+  verbatim (verified against Calibre's own function over a differential
+  corpus: zero disagreements, including all eight shapes from the
+  issue). The comma rides the surname token alone and the rest
+  single-space joins, suffix tokens stay trailing behind the comma, and
+  the token count that gates the comma is taken before the suffix
+  joins. The lone-usable-token edge matches upstream now too ("Dr
+  Plato" sorts "Plato" with the prefix dropped; "Dr Plato Jr" sorts
+  "Plato Jr" with no comma), where the old copy returned the original
+  string and comma-joined the suffix.
+- **Existing bad sorts do not heal on their own.** Author-row reuse
+  keeps a row's stored sort (the hand-tuned-sort guarantee), so rows
+  written by 1.26 through 1.29.0 keep the broken shape until repaired.
+  The heal verb is `set_author_sort_name(display_name, proper_sort)`
+  per affected row, the same repair issue #11 used.
+- 716 -> 726 tests (ten new: the eight issue shapes as direct helper
+  tests plus the suffix, verbatim, lone-token, copyword, None,
+  bracketed, and whitespace edges; one `set_authors` and one `add_book`
+  end-to-end pin asserting the row sort AND the recomputed book-level
+  author_sort together).
+
 ## v1.29.0 (2026-11-05)
 
 ### The Calibre 9.18 date-search vocabulary
