@@ -2359,6 +2359,28 @@ class TestAddBook(_WriteSideFixture, unittest.TestCase):
         # Queued for OPF regeneration like every other write.
         self.assertEqual(self._sql2("SELECT book FROM metadata_dirtied"), [(3,)])
 
+    def test_add_book_three_token_author_has_no_mid_comma(self):
+        # Issue #11 (the phase-2 import's report): the flip's assembly
+        # comma-joined every token ("Kemp, Paul, S.") where upstream
+        # spaces the given names behind the surname's comma; the row's
+        # sort AND the book's recomputed author_sort together.
+        with self._wdb() as wdb:
+            book_id = wdb.add_book("Target Book", ["Paul S. Kemp"])
+        self.assertEqual(book_id, 3)
+        self.assertEqual(
+            self._sql2("SELECT sort FROM authors WHERE name = 'Paul S. Kemp'"),
+            [("Kemp, Paul S.",)],
+        )
+        self.assertEqual(
+            self._sql2("SELECT author_sort FROM books WHERE id = 3"),
+            [("Kemp, Paul S.",)],
+        )
+        # The layout builders take the display form either way.
+        self.assertEqual(
+            self._sql2("SELECT path FROM books WHERE id = 3"),
+            [("Paul S. Kemp/Target Book (3)",)],
+        )
+
     def test_add_book_formats_placed_atomically_with_truthful_rows(self):
         source = self._epub(b"EXACT-PAYLOAD")
         with self._wdb() as wdb:
@@ -5658,6 +5680,21 @@ class TestAuthorCreationParity(unittest.TestCase):
         self.assertEqual(
             self._sql("SELECT name, sort FROM authors"),
             [("Ann Leckie", "Leckie, Ann")],
+        )
+
+    def test_three_token_new_author_spaces_the_given_names(self):
+        # Issue #11: the flip's assembly comma-joined every token
+        # ("Egremont, Carlton, III"); upstream writes the comma after the
+        # surname only and spaces the given names behind it.
+        with WritableCalibreDB(self.db_path) as wdb:
+            wdb.set_authors(1, ["Carlton Egremont III"])
+        self.assertEqual(
+            self._sql("SELECT name, sort FROM authors"),
+            [("Carlton Egremont III", "Egremont, Carlton III")],
+        )
+        self.assertEqual(
+            self._sql("SELECT author_sort FROM books WHERE id = 1"),
+            [("Egremont, Carlton III",)],
         )
 
     def test_comma_name_reuses_existing_piped_row(self):

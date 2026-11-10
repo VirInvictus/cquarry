@@ -418,10 +418,14 @@ def author_to_author_sort(author: str | None) -> str:
     comma sorts verbatim; otherwise the surname-prefixed tokens flip to
     the front ("Ann Leckie" -> "Leckie, Ann"), honoring the default
     prefixes/suffixes/copywords tables. Non-flippable authors (one token,
-    copywords like "Institute", all-prefix strings) sort verbatim. This
-    is what upstream applies when a NEW author row is created (1.26
-    adopts it there; the 1.25-and-earlier verbatim default was the
-    audit's D5 divergence).
+    copywords like "Institute", all-prefix strings) sort verbatim. The
+    flipped assembly puts the comma ONLY after the surname token and
+    single-spaces the rest ("Paul S. Kemp" -> "Kemp, Paul S.", suffixes
+    riding behind it: "Carlton Egremont III" -> "Egremont, Carlton III");
+    a lone usable token sorts as itself with its prefixes dropped ("Dr
+    Plato" -> "Plato"), like upstream. This is what upstream applies when
+    a NEW author row is created (1.26 adopts it there; the
+    1.25-and-earlier verbatim default was the audit's D5 divergence).
     """
     if not author:
         return ""
@@ -482,15 +486,18 @@ def author_to_author_sort(author: str | None) -> str:
         tokens[last - 1] += " " + tokens[last]
         last -= 1
 
+    # Upstream's assembly verbatim: the comma rides the surname token
+    # alone and the rest single-space joins; the token count that gates it
+    # is taken BEFORE the suffix joins (issue #11: a ", "-join of every
+    # token wrote "Kemp, Paul, S." where upstream writes "Kemp, Paul S.",
+    # and the old num_toks<2 verbatim return leaked prefixes like "Dr").
     atokens = tokens[last : last + 1] + tokens[first:last]
     num_toks = len(atokens)
     if suffix:
-        atokens = atokens + [suffix]
-        num_toks += 1
-    if num_toks < 2:
-        return author
-    res = ", ".join(atokens)
-    return res.removesuffix(",")
+        atokens.append(suffix)
+    if num_toks > 1:
+        atokens[0] += ","
+    return " ".join(atokens)
 
 
 def unpipe_author(name: str | None) -> str:

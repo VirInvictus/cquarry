@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from cquarry.helpers import (
+    author_to_author_sort,
     calibre_rating_to_stars,
     db_uri_ro,
     detect_series_gaps,
@@ -329,3 +330,75 @@ class TestIdentifierLink(unittest.TestCase):
         self.assertEqual(
             identifier_link("url", "https://a.example"), ("Link", "https://a.example")
         )
+
+
+class TestAuthorToAuthorSort(unittest.TestCase):
+    """author_to_author_sort: upstream's flip under the default tweaks.
+    Issue #11: the assembly used to comma-join every flipped token
+    ("Kemp, Paul, S."), where upstream puts the comma after the surname
+    token only and single-spaces the rest."""
+
+    def test_issue11_shapes_space_the_middle_tokens(self):
+        # The eight shapes from issue #11 with Calibre's own stored forms.
+        cases = [
+            ("Paul S. Kemp", "Kemp, Paul S."),
+            ("Erin M. Evans", "Evans, Erin M."),
+            ("Robert Lynn Asprin", "Asprin, Robert Lynn"),
+            ("Richard Lee Byers", "Byers, Richard Lee"),
+            ("A. K. Dewdney", "Dewdney, A. K."),
+            ("Gary William Flake", "Flake, Gary William"),
+            ("Clifford A. Reiter", "Reiter, Clifford A."),
+            ("Carlton Egremont III", "Egremont, Carlton III"),
+        ]
+        for name, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(author_to_author_sort(name), expected)
+
+    def test_suffixes_ride_behind_the_comma(self):
+        # The suffix tokens stay trailing, after the surname's comma.
+        self.assertEqual(
+            author_to_author_sort("Carlton Egremont III"), "Egremont, Carlton III"
+        )
+        self.assertEqual(author_to_author_sort("John Smith Jr."), "Smith, John Jr.")
+        self.assertEqual(
+            author_to_author_sort("John Q. Public Jr. Sr."), "Public, John Q. Jr. Sr."
+        )
+
+    def test_two_token_flips_unchanged(self):
+        self.assertEqual(author_to_author_sort("Ann Leckie"), "Leckie, Ann")
+        self.assertEqual(author_to_author_sort("Lynn Abbey"), "Abbey, Lynn")
+        self.assertEqual(author_to_author_sort("Timothy Zahn"), "Zahn, Timothy")
+
+    def test_comma_form_sorts_verbatim(self):
+        # Already-sorted inputs (incl. piped-adjacent comma spellings)
+        # never re-derive.
+        self.assertEqual(author_to_author_sort("Leckie, Ann"), "Leckie, Ann")
+        self.assertEqual(
+            author_to_author_sort("Stover, Matthew Woodring"),
+            "Stover, Matthew Woodring",
+        )
+
+    def test_lone_usable_token_drops_prefixes(self):
+        # With only one non-prefix token the flip has nothing to join;
+        # upstream sorts the bare token, prefixes dropped, suffix kept
+        # commaless (the pre-1.29.1 copy returned the original string and
+        # comma-joined the suffix).
+        self.assertEqual(author_to_author_sort("Dr Plato"), "Plato")
+        self.assertEqual(author_to_author_sort("Dr Plato Jr"), "Plato Jr")
+        self.assertEqual(author_to_author_sort("Plato"), "Plato")
+
+    def test_copywords_and_degenerate_inputs_sort_verbatim(self):
+        self.assertEqual(author_to_author_sort("Acme Inc."), "Acme Inc.")
+        self.assertEqual(
+            author_to_author_sort("Random House Publishing"), "Publishing, Random House"
+        )
+        self.assertEqual(author_to_author_sort(None), "")
+        self.assertEqual(author_to_author_sort(""), "")
+
+    def test_bracketed_text_dropped_before_the_flip(self):
+        self.assertEqual(
+            author_to_author_sort("Brandon (the Bold) LaRocque"), "LaRocque, Brandon"
+        )
+
+    def test_whitespace_runs_collapse_in_the_flip(self):
+        self.assertEqual(author_to_author_sort("  Paul   S.  Kemp  "), "Kemp, Paul S.")
