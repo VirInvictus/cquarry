@@ -864,6 +864,35 @@ regression tests; the one parity gap shipped same day as v1.29.0.
   (content-server per-library restrictions) and `f1e441bd32` (calibredb
   remote-template guard) are server/CLI surface cquarry does not mirror.
 
+## The author_sort flip assembly (2026-11-09, issue #11)
+
+A phase-2 verb import (CalibreQuarry 3.84.1 over cquarry 1.29.0) stored
+"Kemp, Paul, S."-shaped sorts on every three-token author: the v1.26 port
+of upstream's `author_to_author_sort` flip (`e47a2a4`, the D5 audit fix)
+transcribed the token discovery faithfully but joined the flipped tokens
+with `", "` instead of upstream's comma-on-the-surname-only space join.
+Two-token names were unaffected -- with exactly two tokens the two
+joiners coincide -- which is why the whole suite and the live library
+never caught it; a batch of three-token names did. Ground truth came
+from the reference clone before anything was written: a golden-reference
+harness exec'd upstream's own function with stubbed default tweaks and
+diffed it against cquarry over a 30-input corpus (the eight issue shapes
+plus suffix/prefix/copyword/lone-token/bracketed/whitespace edges),
+which pinned THREE divergences, not one: the comma join; the
+`num_toks < 2` verbatim return, where upstream returns the bare token
+with prefixes dropped ("Dr Plato" -> "Plato"); and the suffix-comma
+edge ("Dr Plato Jr" -> upstream "Plato Jr", old copy "Plato, Jr" --
+the comma gate counts tokens BEFORE the suffix joins). The fix replaces
+the assembly tail with upstream's exact shape; the re-run harness
+reports zero disagreements. Row reuse keeps stored sorts by design (the
+hand-tuned-sort guarantee), so bad rows written by 1.26-1.29.0 need one
+`set_author_sort_name(display_name, proper_sort)` call each -- the heal
+the issue itself used; nothing converges them automatically. Suite
+716 -> 726 (the eight shapes as direct helper tests, plus the edge
+family, plus a `set_authors` and an `add_book` end-to-end pin
+asserting the row sort and the recomputed book-level `author_sort`
+together).
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
 - [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference
