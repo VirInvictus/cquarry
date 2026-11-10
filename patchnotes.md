@@ -30,6 +30,9 @@ shape hid until a phase-2 import batch of three-token authors hit it.
   bracketed, and whitespace edges; one `set_authors` and one `add_book`
   end-to-end pin asserting the row sort AND the recomputed book-level
   author_sort together).
+- Also riding the tag: CI now gates Python 3.15 alongside 3.14 (the dev
+  machine moved to Fedora 45 / Python 3.15; the suite is verified green
+  on both, commit `08b7a60`).
 
 ## v1.29.0 (2026-11-05)
 
