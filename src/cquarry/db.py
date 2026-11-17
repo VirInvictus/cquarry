@@ -1845,12 +1845,15 @@ class CalibreDB:
         name = (name or "").strip()
         if not name:
             return set()
+        # authors/tags/languages are native lists; series/publisher are
+        # scalar strings on the hydrated rows -- and the publisher row key
+        # is singular where the kind is plural (_BOOK_SELECT projects
+        # ``p.name as publisher``), so the kind never indexes the row.
+        row_key = "publisher" if kind == "publishers" else kind
         low = name.lower()
         out: set[int] = set()
         for b in self.get_all_books():
-            # authors/tags/languages are native lists; series/publisher are
-            # scalar strings on the hydrated rows.
-            values = b.get(kind) or []
+            values = b.get(row_key) or []
             if isinstance(values, str):
                 values = [values]
             if kind == "tags":

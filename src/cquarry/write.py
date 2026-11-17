@@ -1830,9 +1830,15 @@ class WritableCalibreDB:
     def set_series(
         self, book_id: int, name: str | None, index: float | None = None
     ) -> bool:
-        """Assign (or clear, with ``name=None``) the book's series.
+        """Assign (or clear, with ``name=None`` or an empty/whitespace-only
+        string) the book's series.
 
-        Returns True when stored state changed. ``index`` defaults to 1.0 on a
+        Returns True when stored state changed. The name is normalized like
+        upstream's ``single_text`` adapter (>= 1.29.2): ends stripped and
+        breaking-whitespace runs collapsed (the three non-breaking spaces
+        preserved), and an empty result clears -- it used to reach the row
+        resolver verbatim and INSERT a ghost row with an empty name.
+        ``index`` defaults to 1.0 on a
         fresh assignment; clearing deletes the link and resets
         ``books.series_index`` to 1.0 -- the column is NOT NULL in real
         libraries (``REAL NOT NULL DEFAULT 1.0``) and Calibre's state for a
@@ -1843,6 +1849,9 @@ class WritableCalibreDB:
         book; indexes are untouched by a re-case, exactly like an in-place
         ``rename_entity``.
         """
+        name = _normalize_ws(name) if name is not None else None
+        if not name:
+            name = None
         self._begin()
         try:
             self._require_book(book_id)
@@ -1959,9 +1968,15 @@ class WritableCalibreDB:
             raise
 
     def set_publisher(self, book_id: int, name: str | None) -> bool:
-        """Replace (or clear, with ``name=None``) the book's publisher.
+        """Replace (or clear, with ``name=None`` or an empty/whitespace-only
+        string) the book's publisher.
 
-        Returns True when stored state changed; orphaned publisher rows are
+        Returns True when stored state changed; the name is normalized like
+        upstream's ``single_text`` adapter (>= 1.29.2): ends stripped and
+        breaking-whitespace runs collapsed (the three non-breaking spaces
+        preserved), and an empty result clears -- it used to reach the row
+        resolver verbatim and INSERT a ghost row with an empty name.
+        Orphaned publisher rows are
         pruned. Since 1.28 a name matching an existing row only by case
         re-cases the shared row to the requested spelling (upstream's
         ``allow_case_change=True`` write default) and touches every book
@@ -1969,6 +1984,9 @@ class WritableCalibreDB:
         ``Daw Books`` row is a real consolidation, not a silent no-op
         (issue #6).
         """
+        name = _normalize_ws(name) if name is not None else None
+        if not name:
+            name = None
         self._begin()
         try:
             self._require_book(book_id)
@@ -2809,18 +2827,23 @@ class WritableCalibreDB:
         processes its queues. The writes join the caller's transaction, so
         a batch rollback undoes them. ``needs_scan`` is skipped on schemas
         predating ``books_pages_link``.
+
+        Since 1.29.2 the pages rescan flips BEFORE the sidecar gate: page
+        scanning is independent of the content index (remove_format already
+        queued it unconditionally), so a missing or unattachable sidecar
+        degrades only the extraction queue to a no-op, never the rescan.
         """
+        with contextlib.suppress(sqlite3.OperationalError):
+            self.conn.execute(
+                "UPDATE books_pages_link SET needs_scan = 1 WHERE book = ?",
+                (book_id,),
+            )
         if not self._ensure_fts_attached():
             return
         self.conn.execute(
             "INSERT OR IGNORE INTO fts_db.dirtied_formats(book, format) VALUES (?, ?)",
             (book_id, fmt.upper()),
         )
-        with contextlib.suppress(sqlite3.OperationalError):
-            self.conn.execute(
-                "UPDATE books_pages_link SET needs_scan = 1 WHERE book = ?",
-                (book_id,),
-            )
 
     def _clear_fts_dirty(self, book_id: int, fmt: str) -> None:
         """Drop the (book, format) FTS queue entry alongside a removal, so
@@ -3043,9 +3066,10 @@ class WritableCalibreDB:
         This is the row half of swapping a repaired file into place: the
         file itself stays the caller's atomic-replace job (Calibre's layout
         never changes for a same-format swap), and this only keeps ``data``
-        truthful. The replacement is queued for FTS re-extraction and a
-        pages rescan when the sidecar exists, so Calibre's content index
-        and page counts follow the repaired file. Raises ValueError on a
+        truthful. The replacement is queued for FTS re-extraction (when the
+        sidecar exists) and a pages rescan (always, since 1.29.2), so
+        Calibre's content index and page counts follow the repaired file.
+        Raises ValueError on a
         negative size, an empty fmt/name, or a name carrying the format's
         extension, exactly like :meth:`add_format`.
         """

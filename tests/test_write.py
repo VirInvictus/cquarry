@@ -1419,6 +1419,36 @@ class _WriteSideTests:
             self._sql2("SELECT COUNT(*) FROM publishers"), [(0,)]
         )  # orphan pruned
 
+    def test_set_series_and_publisher_empty_strings_clear(self):
+        # 1.29.2 (issue #15): upstream's single_text adapter turns an
+        # empty/whitespace-only value into None -- clearing the link, never
+        # INSERTing a ghost entity row with an empty name.
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_series(1, "Imperial Radch", 2))
+            self.assertTrue(wdb.set_publisher(1, "Orbit"))
+            self.assertTrue(wdb.set_series(1, "  "))
+            self.assertTrue(wdb.set_publisher(1, ""))
+            self.assertFalse(wdb.set_series(1, None))  # already cleared
+            self.assertFalse(wdb.set_publisher(1, " \t "))  # already cleared
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM series"), [(0,)])
+        self.assertEqual(self._sql2("SELECT COUNT(*) FROM publishers"), [(0,)])
+        self.assertEqual(
+            self._sql2("SELECT series_index FROM books WHERE id=1"), [(1.0,)]
+        )
+
+    def test_set_series_and_publisher_collapse_whitespace_runs(self):
+        # The same adapter's normalize half (upstream normalize_whitespace):
+        # interior breaking-whitespace runs collapse; the non-breaking
+        # spaces are preserved.
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_series(1, "Imperial \t Radch"))
+            self.assertTrue(wdb.set_publisher(1, "Daw \n Books"))
+        self.assertEqual(self._sql2("SELECT name FROM series"), [("Imperial Radch",)])
+        self.assertEqual(self._sql2("SELECT name FROM publishers"), [("Daw Books",)])
+        with self._wdb() as wdb:
+            self.assertTrue(wdb.set_publisher(1, "Daw\u00a0Books"))
+        self.assertEqual(self._sql2("SELECT name FROM publishers"), [("Daw\xa0Books",)])
+
     def test_set_rating_dedups_unique_rows(self):
         with self._wdb() as wdb:
             self.assertTrue(wdb.set_rating(1, 4))
@@ -3325,7 +3355,11 @@ class TestFtsDirtying(unittest.TestCase):
         fts.close()
         self.assertEqual(self._pages(), 0)
 
-    def test_no_sidecar_degrades_to_noop(self):
+    def test_no_sidecar_degrades_queue_but_still_queues_pages_rescan(self):
+        # 1.29.2 (issue #14): the pages rescan is independent of the FTS
+        # sidecar -- without full-text-search.db the extraction queue
+        # degrades to a no-op, but needs_scan must still flip (it used to
+        # ride behind the FTS-attach gate and silently never happened).
         os.remove(os.path.join(self.temp_dir, "full-text-search.db"))
         with WritableCalibreDB(self.db_path) as wdb:
             self.assertTrue(wdb.set_format(1, "EPUB", "One - X", 42))
@@ -3335,8 +3369,20 @@ class TestFtsDirtying(unittest.TestCase):
                 conn.execute("SELECT COUNT(*) FROM data WHERE book = 1").fetchone()[0],
                 1,
             )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT needs_scan FROM books_pages_link WHERE book = 1"
+                ).fetchone()[0],
+                1,
+            )
         finally:
             conn.close()
+
+    def test_add_format_without_sidecar_still_queues_pages_rescan(self):
+        os.remove(os.path.join(self.temp_dir, "full-text-search.db"))
+        with WritableCalibreDB(self.db_path) as wdb:
+            self.assertTrue(wdb.add_format(1, "MOBI", "One - X", 5))
+        self.assertEqual(self._pages(), 1)
 
 
 class TestEntityRename(_WriteSideFixture, unittest.TestCase):

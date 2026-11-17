@@ -2200,6 +2200,12 @@ class TestResidueReads(TestCalibreDB):
             "INSERT INTO series (id, name, sort) VALUES (1, 'Wing Series', 'Wing Series')"
         )
         self.conn.execute("INSERT INTO books_series_link (book, series) VALUES (2, 1)")
+        self.conn.execute(
+            "INSERT INTO publishers (id, name, sort) VALUES (1, 'Small Press', 'Small Press')"
+        )
+        self.conn.execute(
+            "INSERT INTO books_publishers_link (book, publisher) VALUES (1, 1)"
+        )
         self.conn.commit()
         self.db = CalibreDB(self.db_path)
 
@@ -2231,6 +2237,12 @@ class TestResidueReads(TestCalibreDB):
         self.assertEqual(self.db.get_entity_book_ids("authors", "author"), {1, 2})
         self.assertEqual(self.db.get_entity_book_ids("series", "wing series"), {2})
         self.assertEqual(self.db.get_entity_book_ids("publishers", "Nobody"), set())
+        # The publisher row key is singular on the hydrated rows
+        # (_BOOK_SELECT projects ``p.name as publisher``); the plural kind
+        # used to miss every book (issue #13). Case-insensitive, like the
+        # other kinds.
+        self.assertEqual(self.db.get_entity_book_ids("publishers", "Small Press"), {1})
+        self.assertEqual(self.db.get_entity_book_ids("publishers", "small press"), {1})
         with self.assertRaises(ValueError):
             self.db.get_entity_book_ids("ratings", "4")
         with self.assertRaises(ValueError):
