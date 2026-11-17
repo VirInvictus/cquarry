@@ -1,3 +1,43 @@
+## v1.29.2 (2026-11-16)
+
+### The audit-fix wave (issues #12-#15)
+
+Four open issues from two audit passes over 1.29.1, one patch release.
+
+- **`get_entity_book_ids("publishers", ...)` works (#13).** The verb
+  indexed the hydrated rows by the plural kind while `_BOOK_SELECT`
+  projects the column as `publisher` (singular), so every real
+  publisher resolved to an empty set. The kind now maps to its row key;
+  the masking negative-only test gained a real-hit pin.
+- **Format writes queue the pages rescan without an FTS sidecar (#14).**
+  `_mark_fts_dirty` gated its whole body behind the sidecar attach, so
+  libraries without `full-text-search.db` never got the
+  `books_pages_link.needs_scan` flip -- page scanning is independent of
+  the content index, and `remove_format` already queued its rescan
+  unconditionally. The rescan flips before the sidecar gate now; only
+  the extraction queue degrades to a no-op without the sidecar.
+- **`set_series`/`set_publisher` clear on empty/whitespace names
+  (#15).** An empty string used to reach the row resolver verbatim and
+  INSERT a ghost entity row with an empty name. Upstream routes both
+  fields through `single_text` (empty-to-None, then whitespace
+  normalization), so cquarry mirrors the adapter via `_normalize_ws`:
+  an empty/whitespace-only name clears the link (pruning the orphan,
+  resetting `series_index` to 1.0 for series), and breaking-whitespace
+  runs collapse with the three non-breaking spaces preserved, matching
+  the custom-column writers' 1.26.2/1.28.1 shape. Callers that already
+  passed `None` see no change.
+- **Spec truth: the `fnmatch` claim dropped (#12).** The disk check
+  matches exact names and extensions, not globs; the stdlib-purity
+  sentence predated that narrowing. The no-external-dependencies claim
+  itself re-verified clean.
+- 726 -> 729 tests (three new: the empty-clear and whitespace-collapse
+  setter shapes plus the sidecar-less `add_format` rescan; the
+  no-sidecar `set_format` and publishers tests strengthened, all
+  verified red against the unfixed tree and green with the fixes).
+- Also riding the tag: a one-line AGENTS.md pointer to the workspace
+  CLI machine-surface contract (contributor docs only, `0fe14eb`,
+  2026-11-13).
+
 ## v1.29.1 (2026-11-09)
 
 ### The author_sort flip assembly (issue #11)
