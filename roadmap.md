@@ -893,6 +893,57 @@ family, plus a `set_authors` and an `add_book` end-to-end pin
 asserting the row sort and the recomputed book-level `author_sort`
 together).
 
+## The audit-fix wave (2026-11-16, issues #12-#15)
+
+Four open issues from two audit passes over 1.29.1 (the 2026-11-13
+weekend audit filed #12; the 2026-11-16 deep codebase audit filed
+#13-#15), all shipped in one patch release.
+
+- **`get_entity_book_ids("publishers", ...)` was permanently empty
+  (#13, read side).** `_BOOK_SELECT` projects the publisher column as
+  `p.name as publisher` (singular), but the lookup indexed the hydrated
+  rows by the plural kind, so `b.get("publishers")` was None for every
+  book and the verb returned an empty set for every real publisher. The
+  masking test had only ever asserted the negative case ("Nobody").
+  Fixed with a kind-to-row-key map; the test now pins a real hit
+  (case-insensitive) alongside the negative one.
+- **Format writes skipped the pages rescan without an FTS sidecar
+  (#14, write side).** `_mark_fts_dirty` gated the whole body behind
+  `_ensure_fts_attached`, so in a library with no
+  `full-text-search.db` the `books_pages_link.needs_scan` flip never
+  happened -- but page scanning is independent of the content index,
+  and `remove_format` already queued its rescan unconditionally. The
+  rescan now flips BEFORE the sidecar gate; only the extraction queue
+  degrades to a no-op. The masking test (`test_no_sidecar_degrades_to_noop`)
+  asserted only that the write succeeded; it now pins the flag.
+- **`set_series`/`set_publisher` INSERTed ghost rows on empty names
+  (#15, write side).** `name.strip()` reached `_resolve_or_create`
+  verbatim when the name was not None, so `set_publisher(id, "")`
+  created and linked an empty-named entity row. Upstream routes both
+  fields through `single_text` (clone-verified: `dt == 'series'` and
+  single-valued `dt == 'text'` both take it; its `long_text` half is
+  `strip(); return x or None`), so upstream CLEARS the link on an
+  empty value and never stores an empty-named row. cquarry now mirrors
+  the full adapter through `_normalize_ws`: empty/whitespace-only
+  clears, and breaking-whitespace runs collapse with the three
+  non-breaking spaces preserved -- the same shape the custom-column
+  writers have had since 1.26.2/1.28.1. `rename_entity` already raised
+  on empty names, so the hole was specific to these two setters.
+- **Spec truth: the fnmatch claim (#12, docs).** The stdlib-purity
+  sentence still enumerated `fnmatch` for the disk-check ignore
+  patterns; the disk check matches exact names and extensions (the
+  narrowing is recorded in `check_library_disk`'s own docstring). The
+  clause is dropped. The purity claim itself re-verified clean.
+
+Suite 726 -> 729 (three new tests; two masking tests strengthened, all
+verified red against the unfixed tree and green with the fixes).
+No consumer owes a code change: the one downstream `get_entity_book_ids`
+call site (Carrel-calibre-web `cps/helper.py:1013`) asks for the
+`series` kind, which was never broken, and CalibreQuarry's
+`op_set_series`/`op_set_publisher` wrappers pass through to the fixed
+setters with no client-side adjustment (the floor issue records the
+bump).
+
 ## Logged hardening candidates (unchanged; trigger-gated, not program phases)
 
 - [ ] **Snapshot-retry hardening** (logged 2026-09-18, Calibre 9.15 watch; reference
